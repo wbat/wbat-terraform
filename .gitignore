@@ -1,0 +1,21 @@
+# Credentials in git is bad.
+credentials.auto.tfvars
+
+# No need for this in git
+.terraform
+
+# We don't ever want to commit terraform state files to git
+# They should be in S3
+terraform.tfstate*
+
+# So we can write markdown for PRs in a branch as we work
+PR.md
+
+# So we can have local plans and not commit them to git by mistake
+*.plan
+
+# Ignore IDE settings
+.idea
+.nova
+
+venv
