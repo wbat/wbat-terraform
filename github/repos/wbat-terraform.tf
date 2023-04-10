@@ -25,8 +25,19 @@ resource "github_branch_protection" "wbat-terraform-main" {
   }
 
   required_status_checks {
-    contexts = []
-    strict   = true
+    contexts = [
+      # TFC
+      "Terraform Cloud/WBAT/wbat-terraform-aws",
+      "Terraform Cloud/WBAT/wbat-terraform-github",
+      "Terraform Cloud/WBAT/wbat-terraform-tfc",
+
+      # Github Actions
+      "Format (~1.4.4)",
+      "Validate (~1.4.4, aws)",
+      "Validate (~1.4.4, github)",
+      "Validate (~1.4.4, tfc)",
+    ]
+    strict = true
   }
 }
 
