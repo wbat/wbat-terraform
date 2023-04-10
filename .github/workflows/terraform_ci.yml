@@ -1,0 +1,57 @@
+name: Terraform CI
+
+on: pull_request
+
+jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        terraform_version:
+          - "~1.4.4"
+    steps:
+    - uses: actions/checkout@v2
+    - uses: hashicorp/setup-terraform@v1
+      with:
+        terraform_version: ${{ matrix.terraform_version }}
+
+    - name: Terraform fmt
+      id: fmt
+      run: terraform fmt -recursive -check
+      working-directory: ./
+
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        terraform_version:
+          - "~1.4.4"
+        workspaces:
+          - aws
+          - github
+          - tfc
+    steps:
+    - uses: actions/checkout@v2
+
+    - uses: hashicorp/setup-terraform@v1
+      with:
+        terraform_version: ${{ matrix.terraform_version }}
+        cli_config_credentials_hostname: app.terraform.io
+        cli_config_credentials_token: ${{ secrets.TFC_API_TOKEN }}
+
+    - name: Terraform init
+      id: init
+      run: terraform init
+      working-directory: ./${{ matrix.workspaces }}
+      env:
+        GIT_SSH_COMMAND: "echo '${{ secrets.GH_SSH_PRIVATE_KEY }}' > id_rsa
+          && ssh-keyscan github.com > known_hosts
+          && chmod 600 id_rsa known_hosts
+          && ssh -i ./id_rsa -o UserKnownHostsFile=./known_hosts"
+
+    - name: Terraform Validate
+      id: validate
+      run: terraform validate -no-color
+      working-directory: ./${{ matrix.workspaces }}
