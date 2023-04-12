@@ -29,7 +29,7 @@ ASSUME_ROLE_POLICY
   }
 
   tags = merge(
-    local.tags,
+    var.core_tags,
     {
       "scm:file" = "aws/global/iam/role-TerraformCloud.tf",
     },
