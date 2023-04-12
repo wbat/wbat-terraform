@@ -9,7 +9,7 @@ resource "aws_iam_user" "TerraformCloud" {
   force_destroy = false
 
   tags = merge(
-    local.tags,
+    var.core_tags,
     {
       "scm:file"             = "aws/global/iam/user-TerraformCloud.tf",
       "AKIA2JXXAQV2R2D3CCEP" = "TerraformCloud Access"
