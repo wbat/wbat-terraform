@@ -4,6 +4,10 @@ locals {
 
   terraform_cloud_external_id = "7843003F-57C4-46D2-BAFD-1880507A01C7"
 
+  primary_instance_type   = "t3a.small"
+  secondary_instance_type = "t3a.micro"
+
+
   tags = {
     "scm:repo"    = "wbat/wbat-terraform"
     "management"  = "terraform"
