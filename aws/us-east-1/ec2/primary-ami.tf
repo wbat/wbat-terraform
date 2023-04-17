@@ -11,7 +11,6 @@ resource "aws_ami" "primary" {
   ebs_block_device {
     delete_on_termination = true
     device_name           = "/dev/sda1"
-    encrypted             = data.aws_ebs_snapshot.primary.encrypted
     iops                  = 3000
     snapshot_id           = data.aws_ebs_snapshot.primary.id
     throughput            = 125
