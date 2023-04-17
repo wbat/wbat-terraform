@@ -45,5 +45,10 @@ module "global" {
 module "us-east-1" {
   source = "./us-east-1"
 
+  primary_instance_type   = local.primary_instance_type
+  secondary_instance_type = local.secondary_instance_type
+
+  instance_profile-WBAT_Main_Server = module.global.instance_profile-WBAT_Main_Server
+
   core_tags = local.tags
 }

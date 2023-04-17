@@ -13,7 +13,7 @@ data "aws_ebs_snapshot" "primary" {
 
   filter {
     name   = "tag:Name"
-    values = ["Primary"]
+    values = ["WBAT Primary Server*"]
   }
 }
 
@@ -28,6 +28,14 @@ data "aws_ebs_snapshot" "secondary" {
 
   filter {
     name   = "tag:Name"
-    values = ["Secondary"]
+    values = ["WBAT Secondary Server*"]
   }
+}
+
+data "aws_security_group" "default" {
+  id = "sg-0e674f4e2937c6392"
+}
+
+data "aws_subnet" "selected" {
+  id = "subnet-0cd389d67c7cee3af"
 }
