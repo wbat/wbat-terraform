@@ -9,3 +9,11 @@
 # * Copy this file to credentials.auto.tfvars
 # * Change each line so that it follows a `key = "value"` format instead of `variable "aws_access_key" {}`
 #
+
+######################################################
+# Email Address
+#
+######################################################
+variable "email_address" {
+  sensitive = true
+}
