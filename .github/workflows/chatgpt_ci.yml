@@ -4,6 +4,7 @@ on: pull_request
 
 jobs:
   test:
+    name: ChatGPT explain code
     runs-on: ubuntu-latest
     steps:
       - name: ChatGPT explain code
