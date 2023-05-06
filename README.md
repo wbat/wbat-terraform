@@ -1,11 +1,13 @@
 # WBAT Terraform
 
+[![Terraform](https://img.shields.io/badge/Terraform-v1.4.4-green)](https://www.terraform.io/)
 [![terraform_ci](https://github.com/wbat/wbat-terraform/actions/workflows/terraform_ci.yml/badge.svg)](https://github.com/wbat/wbat-terraform/actions/workflows/terraform_ci.yml)
-![Terraform](https://img.shields.io/badge/Terraform-v1.4.4-green)
+[![GitHub branches](https://badgen.net/github/branches/wbat/wbat-terraform)](https://github.com/wbat/wbat-terraform/branches)
+[![Commits](https://badgen.net/github/commits/wbat/wbat-terraform/main?icon=github)](https://github.com/wbat/wbat-terraform/commits/main)
+[![Last Commit](https://badgen.net/github/last-commit/wbat/wbat-terraform/main?icon=github)](https://github.com/wbat/wbat-terraform/commits/main)
 [![Maintenance](https://img.shields.io/badge/Maintained%3F-yes-green.svg)](https://github.com/wbat/wbat-terraform/graphs/commit-activity)
 [![Maintainer](https://img.shields.io/badge/maintainer-@WBAT-blue)](https://github.com/wbat/)
 [![GitHub license](https://badgen.net/github/license/wbat/wbat-terraform)](https://github.com/wbat/wbat-terraform/blob/master/LICENSE)
-[![GitHub branches](https://badgen.net/github/branches/wbat/wbat-terraform)](https://github.com/wbat/wbat-terraform/)
 
 ## Getting Started
 
