@@ -9,6 +9,14 @@ resource "github_repository" "wbat-terraform" {
   has_projects         = true
   vulnerability_alerts = true
 
+  topics = [
+    "aws",
+    "hcl",
+    "terraform",
+    "terraform-aws",
+    "terraform-cloud",
+    "terraform-github",
+  ]
 }
 
 # Manage branch protection
