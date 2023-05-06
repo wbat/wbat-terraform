@@ -1,7 +1,7 @@
 # WBAT Terraform
 
 [![terraform_ci](https://github.com/wbat/wbat-terraform/actions/workflows/terraform_ci.yml/badge.svg)](https://github.com/wbat/wbat-terraform/actions/workflows/terraform_ci.yml)
-![Terraform](https://img.shields.io/badge/terraform-%235835CC.svg?style=for-the-badge&logo=terraform&logoColor=white)
+![Terraform](https://img.shields.io/badge/Terraform-v1.4.4-green)
 [![Maintenance](https://img.shields.io/badge/Maintained%3F-yes-green.svg)](https://github.com/wbat/wbat-terraform/graphs/commit-activity)
 [![Maintainer](https://img.shields.io/badge/maintainer-@WBAT-blue)](https://github.com/wbat/)
 [![GitHub license](https://badgen.net/github/license/wbat/wbat-terraform)](https://github.com/wbat/wbat-terraform/blob/master/LICENSE)
