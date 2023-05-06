@@ -9,6 +9,16 @@ resource "github_repository" "iTerm2-Git-Status-Bar" {
   has_projects         = true
   vulnerability_alerts = true
 
+  topics = [
+    "bash",
+    "iterm",
+    "iterm2",
+    "iterm2-component",
+    "iterm2-status",
+    "iterm2-statusbar",
+    "statusbar",
+  ]
+
 }
 
 # Manage branch protection
