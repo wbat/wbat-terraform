@@ -40,10 +40,10 @@ resource "github_branch_protection" "wbat-terraform-main" {
       "Terraform Cloud/WBAT/wbat-terraform-tfc",
 
       # Github Actions
-      "Format (~1.4.4)",
-      "Validate (~1.4.4, aws)",
-      "Validate (~1.4.4, github)",
-      "Validate (~1.4.4, tfc)",
+      "Format (~1.7.2)",
+      "Validate (~1.7.2, aws)",
+      "Validate (~1.7.2, github)",
+      "Validate (~1.7.2, tfc)",
       "ChatGPT explain code"
     ]
     strict = true
