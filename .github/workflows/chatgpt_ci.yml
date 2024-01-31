@@ -8,12 +8,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: ChatGPT explain code
-        uses: anc95/ChatGPT-CodeReview@main
-        env:
-          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          # Optional
-          LANGUAGE: English
-          MODEL: 'gpt-3.5-turbo'
-          top_p: 1
-          temperature: 1
+        uses: cirolini/chatgpt-github-actions@v1.3
+        with:
+          openai_api_key: ${{ secrets.OPENAI_API_KEY  }}
+          github_token: ${{ secrets.GH_TOKEN }}
+          github_pr_id: ${{ github.event.number }}
+          openai_engine: "gpt-3.5-turbo"
+          openai_temperature: 1
+          openai_max_tokens: 2048
+          mode: file
