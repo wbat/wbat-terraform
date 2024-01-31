@@ -4,7 +4,6 @@ resource "tfe_workspace" "aws" {
   organization = tfe_organization.wbat.id
 
   auto_apply            = false
-  execution_mode        = "remote"
   queue_all_runs        = false
   global_remote_state   = true
   terraform_version     = "1.7.2"
@@ -20,4 +19,9 @@ resource "tfe_workspace" "aws" {
   }
 
   structured_run_output_enabled = true
+}
+
+resource "tfe_workspace_settings" "aws" {
+  workspace_id   = tfe_workspace.aws.id
+  execution_mode = "remote"
 }
