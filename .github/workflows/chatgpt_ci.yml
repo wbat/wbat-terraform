@@ -13,7 +13,7 @@ jobs:
           openai_api_key: ${{ secrets.OPENAI_API_KEY  }}
           github_token: ${{ secrets.GH_TOKEN }}
           github_pr_id: ${{ github.event.number }}
-          openai_engine: "gpt-3.5-turbo"
+          openai_engine: "text-davinci-002"
           openai_temperature: 1
           openai_max_tokens: 2048
           mode: files
