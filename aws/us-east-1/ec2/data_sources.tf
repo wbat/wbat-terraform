@@ -13,7 +13,7 @@ data "aws_ebs_snapshot" "primary" {
 
   filter {
     name   = "tag:Name"
-    values = ["WBAT Primary Server*"]
+    values = ["WBAT Primary Server - First"]
   }
 }
 
@@ -28,7 +28,7 @@ data "aws_ebs_snapshot" "secondary" {
 
   filter {
     name   = "tag:Name"
-    values = ["WBAT Secondary Server*"]
+    values = ["WBAT Secondary Server - First"]
   }
 }
 
