@@ -16,4 +16,4 @@ jobs:
           openai_engine: "davinci-002"
           openai_temperature: 1
           openai_max_tokens: 2048
-          mode: files
+          mode: patch
