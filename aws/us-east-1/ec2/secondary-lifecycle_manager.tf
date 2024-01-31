@@ -19,7 +19,7 @@ resource "aws_dlm_lifecycle_policy" "secondary" {
       }
 
       retain_rule {
-        count = 12
+        count = 6
       }
 
       tags_to_add = {
