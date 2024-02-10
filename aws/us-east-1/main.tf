@@ -16,6 +16,12 @@ module "kms" {
   core_tags = var.core_tags
 }
 
+module "sg" {
+  source = "./sg"
+
+  core_tags = var.core_tags
+}
+
 module "vpc" {
   source = "./vpc"
 
