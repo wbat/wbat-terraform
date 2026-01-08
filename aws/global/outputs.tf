@@ -19,8 +19,8 @@ output "acm_validation_records" {
   description = "Add these CNAME records to BIND for certificate validation (keep permanently for auto-renewal)"
 }
 
-# Route53 outputs
+# Origin info
 output "origin_fqdn" {
-  value       = module.route53.origin_fqdn
-  description = "Origin FQDN for CloudFront (origin.aws.tellerstech.com)"
+  value       = "origin.tellerstech.com"
+  description = "Origin FQDN for CloudFront (managed in BIND)"
 }

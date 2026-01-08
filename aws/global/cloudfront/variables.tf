@@ -1,8 +1,9 @@
 variable "core_tags" {}
 
 variable "origin_fqdn" {
-  description = "FQDN of the origin server (origin.aws.tellerstech.com)"
+  description = "FQDN of the origin server"
   type        = string
+  default     = "origin.tellerstech.com"
 }
 
 variable "acm_certificate_arn" {
