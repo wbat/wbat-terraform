@@ -6,8 +6,8 @@ resource "aws_cloudfront_cache_policy" "wordpress" {
   name        = "WordPress-CachePolicy"
   comment     = "Cache policy for WordPress - bypasses cache when session cookies present"
   min_ttl     = 0
-  default_ttl = 86400    # 1 day
-  max_ttl     = 31536000 # 1 year
+  default_ttl = 7200  # 2 hours
+  max_ttl     = 86400 # 1 day
 
   parameters_in_cache_key_and_forwarded_to_origin {
     cookies_config {
@@ -22,10 +22,7 @@ resource "aws_cloudfront_cache_policy" "wordpress" {
     }
 
     headers_config {
-      header_behavior = "whitelist"
-      headers {
-        items = ["Host"]
-      }
+      header_behavior = "none"
     }
 
     query_strings_config {
@@ -77,7 +74,6 @@ resource "aws_cloudfront_origin_request_policy" "wordpress" {
     header_behavior = "whitelist"
     headers {
       items = [
-        "Host",
         "CloudFront-Forwarded-Proto",
         "CloudFront-Is-Desktop-Viewer",
         "CloudFront-Is-Mobile-Viewer",
