@@ -13,11 +13,12 @@
 ######################################################
 # TFE
 #
-# TFE Token is stored in 1password Devop's vault/TFE Prod Api Token
+# TFE Token is stored in Enpass DevOps vault/TFE Prod Api Token
 #
 ######################################################
 variable "tfc_token" {
-  sensitive = true
+  sensitive   = true
+  description = "Terraform Cloud API token (stored in Enpass DevOps vault)"
 }
 
 ######################################################
@@ -25,5 +26,17 @@ variable "tfc_token" {
 #
 ######################################################
 variable "email_address" {
-  sensitive = true
+  sensitive   = true
+  description = "Email address for notifications and billing"
+}
+
+######################################################
+# CloudFront Origin Secret
+#
+# Used to verify requests to origin come from CloudFront
+######################################################
+variable "cloudfront_origin_secret" {
+  sensitive   = true
+  description = "Secret header value for CloudFront origin verification"
+  default     = ""
 }
