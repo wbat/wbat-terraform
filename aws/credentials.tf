@@ -15,6 +15,17 @@
 #
 ######################################################
 variable "email_address" {
-  sensitive = true
-  default   = ""
+  sensitive   = true
+  description = "Email address for notifications and billing"
+  default     = ""
+}
+
+######################################################
+# CloudFront Origin Secret
+#
+######################################################
+variable "cloudfront_origin_secret" {
+  sensitive   = true
+  description = "Secret header value for CloudFront origin verification"
+  default     = ""
 }
