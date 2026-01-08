@@ -9,6 +9,11 @@
 # then remove the resource and apply again.
 ######################################################
 
+import {
+  to = aws_cloudfront_distribution.cdn_legacy
+  id = "E1BJFU3JD7PL7F"
+}
+
 resource "aws_cloudfront_distribution" "cdn_legacy" {
   enabled         = true
   is_ipv6_enabled = true
