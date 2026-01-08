@@ -221,6 +221,18 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AWS Managed AllViewer
   }
 
+  # Sitemaps - no caching (must be fresh for search engines)
+  ordered_cache_behavior {
+    path_pattern             = "*.xml"
+    allowed_methods          = ["GET", "HEAD"]
+    cached_methods           = ["GET", "HEAD"]
+    target_origin_id         = "wordpress-origin"
+    viewer_protocol_policy   = "redirect-to-https"
+    compress                 = true
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
+    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AWS Managed AllViewer
+  }
+
   # Static assets - long cache TTL
   ordered_cache_behavior {
     path_pattern               = "/wp-content/*"
