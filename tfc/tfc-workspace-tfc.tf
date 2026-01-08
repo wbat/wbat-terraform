@@ -3,7 +3,7 @@ resource "tfe_workspace" "tfc" {
   description  = "WBAT's Terraform Cloud Workspace"
   organization = tfe_organization.wbat.id
 
-  auto_apply     = true
+  auto_apply     = false
   queue_all_runs = false
 
   terraform_version     = "1.14.3"

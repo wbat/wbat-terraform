@@ -7,7 +7,6 @@ resource "tfe_variable_set" "cloudfront" {
 }
 
 resource "tfe_variable" "cloudfront_origin_secret" {
-  count           = var.cloudfront_origin_secret != "" ? 1 : 0
   key             = "cloudfront_origin_secret"
   value           = var.cloudfront_origin_secret
   category        = "terraform"
