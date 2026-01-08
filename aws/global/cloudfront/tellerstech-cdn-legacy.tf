@@ -10,6 +10,8 @@
 ######################################################
 
 resource "aws_cloudfront_distribution" "cdn_legacy" {
+  count = var.enable_legacy_cdn ? 1 : 0
+
   enabled         = true
   is_ipv6_enabled = true
   comment         = "Legacy W3TC CDN - No longer in use (was: Created by W3-Total-Cache)"

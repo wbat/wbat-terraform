@@ -2,10 +2,10 @@
 # Imports
 # After successful import, comment out or remove these blocks
 ######################################################
-import {
-  to = module.global.module.cloudfront.aws_cloudfront_distribution.cdn_legacy
-  id = "E1BJFU3JD7PL7F"
-}
+# import {
+#   to = module.global.module.cloudfront.aws_cloudfront_distribution.cdn_legacy[0]
+#   id = "E1BJFU3JD7PL7F"
+# }
 
 ######################################################
 # Backend
@@ -47,6 +47,7 @@ module "global" {
 
   terraform_cloud_external_id = local.terraform_cloud_external_id
   cloudfront_origin_secret    = var.cloudfront_origin_secret
+  enable_legacy_cdn           = false # Set to true to re-enable cdn.aws.tellerstech.com
 }
 
 ######################################################

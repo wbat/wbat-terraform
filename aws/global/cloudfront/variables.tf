@@ -17,3 +17,9 @@ variable "cloudfront_origin_secret" {
   sensitive   = true
   default     = ""
 }
+
+variable "enable_legacy_cdn" {
+  description = "Enable the legacy W3TC CDN distribution (cdn.aws.tellerstech.com). Set to false to disable/remove."
+  type        = bool
+  default     = true
+}
