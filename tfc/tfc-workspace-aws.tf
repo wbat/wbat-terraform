@@ -3,7 +3,7 @@ resource "tfe_workspace" "aws" {
   description  = "WBAT's AWS Workspace"
   organization = tfe_organization.wbat.id
 
-  auto_apply     = false
+  auto_apply     = true
   queue_all_runs = false
 
   terraform_version     = "1.14.3"
