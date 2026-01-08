@@ -6,7 +6,7 @@ resource "tfe_workspace" "github" {
   auto_apply            = false
   queue_all_runs        = false
   global_remote_state   = true
-  terraform_version     = "1.7.2"
+  terraform_version     = "1.14.3"
   working_directory     = "github"
   file_triggers_enabled = true
   ssh_key_id            = data.tfe_ssh_key.WBAT.id
