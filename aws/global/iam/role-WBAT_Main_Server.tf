@@ -36,6 +36,25 @@ resource "aws_iam_role_policy_attachment" "WBAT_Main_Server-AmazonSSMManagedInst
   policy_arn = data.aws_iam_policy.AmazonSSMManagedInstanceCore.arn
 }
 
+# CloudFront invalidation permissions for deploy workflows
+resource "aws_iam_role_policy" "WBAT_Main_Server-CloudFrontInvalidation" {
+  name = "CloudFrontInvalidation"
+  role = aws_iam_role.WBAT_Main_Server.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "cloudfront:CreateInvalidation",
+        "cloudfront:GetInvalidation",
+        "cloudfront:ListDistributions"
+      ]
+      Resource = "*"
+    }]
+  })
+}
+
 resource "aws_iam_instance_profile" "WBAT_Main_Server" {
   name = "WBAT_Main_Server"
   role = aws_iam_role.WBAT_Main_Server.name
