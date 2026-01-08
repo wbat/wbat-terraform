@@ -9,6 +9,7 @@ resource "tfe_workspace" "github" {
   terraform_version     = "1.14.3"
   working_directory     = "github"
   file_triggers_enabled = true
+  trigger_patterns      = ["/github"]
   ssh_key_id            = data.tfe_ssh_key.WBAT.id
 
   vcs_repo {
