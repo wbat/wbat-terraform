@@ -10,6 +10,9 @@ resource "aws_cloudfront_cache_policy" "wordpress" {
   max_ttl     = 86400 # 1 day
 
   parameters_in_cache_key_and_forwarded_to_origin {
+    enable_accept_encoding_gzip   = true
+    enable_accept_encoding_brotli = true
+
     cookies_config {
       cookie_behavior = "whitelist"
       cookies {
@@ -40,6 +43,9 @@ resource "aws_cloudfront_cache_policy" "static_assets" {
   max_ttl     = 31536000 # 1 year
 
   parameters_in_cache_key_and_forwarded_to_origin {
+    enable_accept_encoding_gzip   = true
+    enable_accept_encoding_brotli = true
+
     cookies_config {
       cookie_behavior = "none"
     }
