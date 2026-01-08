@@ -37,6 +37,7 @@ module "global" {
   core_tags = local.tags
 
   terraform_cloud_external_id = local.terraform_cloud_external_id
+  cloudfront_origin_secret    = var.cloudfront_origin_secret
 }
 
 ######################################################
