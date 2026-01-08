@@ -1,0 +1,1 @@
+variable "core_tags" {}
