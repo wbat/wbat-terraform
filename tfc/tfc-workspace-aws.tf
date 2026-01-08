@@ -25,13 +25,3 @@ resource "tfe_workspace_settings" "aws" {
   execution_mode      = "remote"
   global_remote_state = true
 }
-
-resource "tfe_variable" "aws_cloudfront_origin_secret" {
-  count        = var.cloudfront_origin_secret != "" ? 1 : 0
-  key          = "cloudfront_origin_secret"
-  value        = var.cloudfront_origin_secret
-  category     = "terraform"
-  workspace_id = tfe_workspace.aws.id
-  sensitive    = true
-  description  = "Secret header value for CloudFront origin verification"
-}
