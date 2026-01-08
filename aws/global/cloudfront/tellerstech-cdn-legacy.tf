@@ -63,5 +63,10 @@ resource "aws_cloudfront_distribution" "cdn_legacy" {
     minimum_protocol_version = "TLSv1.2_2021"
   }
 
-  tags = var.core_tags
+  tags = merge(
+    var.core_tags,
+    {
+      "Name" = "TellersTech.com WordPress CDN"
+    },
+  )
 }

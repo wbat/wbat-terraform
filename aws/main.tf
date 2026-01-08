@@ -1,5 +1,6 @@
 ######################################################
 # Imports
+# After successful import, comment out or remove these blocks
 ######################################################
 import {
   to = module.global.module.cloudfront.aws_cloudfront_distribution.cdn_legacy
