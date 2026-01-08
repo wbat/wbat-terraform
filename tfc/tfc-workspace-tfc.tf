@@ -9,7 +9,7 @@ resource "tfe_workspace" "tfc" {
   terraform_version     = "1.14.3"
   working_directory     = "tfc"
   file_triggers_enabled = true
-  trigger_patterns      = ["/tfc"]
+  trigger_patterns      = ["/tfc/**"]
   ssh_key_id            = data.tfe_ssh_key.WBAT.id
 
   vcs_repo {

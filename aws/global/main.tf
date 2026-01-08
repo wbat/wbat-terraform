@@ -6,13 +6,6 @@ module "iam" {
   terraform_cloud_external_id = var.terraform_cloud_external_id
 }
 
-module "route53" {
-  source = "./route53"
-
-  core_tags      = var.core_tags
-  ec2_elastic_ip = var.ec2_elastic_ip
-}
-
 module "acm" {
   source = "./acm"
 
