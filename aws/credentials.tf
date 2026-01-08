@@ -16,4 +16,5 @@
 ######################################################
 variable "email_address" {
   sensitive = true
+  default   = "brianateller@gmail.com"
 }
