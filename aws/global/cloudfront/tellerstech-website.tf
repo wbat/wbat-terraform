@@ -259,7 +259,8 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
   tags = merge(
     var.core_tags,
     {
-      "scm:file" = "aws/global/cloudfront/tellerstech-website.tf",
+      "Name"     = "TellersTech.com Website CDN"
+      "scm:file" = "aws/global/cloudfront/tellerstech-website.tf"
     },
   )
 }
