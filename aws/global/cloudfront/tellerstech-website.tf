@@ -104,6 +104,11 @@ resource "aws_cloudfront_response_headers_policy" "static_assets" {
       value    = "public, max-age=31536000"
       override = true
     }
+    items {
+      header   = "Expires"
+      value    = "Thu, 31 Dec 2037 23:59:59 GMT"
+      override = true
+    }
   }
 }
 
