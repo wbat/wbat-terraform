@@ -221,6 +221,29 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     response_headers_policy_id = aws_cloudfront_response_headers_policy.static_assets.id
   }
 
+  # Root-level static files (favicon, etc.)
+  ordered_cache_behavior {
+    path_pattern               = "*.svg"
+    allowed_methods            = ["GET", "HEAD"]
+    cached_methods             = ["GET", "HEAD"]
+    target_origin_id           = "wordpress-origin"
+    viewer_protocol_policy     = "redirect-to-https"
+    compress                   = true
+    cache_policy_id            = aws_cloudfront_cache_policy.static_assets.id
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.static_assets.id
+  }
+
+  ordered_cache_behavior {
+    path_pattern               = "*.ico"
+    allowed_methods            = ["GET", "HEAD"]
+    cached_methods             = ["GET", "HEAD"]
+    target_origin_id           = "wordpress-origin"
+    viewer_protocol_policy     = "redirect-to-https"
+    compress                   = true
+    cache_policy_id            = aws_cloudfront_cache_policy.static_assets.id
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.static_assets.id
+  }
+
   restrictions {
     geo_restriction {
       restriction_type = "none"
