@@ -93,6 +93,20 @@ resource "aws_cloudfront_origin_request_policy" "wordpress" {
   }
 }
 
+# Response headers policy for static assets - override origin's no-cache headers
+resource "aws_cloudfront_response_headers_policy" "static_assets" {
+  name    = "StaticAssets-ResponseHeadersPolicy"
+  comment = "Add proper cache headers for static assets"
+
+  custom_headers_config {
+    items {
+      header   = "Cache-Control"
+      value    = "public, max-age=31536000"
+      override = true
+    }
+  }
+}
+
 # Main CloudFront distribution
 resource "aws_cloudfront_distribution" "tellerstech_website" {
   enabled             = true
@@ -180,24 +194,26 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
 
   # Static assets - long cache TTL
   ordered_cache_behavior {
-    path_pattern           = "/wp-content/*"
-    allowed_methods        = ["GET", "HEAD"]
-    cached_methods         = ["GET", "HEAD"]
-    target_origin_id       = "wordpress-origin"
-    viewer_protocol_policy = "redirect-to-https"
-    compress               = true
-    cache_policy_id        = aws_cloudfront_cache_policy.static_assets.id
+    path_pattern               = "/wp-content/*"
+    allowed_methods            = ["GET", "HEAD"]
+    cached_methods             = ["GET", "HEAD"]
+    target_origin_id           = "wordpress-origin"
+    viewer_protocol_policy     = "redirect-to-https"
+    compress                   = true
+    cache_policy_id            = aws_cloudfront_cache_policy.static_assets.id
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.static_assets.id
   }
 
   # wp-includes static assets - long cache TTL
   ordered_cache_behavior {
-    path_pattern           = "/wp-includes/*"
-    allowed_methods        = ["GET", "HEAD"]
-    cached_methods         = ["GET", "HEAD"]
-    target_origin_id       = "wordpress-origin"
-    viewer_protocol_policy = "redirect-to-https"
-    compress               = true
-    cache_policy_id        = aws_cloudfront_cache_policy.static_assets.id
+    path_pattern               = "/wp-includes/*"
+    allowed_methods            = ["GET", "HEAD"]
+    cached_methods             = ["GET", "HEAD"]
+    target_origin_id           = "wordpress-origin"
+    viewer_protocol_policy     = "redirect-to-https"
+    compress                   = true
+    cache_policy_id            = aws_cloudfront_cache_policy.static_assets.id
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.static_assets.id
   }
 
   restrictions {
