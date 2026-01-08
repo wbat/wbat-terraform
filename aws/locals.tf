@@ -7,6 +7,8 @@ locals {
   primary_instance_type   = "t3a.medium"
   secondary_instance_type = "t3a.micro"
 
+  # Primary EC2 Elastic IP for CloudFront origin
+  ec2_elastic_ip = "44.214.133.234"
 
   tags = {
     "scm:repo"    = "wbat/wbat-terraform"

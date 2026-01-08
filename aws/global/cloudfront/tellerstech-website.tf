@@ -1,0 +1,219 @@
+# CloudFront Distribution for www.tellerstech.com
+# WordPress-optimized caching with full page cache for anonymous visitors
+
+# Cache policy for WordPress - forwards session cookies to bypass cache for logged-in users
+resource "aws_cloudfront_cache_policy" "wordpress" {
+  name        = "WordPress-CachePolicy"
+  comment     = "Cache policy for WordPress - bypasses cache when session cookies present"
+  min_ttl     = 0
+  default_ttl = 86400    # 1 day
+  max_ttl     = 31536000 # 1 year
+
+  parameters_in_cache_key_and_forwarded_to_origin {
+    cookies_config {
+      cookie_behavior = "whitelist"
+      cookies {
+        items = [
+          "wordpress_*",
+          "wp-*",
+          "comment_*",
+        ]
+      }
+    }
+
+    headers_config {
+      header_behavior = "whitelist"
+      headers {
+        items = ["Host"]
+      }
+    }
+
+    query_strings_config {
+      query_string_behavior = "all"
+    }
+  }
+}
+
+# Cache policy for static assets - no cookies, long TTL
+resource "aws_cloudfront_cache_policy" "static_assets" {
+  name        = "StaticAssets-CachePolicy"
+  comment     = "Cache policy for static assets - long TTL, no cookies"
+  min_ttl     = 86400    # 1 day minimum
+  default_ttl = 604800   # 1 week
+  max_ttl     = 31536000 # 1 year
+
+  parameters_in_cache_key_and_forwarded_to_origin {
+    cookies_config {
+      cookie_behavior = "none"
+    }
+
+    headers_config {
+      header_behavior = "none"
+    }
+
+    query_strings_config {
+      query_string_behavior = "none"
+    }
+  }
+}
+
+# Origin request policy - forwards Host header to origin
+resource "aws_cloudfront_origin_request_policy" "wordpress" {
+  name    = "WordPress-OriginRequestPolicy"
+  comment = "Forward Host header and WordPress cookies to origin"
+
+  cookies_config {
+    cookie_behavior = "whitelist"
+    cookies {
+      items = [
+        "wordpress_*",
+        "wp-*",
+        "comment_*",
+      ]
+    }
+  }
+
+  headers_config {
+    header_behavior = "whitelist"
+    headers {
+      items = [
+        "Host",
+        "CloudFront-Forwarded-Proto",
+        "CloudFront-Is-Desktop-Viewer",
+        "CloudFront-Is-Mobile-Viewer",
+        "CloudFront-Is-Tablet-Viewer",
+      ]
+    }
+  }
+
+  query_strings_config {
+    query_string_behavior = "all"
+  }
+}
+
+# Main CloudFront distribution
+resource "aws_cloudfront_distribution" "tellerstech_website" {
+  enabled             = true
+  is_ipv6_enabled     = true
+  comment             = "www.tellerstech.com - WordPress with full page caching"
+  default_root_object = ""
+  price_class         = "PriceClass_100" # US, Canada, Europe
+  aliases             = ["www.tellerstech.com"]
+
+  origin {
+    domain_name = var.origin_fqdn
+    origin_id   = "wordpress-origin"
+
+    custom_origin_config {
+      http_port              = 80
+      https_port             = 443
+      origin_protocol_policy = "https-only"
+      origin_ssl_protocols   = ["TLSv1.2"]
+    }
+
+    custom_header {
+      name  = "X-CloudFront-Secret"
+      value = var.cloudfront_origin_secret
+    }
+  }
+
+  # Default behavior - WordPress pages with session cookie handling
+  default_cache_behavior {
+    allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods           = ["GET", "HEAD"]
+    target_origin_id         = "wordpress-origin"
+    viewer_protocol_policy   = "redirect-to-https"
+    compress                 = true
+    cache_policy_id          = aws_cloudfront_cache_policy.wordpress.id
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+  }
+
+  # wp-admin - no caching, forward everything
+  ordered_cache_behavior {
+    path_pattern             = "/wp-admin/*"
+    allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods           = ["GET", "HEAD"]
+    target_origin_id         = "wordpress-origin"
+    viewer_protocol_policy   = "redirect-to-https"
+    compress                 = true
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
+    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AWS Managed AllViewer
+  }
+
+  # wp-login.php - no caching
+  ordered_cache_behavior {
+    path_pattern             = "/wp-login.php"
+    allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods           = ["GET", "HEAD"]
+    target_origin_id         = "wordpress-origin"
+    viewer_protocol_policy   = "redirect-to-https"
+    compress                 = true
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
+    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AWS Managed AllViewer
+  }
+
+  # wp-json API - no caching
+  ordered_cache_behavior {
+    path_pattern             = "/wp-json/*"
+    allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods           = ["GET", "HEAD"]
+    target_origin_id         = "wordpress-origin"
+    viewer_protocol_policy   = "redirect-to-https"
+    compress                 = true
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
+    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AWS Managed AllViewer
+  }
+
+  # wp-cron.php - no caching
+  ordered_cache_behavior {
+    path_pattern             = "/wp-cron.php"
+    allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods           = ["GET", "HEAD"]
+    target_origin_id         = "wordpress-origin"
+    viewer_protocol_policy   = "redirect-to-https"
+    compress                 = true
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
+    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AWS Managed AllViewer
+  }
+
+  # Static assets - long cache TTL
+  ordered_cache_behavior {
+    path_pattern           = "/wp-content/*"
+    allowed_methods        = ["GET", "HEAD"]
+    cached_methods         = ["GET", "HEAD"]
+    target_origin_id       = "wordpress-origin"
+    viewer_protocol_policy = "redirect-to-https"
+    compress               = true
+    cache_policy_id        = aws_cloudfront_cache_policy.static_assets.id
+  }
+
+  # wp-includes static assets - long cache TTL
+  ordered_cache_behavior {
+    path_pattern           = "/wp-includes/*"
+    allowed_methods        = ["GET", "HEAD"]
+    cached_methods         = ["GET", "HEAD"]
+    target_origin_id       = "wordpress-origin"
+    viewer_protocol_policy = "redirect-to-https"
+    compress               = true
+    cache_policy_id        = aws_cloudfront_cache_policy.static_assets.id
+  }
+
+  restrictions {
+    geo_restriction {
+      restriction_type = "none"
+    }
+  }
+
+  viewer_certificate {
+    acm_certificate_arn      = var.acm_certificate_arn
+    ssl_support_method       = "sni-only"
+    minimum_protocol_version = "TLSv1.2_2021"
+  }
+
+  tags = merge(
+    var.core_tags,
+    {
+      "scm:file" = "aws/global/cloudfront/tellerstech-website.tf",
+    },
+  )
+}
