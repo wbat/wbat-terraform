@@ -19,5 +19,6 @@ module "cloudfront" {
   acm_certificate_arn      = module.acm.www_tellerstech_certificate_arn
   cloudfront_origin_secret = var.cloudfront_origin_secret
   enable_legacy_cdn        = var.enable_legacy_cdn
+  enable_waf               = var.enable_waf
   # origin_fqdn defaults to origin.tellerstech.com (managed in BIND)
 }

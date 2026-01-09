@@ -1,0 +1,91 @@
+name: Infracost Cost Estimate
+
+on:
+  pull_request:
+    paths:
+      - "**.tf"
+      - "**.tfvars"
+
+# Needed for PR comment
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  infracost:
+    name: Infracost
+    runs-on: ubuntu-latest
+    env:
+      TF_ROOT: ./aws
+
+    steps:
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          ref: "${{ github.event.pull_request.base.ref }}"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.14"
+          cli_config_credentials_hostname: app.terraform.io
+          cli_config_credentials_token: ${{ secrets.TFC_API_TOKEN }}
+          terraform_wrapper: false
+
+      - name: Setup Infracost
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      # Generate Infracost JSON for base branch
+      - name: Terraform init (base)
+        run: terraform init -backend=false
+        working-directory: ${{ env.TF_ROOT }}
+        env:
+          GIT_SSH_COMMAND: "echo '${{ secrets.GH_SSH_PRIVATE_KEY }}' > id_rsa && ssh-keyscan github.com > known_hosts && chmod 600 id_rsa known_hosts && ssh -i ./id_rsa -o UserKnownHostsFile=./known_hosts"
+
+      - name: Generate Infracost JSON (base)
+        run: |
+          infracost breakdown --path=${{ env.TF_ROOT }} \
+            --format=json \
+            --out-file=/tmp/infracost-base.json
+        continue-on-error: true
+
+      # Checkout PR branch
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+
+      - name: Terraform init (PR)
+        run: terraform init -backend=false
+        working-directory: ${{ env.TF_ROOT }}
+        env:
+          GIT_SSH_COMMAND: "echo '${{ secrets.GH_SSH_PRIVATE_KEY }}' > id_rsa && ssh-keyscan github.com > known_hosts && chmod 600 id_rsa known_hosts && ssh -i ./id_rsa -o UserKnownHostsFile=./known_hosts"
+
+      # Generate Infracost JSON for PR branch
+      - name: Generate Infracost JSON (PR)
+        run: |
+          infracost breakdown --path=${{ env.TF_ROOT }} \
+            --format=json \
+            --out-file=/tmp/infracost.json
+
+      # Generate diff if base exists
+      - name: Generate Infracost diff
+        run: |
+          if [ -f /tmp/infracost-base.json ]; then
+            infracost diff --path=/tmp/infracost.json \
+              --compare-to=/tmp/infracost-base.json \
+              --format=json \
+              --out-file=/tmp/infracost-diff.json
+          else
+            cp /tmp/infracost.json /tmp/infracost-diff.json
+          fi
+
+      # Post comment to PR
+      - name: Post Infracost comment
+        run: |
+          infracost comment github --path=/tmp/infracost-diff.json \
+            --repo=$GITHUB_REPOSITORY \
+            --github-token=${{ github.token }} \
+            --pull-request=${{ github.event.pull_request.number }} \
+            --behavior=update \
+            || true  # Don't fail on policy check errors - comment is still posted
