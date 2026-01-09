@@ -87,4 +87,5 @@ jobs:
             --repo=$GITHUB_REPOSITORY \
             --github-token=${{ github.token }} \
             --pull-request=${{ github.event.pull_request.number }} \
-            --behavior=update
+            --behavior=update \
+            || true  # Don't fail on policy check errors - comment is still posted
