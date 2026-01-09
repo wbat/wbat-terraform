@@ -1,7 +1,11 @@
 # AWS WAF for CloudFront - DDoS and abuse protection
 # Attaches to CloudFront edge - no DNS or origin changes required
+#
+# Currently DISABLED - set enable_waf = true in variables to enable
+# Cost: ~$5-10/month when enabled
 
 resource "aws_wafv2_web_acl" "tellerstech" {
+  count       = var.enable_waf ? 1 : 0
   name        = "tellerstech-cloudfront-waf"
   description = "WAF for www.tellerstech.com CloudFront distribution"
   scope       = "CLOUDFRONT"
@@ -312,6 +316,8 @@ resource "aws_wafv2_web_acl" "tellerstech" {
 
 # CloudWatch Log Group for WAF logs (optional but recommended)
 resource "aws_cloudwatch_log_group" "waf_logs" {
+  count = var.enable_waf ? 1 : 0
+
   name              = "aws-waf-logs-tellerstech"
   retention_in_days = 30
 
@@ -319,8 +325,10 @@ resource "aws_cloudwatch_log_group" "waf_logs" {
 }
 
 resource "aws_wafv2_web_acl_logging_configuration" "tellerstech" {
-  log_destination_configs = [aws_cloudwatch_log_group.waf_logs.arn]
-  resource_arn            = aws_wafv2_web_acl.tellerstech.arn
+  count = var.enable_waf ? 1 : 0
+
+  log_destination_configs = [aws_cloudwatch_log_group.waf_logs[0].arn]
+  resource_arn            = aws_wafv2_web_acl.tellerstech[0].arn
 
   # Don't log full request body (reduces costs and PII exposure)
   redacted_fields {

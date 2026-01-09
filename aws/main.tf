@@ -48,6 +48,7 @@ module "global" {
   terraform_cloud_external_id = local.terraform_cloud_external_id
   cloudfront_origin_secret    = var.cloudfront_origin_secret
   enable_legacy_cdn           = false # Set to true to re-enable cdn.aws.tellerstech.com
+  enable_waf                  = false # Set to true to enable WAF (~$5-10/month)
 }
 
 ######################################################

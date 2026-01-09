@@ -13,3 +13,9 @@ variable "enable_legacy_cdn" {
   type        = bool
   default     = true
 }
+
+variable "enable_waf" {
+  description = "Enable AWS WAF for CloudFront (adds ~$5-10/month)"
+  type        = bool
+  default     = false
+}
