@@ -120,6 +120,7 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
   default_root_object = ""
   price_class         = "PriceClass_100" # US, Canada, Europe
   aliases             = ["www.tellerstech.com"]
+  web_acl_id          = aws_wafv2_web_acl.tellerstech.arn
 
   origin {
     domain_name = var.origin_fqdn
