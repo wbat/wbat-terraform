@@ -23,9 +23,6 @@ resource "aws_instance" "primary" {
     encrypted             = true
     kms_key_id            = var.kms_key-ebs-arn
     delete_on_termination = true
-    tags = {
-      "Name" = "WBAT Primary Server"
-    }
   }
 
   # Prevent accidental termination
