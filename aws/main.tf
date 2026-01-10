@@ -54,6 +54,11 @@ module "global" {
   billing_alert_email        = var.email_address
   billing_threshold_warning  = 75  # Alert at $75
   billing_threshold_critical = 100 # Critical at $100
+
+  # Savings Plan - WARNING: 1-year commitment, cannot be cancelled!
+  # Set to true only after confirming instance sizing is correct
+  enable_savings_plan            = false
+  savings_plan_hourly_commitment = "0.026" # Covers t3a.medium 24/7
 }
 
 ######################################################
