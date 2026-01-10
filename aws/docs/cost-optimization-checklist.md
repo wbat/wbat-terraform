@@ -14,9 +14,17 @@
 
 **Recommendation**: ✅ Safe to use `standard` CPU credits (saves potential overage charges)
 
-### Memory Analysis ⚠️
-No CloudWatch Agent installed - memory metrics not available.
-SSH to server and run `free -h` to check actual usage.
+### Memory Analysis ✅ (via SSM - 2026-01-06)
+
+| Metric | Value |
+|--------|-------|
+| Total RAM | 7.7 GB |
+| Used | 2.5 GB |
+| Available | 5.1 GB |
+
+**Top consumers**: MySQL (306MB), Nginx (750MB), SpamAssassin (370MB), PHP-FPM (180MB)
+
+**Recommendation**: ✅ Safe to downsize to t3a.medium (4GB) - saves ~$27/month
 
 ### Instance Type Drift ⚠️
 - **Terraform**: `t3a.medium` ($27/month)
@@ -81,19 +89,18 @@ ps aux --sort=-%mem | head -10
 
 ---
 
-## 3. Estimated Current Costs
+## 3. Estimated Costs
 
-Based on actual AWS configuration:
-| Resource | Current | Monthly Cost |
-|----------|---------|--------------|
-| EC2 Primary | t3a.large | ~$54 |
-| EC2 Secondary | t3a.small | ~$14 |
-| EBS storage | gp3 | ~$8-16 |
-| CloudFront | PriceClass_100 | ~$0-5 |
-| Snapshots (6x) | DLM | ~$2-5 |
-| **Total** | | **~$78-94** |
+| Resource | Current (t3a.large) | After Downsize (t3a.medium) |
+|----------|---------------------|----------------------------|
+| EC2 Primary | ~$54 | ~$27 |
+| EC2 Secondary | ~$14 | ~$14 |
+| EBS storage | ~$8-16 | ~$8-16 |
+| CloudFront | ~$0-5 | ~$0-5 |
+| Snapshots (6x) | ~$2-5 | ~$2-5 |
+| **Total** | **~$78-94** | **~$51-67** |
 
-If you downsize primary to t3a.medium: **~$51-67/month**
+**Potential savings: ~$27/month ($324/year)**
 
 ---
 
@@ -108,14 +115,11 @@ credit_specification {
 }
 ```
 
-### ⚠️ Action 2: Investigate Instance Type Drift
-Terraform says `t3a.medium` but AWS has `t3a.large`. Options:
-1. **Run terraform plan** to see if Terraform will downsize it
-2. **Update locals.tf** to match reality if intentional
-3. **Check memory usage** before any downsize
+### ✅ Action 2: Downsize to t3a.medium
+Memory analysis confirms only 2.5GB used. Terraform already has `t3a.medium` in locals.tf.
+Running `terraform apply` should downsize the instance.
 
-### 💡 Action 3: Check Memory Before Downsizing
-SSH to server and run `free -h`. If using < 3GB, t3a.medium is fine.
+**Note**: This will cause a brief instance restart. Schedule during low-traffic time.
 
 ### 💰 Action 4: Consider Savings Plans
 For 24/7 workloads, AWS Compute Savings Plans save 30-40%:
