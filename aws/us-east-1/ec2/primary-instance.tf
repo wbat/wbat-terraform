@@ -4,7 +4,7 @@ resource "aws_instance" "primary" {
   ami                  = aws_ami.primary.id
   instance_type        = var.primary_instance_type
   key_name             = aws_key_pair.wbat.key_name
-  iam_instance_profile = "WBAT_Main_Server"
+  iam_instance_profile = var.instance_profile_name-WBAT_Main_Server
   ebs_optimized        = true
   monitoring           = false
 
