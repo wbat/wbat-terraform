@@ -23,18 +23,21 @@ resource "aws_instance" "primary" {
     encrypted             = true
     kms_key_id            = var.kms_key-ebs-arn
     delete_on_termination = true
+    tags = {
+      "Name" = "WBAT Primary Server"
+    }
   }
 
   # Prevent accidental termination
   disable_api_termination = true
 
-  tags = merge(
-    var.core_tags,
-    {
-      "Name"     = "WBAT Primary Server"
-      "scm:file" = "aws/us-east-1/ec2/primary-instance.tf"
-    },
-  )
+  tags = {
+    "Name" = "WBAT Primary Server"
+  }
+
+  volume_tags = {
+    "Name" = "WBAT Primary Server"
+  }
 
   # Safety: Prevent Terraform from destroying this instance
   lifecycle {
