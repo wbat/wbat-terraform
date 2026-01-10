@@ -2,6 +2,10 @@ output "instance_profile-WBAT_Main_Server" {
   value = module.iam.instance_profile-WBAT_Main_Server
 }
 
+output "instance_profile_name-WBAT_Main_Server" {
+  value = module.iam.instance_profile_name-WBAT_Main_Server
+}
+
 # CloudFront outputs
 output "cloudfront_distribution_id" {
   value       = module.cloudfront.distribution_id

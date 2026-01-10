@@ -29,7 +29,7 @@ resource "aws_launch_template" "primary" {
   }
 
   credit_specification {
-    cpu_credits = "unlimited"
+    cpu_credits = "standard"
   }
 
   hibernation_options {

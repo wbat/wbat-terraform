@@ -7,7 +7,8 @@ module "ec2" {
   primary_instance_type   = var.primary_instance_type
   secondary_instance_type = var.secondary_instance_type
 
-  instance_profile-WBAT_Main_Server = var.instance_profile-WBAT_Main_Server
+  instance_profile-WBAT_Main_Server      = var.instance_profile-WBAT_Main_Server
+  instance_profile_name-WBAT_Main_Server = var.instance_profile_name-WBAT_Main_Server
 }
 
 module "kms" {
