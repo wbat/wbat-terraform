@@ -22,3 +22,12 @@ module "cloudfront" {
   enable_waf               = var.enable_waf
   # origin_fqdn defaults to origin.tellerstech.com (managed in BIND)
 }
+
+module "cloudwatch" {
+  source = "./cloudwatch"
+
+  core_tags                  = var.core_tags
+  billing_alert_email        = var.billing_alert_email
+  billing_threshold_warning  = var.billing_threshold_warning
+  billing_threshold_critical = var.billing_threshold_critical
+}

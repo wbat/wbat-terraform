@@ -1,8 +1,8 @@
-# Primary EC2 Instance - WordPress / DNS Server
+# Secondary EC2 Instance - DNS Server
 # This is a "pet" server with persistent data - not ephemeral
-resource "aws_instance" "primary" {
-  ami                  = aws_ami.primary.id
-  instance_type        = var.primary_instance_type
+resource "aws_instance" "secondary" {
+  ami                  = aws_ami.secondary.id
+  instance_type        = var.secondary_instance_type
   key_name             = aws_key_pair.wbat.key_name
   iam_instance_profile = "WBAT_Main_Server"
   ebs_optimized        = true
@@ -29,11 +29,11 @@ resource "aws_instance" "primary" {
   disable_api_termination = true
 
   tags = {
-    "Name" = "WBAT Primary Server"
+    "Name" = "WBAT Secondary Server"
   }
 
   volume_tags = {
-    "Name" = "WBAT Primary Server"
+    "Name" = "WBAT Secondary Server"
   }
 
   # Safety: Prevent Terraform from destroying this instance
