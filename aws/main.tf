@@ -49,6 +49,11 @@ module "global" {
   cloudfront_origin_secret    = var.cloudfront_origin_secret
   enable_legacy_cdn           = false # Set to true to re-enable cdn.aws.tellerstech.com
   enable_waf                  = false # Set to true to enable WAF (~$5-10/month)
+
+  # Billing alerts - uses email_address from credentials.tf
+  billing_alert_email        = var.email_address
+  billing_threshold_warning  = 75  # Alert at $75
+  billing_threshold_critical = 100 # Critical at $100
 }
 
 ######################################################
