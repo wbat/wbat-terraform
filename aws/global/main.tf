@@ -31,6 +31,3 @@ module "cloudwatch" {
   billing_threshold_warning  = var.billing_threshold_warning
   billing_threshold_critical = var.billing_threshold_critical
 }
-
-# Savings Plan is defined at global level (not in a submodule)
-# because it's account-wide and has special lifecycle considerations

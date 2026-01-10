@@ -37,15 +37,3 @@ variable "billing_threshold_critical" {
   type        = number
   default     = 100
 }
-
-variable "enable_savings_plan" {
-  description = "Purchase a Compute Savings Plan. WARNING: This is a 1-year financial commitment that CANNOT be cancelled!"
-  type        = bool
-  default     = false
-}
-
-variable "savings_plan_hourly_commitment" {
-  description = "Hourly commitment for Savings Plan in USD. For t3a.medium 24/7: use 0.026"
-  type        = string
-  default     = "0.026"
-}
