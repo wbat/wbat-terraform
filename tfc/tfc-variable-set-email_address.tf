@@ -31,7 +31,7 @@ resource "tfe_variable" "tellerstech_email" {
 }
 
 resource "tfe_workspace_variable_set" "email_addresses" {
-  for_each = toset(local.email_varset_workspace_ids)
+  for_each = toset(local.tfc-workspace_ids)
 
   variable_set_id = tfe_variable_set.email_addresses.id
 
