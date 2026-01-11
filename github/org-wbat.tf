@@ -2,7 +2,7 @@ resource "github_organization_settings" "wbat" {
   name        = "WBAT, LLC"
   description = "Based in Greencastle, PA"
 
-  billing_email = var.email_address
+  billing_email = var.personal_email
   blog          = "http://www.wbat.net"
   location      = "United States of America"
 

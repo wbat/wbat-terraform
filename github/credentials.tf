@@ -24,6 +24,6 @@ variable "github_oauth_token" {
 # Email Address
 #
 ######################################################
-variable "email_address" {
-  sensitive = true
+variable "personal_email" {
+  description = "Personal email address for billing and admin notifications (brianateller@gmail.com)"
 }
