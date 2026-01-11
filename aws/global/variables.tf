@@ -37,3 +37,9 @@ variable "billing_threshold_critical" {
   type        = number
   default     = 100
 }
+
+variable "tellerstech_email" {
+  description = "TellersTech email address for SES forwarding notifications"
+  type        = string
+  default     = ""
+}
