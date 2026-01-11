@@ -27,6 +27,7 @@ variable "tfc_token" {
 ######################################################
 variable "personal_email" {
   description = "Personal email address for billing and admin notifications (brianateller@gmail.com)"
+  default     = ""
 }
 
 variable "tellerstech_email" {
