@@ -25,5 +25,5 @@ provider "github" {
 module "repos" {
   source = "./repos"
 
-  email_address = var.email_address
+  personal_email = var.personal_email
 }

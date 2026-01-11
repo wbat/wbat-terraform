@@ -22,12 +22,17 @@ variable "tfc_token" {
 }
 
 ######################################################
-# Email Address
+# Email Addresses
 #
 ######################################################
-variable "email_address" {
-  sensitive   = true
-  description = "Email address for notifications and billing"
+variable "personal_email" {
+  description = "Personal email address for billing and admin notifications (brianateller@gmail.com)"
+  default     = ""
+}
+
+variable "tellerstech_email" {
+  description = "TellersTech email address for business notifications (tellerstech@gmail.com)"
+  default     = ""
 }
 
 ######################################################

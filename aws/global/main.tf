@@ -31,3 +31,10 @@ module "cloudwatch" {
   billing_threshold_warning  = var.billing_threshold_warning
   billing_threshold_critical = var.billing_threshold_critical
 }
+
+module "ses" {
+  source = "./ses"
+
+  core_tags         = var.core_tags
+  tellerstech_email = var.tellerstech_email
+}

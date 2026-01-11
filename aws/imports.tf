@@ -19,3 +19,15 @@ import {
   to = module.us-east-1.module.ec2.aws_instance.secondary
   id = "i-07e68eaf6cad1b838"
 }
+
+# SNS Topic for SES Email Forwarding
+import {
+  to = module.global.module.ses.aws_sns_topic.email_forwarding
+  id = "arn:aws:sns:us-east-1:708113892725:tellertech-email-forwarding"
+}
+
+# SNS Topic Policy (if exists - remove if import fails)
+import {
+  to = module.global.module.ses.aws_sns_topic_policy.email_forwarding
+  id = "arn:aws:sns:us-east-1:708113892725:tellertech-email-forwarding"
+}
