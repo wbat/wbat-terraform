@@ -16,12 +16,12 @@
 ######################################################
 variable "personal_email" {
   description = "Personal email address for billing and admin notifications (brianateller@gmail.com)"
-  default     = ""
+  default     = "email@address.com"
 }
 
 variable "tellerstech_email" {
   description = "TellersTech email address for business notifications (tellerstech@gmail.com)"
-  default     = ""
+  default     = "email@address.com"
 }
 
 ######################################################
