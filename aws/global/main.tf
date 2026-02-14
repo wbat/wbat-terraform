@@ -4,6 +4,8 @@ module "iam" {
   core_tags = var.core_tags
 
   terraform_cloud_external_id = var.terraform_cloud_external_id
+  briefs_bucket_arn           = aws_s3_bucket.briefs.arn
+  briefs_bucket_id            = aws_s3_bucket.briefs.id
 }
 
 module "acm" {

@@ -28,3 +28,14 @@ output "origin_fqdn" {
   value       = "origin.tellerstech.com"
   description = "Origin FQDN for CloudFront (managed in BIND)"
 }
+
+# S3 briefs backup (On Call Brief pipeline)
+output "briefs_bucket_id" {
+  value       = aws_s3_bucket.briefs.id
+  description = "S3 bucket for briefs backup; set BRIEFS_S3_URI=s3://<this_value>/ on the server."
+}
+
+output "briefs_bucket_arn" {
+  value       = aws_s3_bucket.briefs.arn
+  description = "ARN of the briefs backup bucket (for IAM)."
+}
