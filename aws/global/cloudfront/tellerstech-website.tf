@@ -150,7 +150,8 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
   }
 
-  # wp-admin - no caching (AllViewer: origin gets Host origin.tellerstech.com)
+  # wp-admin - no caching, use WordPress policy (origin gets Host: origin.tellerstech.com;
+  # wp-config.php overrides $_SERVER['HTTP_HOST'] to www.tellerstech.com via X-CloudFront-Secret)
   ordered_cache_behavior {
     path_pattern             = "/wp-admin/*"
     allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
@@ -159,7 +160,7 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     viewer_protocol_policy   = "redirect-to-https"
     compress                 = true
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
-    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AWS Managed AllViewer
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
   }
 
   # wp-login.php - no caching
@@ -171,7 +172,7 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     viewer_protocol_policy   = "redirect-to-https"
     compress                 = true
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
-    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AWS Managed AllViewer
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
   }
 
   # wp-json API - no caching
@@ -183,7 +184,7 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     viewer_protocol_policy   = "redirect-to-https"
     compress                 = true
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
-    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AWS Managed AllViewer
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
   }
 
   # wp-cron.php - no caching
@@ -195,7 +196,7 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     viewer_protocol_policy   = "redirect-to-https"
     compress                 = true
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
-    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AWS Managed AllViewer
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
   }
 
   # RSS/Atom feeds - no caching (must always be fresh for podcast apps)
@@ -207,7 +208,7 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     viewer_protocol_policy   = "redirect-to-https"
     compress                 = true
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
-    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AWS Managed AllViewer
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
   }
 
   # Root feed endpoint - no caching
@@ -219,7 +220,7 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     viewer_protocol_policy   = "redirect-to-https"
     compress                 = true
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
-    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AWS Managed AllViewer
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
   }
 
   # Sitemaps - short cache (2 hour default like WordPress pages)
