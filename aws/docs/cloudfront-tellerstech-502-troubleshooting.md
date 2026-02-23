@@ -27,6 +27,7 @@ CloudFront therefore connects to **https://origin.tellerstech.com** and sends th
 3. **Nginx (or origin server)**
    - A vhost must handle `server_name origin.tellerstech.com` on 443 and serve the WordPress docroot (or proxy correctly). If the only vhost is for `www.tellerstech.com`, requests to `origin.tellerstech.com` may get the wrong site or 4xx/5xx.
    - If the server requires the `X-CloudFront-Secret` header, its value must match the Terraform variable `cloudfront_origin_secret` (e.g. in TFC variable set). A mismatch can cause the server to reject requests and CloudFront to see 403/502.
+   - **DirectAdmin**: Nginx is managed by DirectAdmin; upgrades can overwrite or revert custom vhost config. If 502 appears with no Terraform changes, check that the origin vhost (and any customizations for `origin.tellerstech.com` / `www.tellerstech.com`) are still present and correct after a DirectAdmin or package update. To make custom nginx persist, use **Admin Level → Custom Httpd Config → &lt;domain&gt;** (or the domain’s `cust_nginx` / custom template), not direct edits to generated configs; then run `da build rewrite_confs`.
 
 4. **Reachability from the internet**
    - From outside AWS:  
