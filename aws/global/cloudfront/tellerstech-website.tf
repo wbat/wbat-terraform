@@ -80,7 +80,6 @@ resource "aws_cloudfront_origin_request_policy" "wordpress" {
     header_behavior = "whitelist"
     headers {
       items = [
-        "Host",
         "CloudFront-Forwarded-Proto",
         "CloudFront-Is-Desktop-Viewer",
         "CloudFront-Is-Mobile-Viewer",
@@ -151,7 +150,7 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
   }
 
-  # wp-admin - no caching, use WordPress policy so Host is forwarded to origin
+  # wp-admin - no caching, AllViewer (origin receives origin domain as Host)
   ordered_cache_behavior {
     path_pattern             = "/wp-admin/*"
     allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
@@ -160,10 +159,10 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     viewer_protocol_policy   = "redirect-to-https"
     compress                 = true
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
-    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AWS Managed AllViewer
   }
 
-  # wp-login.php - no caching, use WordPress policy so Host is forwarded to origin
+  # wp-login.php - no caching
   ordered_cache_behavior {
     path_pattern             = "/wp-login.php"
     allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
@@ -172,10 +171,10 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     viewer_protocol_policy   = "redirect-to-https"
     compress                 = true
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
-    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AWS Managed AllViewer
   }
 
-  # wp-json API - no caching, use WordPress policy so Host is forwarded
+  # wp-json API - no caching
   ordered_cache_behavior {
     path_pattern             = "/wp-json/*"
     allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
@@ -184,10 +183,10 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     viewer_protocol_policy   = "redirect-to-https"
     compress                 = true
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
-    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AWS Managed AllViewer
   }
 
-  # wp-cron.php - no caching, use WordPress policy so Host is forwarded
+  # wp-cron.php - no caching
   ordered_cache_behavior {
     path_pattern             = "/wp-cron.php"
     allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
@@ -196,7 +195,7 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     viewer_protocol_policy   = "redirect-to-https"
     compress                 = true
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
-    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AWS Managed AllViewer
   }
 
   # RSS/Atom feeds - no caching (must always be fresh for podcast apps)
@@ -208,7 +207,7 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     viewer_protocol_policy   = "redirect-to-https"
     compress                 = true
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
-    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AWS Managed AllViewer
   }
 
   # Root feed endpoint - no caching
@@ -220,7 +219,7 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     viewer_protocol_policy   = "redirect-to-https"
     compress                 = true
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
-    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3" # AWS Managed AllViewer
   }
 
   # Sitemaps - short cache (2 hour default like WordPress pages)
