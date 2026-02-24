@@ -80,6 +80,7 @@ resource "aws_cloudfront_origin_request_policy" "wordpress" {
     header_behavior = "whitelist"
     headers {
       items = [
+        "X-WP-Nonce",
         "CloudFront-Forwarded-Proto",
         "CloudFront-Is-Desktop-Viewer",
         "CloudFront-Is-Mobile-Viewer",
