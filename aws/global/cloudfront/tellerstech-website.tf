@@ -85,6 +85,11 @@ resource "aws_cloudfront_origin_request_policy" "wordpress" {
         "CloudFront-Is-Desktop-Viewer",
         "CloudFront-Is-Mobile-Viewer",
         "CloudFront-Is-Tablet-Viewer",
+        # Real viewer "<ip>:<port>", set by CloudFront (un-spoofable). Lets the
+        # origin log the actual subscriber IP instead of the CDN edge IP. Read by
+        # ocb_client_ip() in tellerstech-ocb-subscribers.php. Forwarded only (not
+        # in the cache key), so it does not fragment the cache.
+        "CloudFront-Viewer-Address",
       ]
     }
   }
