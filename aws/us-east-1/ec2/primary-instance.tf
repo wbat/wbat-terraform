@@ -13,7 +13,9 @@ resource "aws_instance" "primary" {
   associate_public_ip_address = true
 
   credit_specification {
-    cpu_credits = "standard"
+    # Keep "unlimited" so the WordPress server can burst without throttling.
+    # Matches the live instance; "standard" here would downgrade it on apply.
+    cpu_credits = "unlimited"
   }
 
   root_block_device {
