@@ -90,6 +90,14 @@ resource "aws_cloudfront_origin_request_policy" "wordpress" {
         # ocb_client_ip() in tellerstech-ocb-subscribers.php. Forwarded only (not
         # in the cache key), so it does not fragment the cache.
         "CloudFront-Viewer-Address",
+        # Real viewer User-Agent. Without this, CloudFront forwards the literal
+        # "Amazon CloudFront" to the origin, so the newsletter click/open tracking
+        # (/{list}-click, /{list}-open) logged every device/OS/browser as
+        # Desktop/Other/Other in the analytics dashboard. Parsed by tt_ua_parse()
+        # in tellerstech-ocb-analytics.php. Forwarded via the ORIGIN REQUEST policy
+        # only (not the cache policy), so it does NOT become part of the cache key
+        # and does not fragment the page cache.
+        "User-Agent",
       ]
     }
   }
