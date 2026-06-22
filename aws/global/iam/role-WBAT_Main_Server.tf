@@ -81,6 +81,41 @@ resource "aws_iam_role_policy" "WBAT_Main_Server-BriefsBackup" {
   })
 }
 
+# Read-only SNS diagnostics: lets the server inspect the SES bounce/complaint
+# feedback topic + its subscriptions from the box (e.g. confirm the HTTPS
+# subscription is Confirmed). No publish/subscribe/modify — describe only.
+resource "aws_iam_role_policy" "WBAT_Main_Server-SNSReadOnly" {
+  name = "SNSReadOnly"
+  role = aws_iam_role.WBAT_Main_Server.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "SNSDescribeTopics"
+        Effect = "Allow"
+        Action = [
+          "sns:GetTopicAttributes",
+          "sns:ListSubscriptionsByTopic",
+          "sns:GetSubscriptionAttributes"
+        ]
+        # Topic + subscription ARNs in this account/region (provider is us-east-1).
+        Resource = "arn:aws:sns:us-east-1:${data.aws_caller_identity.current.account_id}:*"
+      },
+      {
+        # Account-level list APIs don't support resource-level scoping.
+        Sid    = "SNSListAll"
+        Effect = "Allow"
+        Action = [
+          "sns:ListTopics",
+          "sns:ListSubscriptions"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
 resource "aws_iam_instance_profile" "WBAT_Main_Server" {
   name = "WBAT_Main_Server"
   role = aws_iam_role.WBAT_Main_Server.name
