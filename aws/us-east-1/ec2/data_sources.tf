@@ -8,7 +8,7 @@ data "aws_ebs_snapshot" "primary" {
 
   filter {
     name   = "volume-size"
-    values = ["300"]
+    values = ["600"]
   }
 
   filter {
