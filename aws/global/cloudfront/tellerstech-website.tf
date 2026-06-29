@@ -34,11 +34,13 @@ resource "aws_cloudfront_cache_policy" "wordpress" {
   }
 }
 
-# Cache policy for the Ship It Weekly podcast pages - same as WordPress policy
-# but capped at 12 hours so these pages refresh at least twice a day.
+# Cache policy for the high-traffic Ship It Weekly landing pages (hub, host,
+# media kit) - same as WordPress policy but capped at 12 hours so these pages
+# refresh at least twice a day. Individual episodes are NOT included here and
+# keep the default 1 day ceiling.
 resource "aws_cloudfront_cache_policy" "podcast" {
   name        = "Podcast-CachePolicy"
-  comment     = "Cache policy for Ship It Weekly podcast pages - 12 hour max TTL"
+  comment     = "Cache policy for key Ship It Weekly landing pages - 12 hour max TTL"
   min_ttl     = 0
   default_ttl = 7200  # 2 hours
   max_ttl     = 43200 # 12 hours
@@ -198,11 +200,37 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
   }
 
-  # Ship It Weekly podcast pages - capped at 12 hours (Podcast-CachePolicy).
-  # The "/*" pattern also matches the bare "/ship-it-weekly-podcast/" path since
-  # CloudFront wildcards match zero or more characters.
+  # Ship It Weekly hub page - capped at 12 hours (Podcast-CachePolicy) so the
+  # latest-episodes list does not go stale. EXACT match: the pattern has no "*",
+  # so it matches only "/ship-it-weekly-podcast/" and NOT the episode pages
+  # underneath it (e.g. /ship-it-weekly-podcast/<slug>/), which keep the default
+  # 1 day ceiling.
   ordered_cache_behavior {
-    path_pattern             = "/ship-it-weekly-podcast/*"
+    path_pattern             = "/ship-it-weekly-podcast/"
+    allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods           = ["GET", "HEAD"]
+    target_origin_id         = "wordpress-origin"
+    viewer_protocol_policy   = "redirect-to-https"
+    compress                 = true
+    cache_policy_id          = aws_cloudfront_cache_policy.podcast.id
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+  }
+
+  # Ship It Weekly host page - capped at 12 hours (exact match).
+  ordered_cache_behavior {
+    path_pattern             = "/ship-it-weekly-podcast/host/"
+    allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods           = ["GET", "HEAD"]
+    target_origin_id         = "wordpress-origin"
+    viewer_protocol_policy   = "redirect-to-https"
+    compress                 = true
+    cache_policy_id          = aws_cloudfront_cache_policy.podcast.id
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+  }
+
+  # Ship It Weekly media kit - capped at 12 hours (exact match).
+  ordered_cache_behavior {
+    path_pattern             = "/ship-it-weekly-podcast/media-kit/"
     allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
     cached_methods           = ["GET", "HEAD"]
     target_origin_id         = "wordpress-origin"
