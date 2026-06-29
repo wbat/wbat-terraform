@@ -34,6 +34,40 @@ resource "aws_cloudfront_cache_policy" "wordpress" {
   }
 }
 
+# Cache policy for the Ship It Weekly podcast pages - same as WordPress policy
+# but capped at 12 hours so these pages refresh at least twice a day.
+resource "aws_cloudfront_cache_policy" "podcast" {
+  name        = "Podcast-CachePolicy"
+  comment     = "Cache policy for Ship It Weekly podcast pages - 12 hour max TTL"
+  min_ttl     = 0
+  default_ttl = 7200  # 2 hours
+  max_ttl     = 43200 # 12 hours
+
+  parameters_in_cache_key_and_forwarded_to_origin {
+    enable_accept_encoding_gzip   = true
+    enable_accept_encoding_brotli = true
+
+    cookies_config {
+      cookie_behavior = "whitelist"
+      cookies {
+        items = [
+          "wordpress_*",
+          "wp-*",
+          "comment_*",
+        ]
+      }
+    }
+
+    headers_config {
+      header_behavior = "none"
+    }
+
+    query_strings_config {
+      query_string_behavior = "all"
+    }
+  }
+}
+
 # Cache policy for static assets - no cookies, long TTL
 resource "aws_cloudfront_cache_policy" "static_assets" {
   name        = "StaticAssets-CachePolicy"
@@ -161,6 +195,20 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     viewer_protocol_policy   = "redirect-to-https"
     compress                 = true
     cache_policy_id          = aws_cloudfront_cache_policy.wordpress.id
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+  }
+
+  # Ship It Weekly podcast pages - capped at 12 hours (Podcast-CachePolicy).
+  # The "/*" pattern also matches the bare "/ship-it-weekly-podcast/" path since
+  # CloudFront wildcards match zero or more characters.
+  ordered_cache_behavior {
+    path_pattern             = "/ship-it-weekly-podcast/*"
+    allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods           = ["GET", "HEAD"]
+    target_origin_id         = "wordpress-origin"
+    viewer_protocol_policy   = "redirect-to-https"
+    compress                 = true
+    cache_policy_id          = aws_cloudfront_cache_policy.podcast.id
     origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
   }
 
