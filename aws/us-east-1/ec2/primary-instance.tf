@@ -5,8 +5,10 @@ resource "aws_instance" "primary" {
   instance_type        = var.primary_instance_type
   key_name             = aws_key_pair.wbat.key_name
   iam_instance_profile = var.instance_profile_name-WBAT_Main_Server
-  ebs_optimized        = true
-  monitoring           = false
+  # Cutover instance i-0118b8ede80b52ef7 launched with EbsOptimized=false;
+  # changing to true forces instance replacement.
+  ebs_optimized = false
+  monitoring    = false
 
   subnet_id                   = data.aws_subnet.selected.id
   vpc_security_group_ids      = [data.aws_security_group.default.id]
@@ -20,6 +22,7 @@ resource "aws_instance" "primary" {
 
   root_block_device {
     volume_type           = "gp3"
+    volume_size           = 200
     iops                  = 3000
     throughput            = 125
     encrypted             = true
