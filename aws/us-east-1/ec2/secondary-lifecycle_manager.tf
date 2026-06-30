@@ -3,6 +3,9 @@ resource "aws_dlm_lifecycle_policy" "secondary" {
   execution_role_arn = data.aws_iam_role.AWSDataLifecycleManagerDefaultRole.arn
   state              = "ENABLED"
 
+  # Retain 3 rolling DLM snapshots per instance. WBAT Secondary Server - First
+  # (snap-0b6b6f6a5ffa9af99) is kept outside DLM (dlm:managed tag removed).
+
   policy_details {
     resource_types = ["INSTANCE"]
 
@@ -19,7 +22,7 @@ resource "aws_dlm_lifecycle_policy" "secondary" {
       }
 
       retain_rule {
-        count = 6
+        count = 3
       }
 
       tags_to_add = {

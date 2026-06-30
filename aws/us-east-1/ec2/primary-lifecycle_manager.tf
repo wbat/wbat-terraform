@@ -3,6 +3,10 @@ resource "aws_dlm_lifecycle_policy" "primary" {
   execution_role_arn = data.aws_iam_role.AWSDataLifecycleManagerDefaultRole.arn
   state              = "ENABLED"
 
+  # Retain 3 rolling DLM snapshots per instance. Permanent one-offs are NOT managed
+  # by DLM (no dlm:managed tag), e.g. primary-pre-shrink-cutover, 12/31/25 backup,
+  # Primary 2024/06/26, WBAT Primary Server - First (snap-0912039f0af4e12ed).
+
   policy_details {
     resource_types = ["INSTANCE"]
 
@@ -19,7 +23,7 @@ resource "aws_dlm_lifecycle_policy" "primary" {
       }
 
       retain_rule {
-        count = 6
+        count = 3
       }
 
       tags_to_add = {
