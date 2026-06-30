@@ -20,7 +20,7 @@ resource "aws_instance" "primary" {
 
   root_block_device {
     volume_type           = "gp3"
-    volume_size           = 600
+    volume_size           = 200
     iops                  = 3000
     throughput            = 125
     encrypted             = true
