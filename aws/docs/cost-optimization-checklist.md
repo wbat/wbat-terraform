@@ -99,7 +99,7 @@ ps aux --sort=-%mem | head -10
 | EC2 Secondary | ~$14 | ~$14 |
 | EBS storage | ~$8-16 | ~$8-16 |
 | CloudFront | ~$0-5 | ~$0-5 |
-| Snapshots (6x) | ~$2-5 | ~$2-5 |
+| Snapshots (3x DLM + permanent) | ~$2-5 | ~$2-5 |
 | **Total** | **~$78-94** | **~$51-67** |
 
 **Potential savings: ~$27/month ($324/year)**
