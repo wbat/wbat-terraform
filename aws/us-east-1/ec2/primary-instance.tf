@@ -7,8 +7,8 @@ resource "aws_instance" "primary" {
   iam_instance_profile = var.instance_profile_name-WBAT_Main_Server
   # Cutover instance i-0118b8ede80b52ef7 launched with EbsOptimized=false;
   # changing to true forces instance replacement.
-  ebs_optimized        = false
-  monitoring           = false
+  ebs_optimized = false
+  monitoring    = false
 
   subnet_id                   = data.aws_subnet.selected.id
   vpc_security_group_ids      = [data.aws_security_group.default.id]
