@@ -3,7 +3,7 @@
 # Run on OLD server as root. Avoids -X (SELinux xattrs); run restorecon on NEW after cutover.
 set -euo pipefail
 
-NEW_IP="${NEW_IP:-172.30.0.71}"
+NEW_IP="${NEW_IP:?Set NEW_IP to the target instance private IP}"
 RSYNC_USER="${RSYNC_USER:-ec2-user}"
 RSYNC_SSH="${RSYNC_SSH:-ssh -o StrictHostKeyChecking=no -o ConnectTimeout=30}"
 LOG="${LOG:-/var/log/shrink-rsync-live.log}"

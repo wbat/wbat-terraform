@@ -65,7 +65,7 @@ class Config:
     migration_pubkey: str = ""
     s3_bucket: str = ""
     s3_prefix: str = "migration"
-    expected_hostname: str = "server.wbat.net"
+    expected_hostname: str = ""
     old_name_tag: str = "WBAT Primary Server"
     new_name_tag_temp: str = "WBAT-Primary-200-temp"
     new_name_tag_final: str = "WBAT Primary Server"
@@ -108,7 +108,7 @@ class Config:
             migration_pubkey=data.get("migration_pubkey", ""),
             s3_bucket=data.get("s3", {}).get("bucket", ""),
             s3_prefix=data.get("s3", {}).get("prefix", "migration"),
-            expected_hostname=data.get("expected", {}).get("hostname", "server.wbat.net"),
+            expected_hostname=data.get("expected", {}).get("hostname", ""),
             old_name_tag=data["old"].get("name_tag", "WBAT Primary Server"),
             new_name_tag_temp=data["new"].get("name_tag_temp", "WBAT-Primary-200-temp"),
             new_name_tag_final=data["new"].get("name_tag_final", "WBAT Primary Server"),
@@ -119,12 +119,35 @@ def log(msg: str) -> None:
     print(msg, flush=True)
 
 
+def validate_env(cfg: Config) -> dict[str, str]:
+    env = os.environ.copy()
+    if cfg.old_private_ip:
+        env["OLD_IP"] = cfg.old_private_ip
+    if cfg.eip_public_ip:
+        env["EXPECTED_EIP"] = cfg.eip_public_ip
+    if cfg.expected_hostname:
+        env["EXPECTED_HOSTNAME"] = cfg.expected_hostname
+    return env
+
+
+def remote_validate_cmd(cfg: Config, mode: str) -> str:
+    exports: list[str] = []
+    if cfg.eip_public_ip:
+        exports.append(f"EXPECTED_EIP={shlex.quote(cfg.eip_public_ip)}")
+    if cfg.expected_hostname:
+        exports.append(f"EXPECTED_HOSTNAME={shlex.quote(cfg.expected_hostname)}")
+    prefix = " ".join(exports)
+    inner = f"sudo {cfg.validate_script} {mode}"
+    return f"{prefix} {inner}".strip() if prefix else inner
+
+
 def run(
     cmd: Sequence[str],
     *,
     check: bool = True,
     capture: bool = False,
     input_text: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     display = " ".join(shlex.quote(c) for c in cmd)
     log(f"$ {display}")
@@ -134,6 +157,7 @@ def run(
         text=True,
         capture_output=capture,
         input=input_text,
+        env=env,
     )
 
 
@@ -249,14 +273,14 @@ def cmd_status(cfg: Config) -> None:
         log(f"SSH FAILED (run: aws fix-new-ssh): exit {exc.returncode}")
 
     log("\n=== rsync-diff gate ===")
-    run([cfg.validate_script, "rsync-diff", cfg.new_private_ip], check=False)
+    run([cfg.validate_script, "rsync-diff", cfg.new_private_ip], check=False, env=validate_env(cfg))
 
 
 def cmd_validate(cfg: Config, mode: str) -> None:
     args = [cfg.validate_script, mode]
     if mode in ("rsync-diff", "compare-counts", "pre-cutover", "xattrs"):
         args.append(cfg.new_private_ip)
-    run(args)
+    run(args, env=validate_env(cfg))
 
 
 def cmd_rsync(cfg: Config, phase: str, yes: bool) -> None:
@@ -265,8 +289,8 @@ def cmd_rsync(cfg: Config, phase: str, yes: bool) -> None:
     log_path = cfg.rsync_log_final if delete else cfg.rsync_log_live
     if delete:
         confirm("Final rsync STOPS production on OLD first. Continue?", yes)
-        run([cfg.validate_script, "stop-services"])
-        run([cfg.validate_script, "verify-stopped"])
+        run([cfg.validate_script, "stop-services"], env=validate_env(cfg))
+        run([cfg.validate_script, "verify-stopped"], env=validate_env(cfg))
 
     cmd = rsync_cmd(cfg, delete=delete)
     log(f"=== rsync {phase} -> {log_path} ===")
@@ -279,11 +303,11 @@ def cmd_rsync(cfg: Config, phase: str, yes: bool) -> None:
     log(f"rsync exit={proc.returncode}")
 
     if delete:
-        run([cfg.validate_script, "pre-cutover", cfg.new_private_ip])
+        run([cfg.validate_script, "pre-cutover", cfg.new_private_ip], env=validate_env(cfg))
 
 
 def cmd_cutover_preflight(cfg: Config) -> None:
-    run([cfg.validate_script, "rsync-diff", cfg.new_private_ip])
+    run([cfg.validate_script, "rsync-diff", cfg.new_private_ip], env=validate_env(cfg))
     run(ssh_cmd(cfg, "sudo du -xsh / /home /usr/local/directadmin /var/lib/mysql"), check=False)
     log("Preflight OK — safe to run: cutover final")
 
@@ -401,7 +425,7 @@ def cmd_aws_rollback(cfg: Config, yes: bool) -> None:
 def cmd_post_start(cfg: Config) -> None:
     ip = cfg.eip_public_ip
     run(ssh_cmd(cfg, f"sudo {cfg.validate_script} start-services", ip=ip))
-    run(ssh_cmd(cfg, f"sudo {cfg.validate_script} post-cutover", ip=ip))
+    run(ssh_cmd(cfg, remote_validate_cmd(cfg, "post-cutover"), ip=ip))
     run(ssh_cmd(cfg, "sudo setenforce 1; sudo restorecon -Rv /home /var/www /usr/local/directadmin", ip=ip), check=False)
 
 
@@ -439,7 +463,12 @@ def build_parser() -> argparse.ArgumentParser:
             """
         ),
     )
-    p.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="Path to YAML config")
+    p.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG,
+        help="Path to YAML config (copy shrink-migration.config.example.yaml to shrink-migration.config.yaml)",
+    )
     p.add_argument("--yes", action="store_true", help="Skip interactive confirmation")
     sub = p.add_subparsers(dest="command", required=True)
 

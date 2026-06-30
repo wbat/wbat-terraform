@@ -19,3 +19,7 @@ PR.md
 .nova
 
 venv
+
+scripts/__pycache__/
+*.pyc
+scripts/shrink-migration.config.yaml
