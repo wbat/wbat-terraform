@@ -5,7 +5,9 @@ resource "aws_instance" "primary" {
   instance_type        = var.primary_instance_type
   key_name             = aws_key_pair.wbat.key_name
   iam_instance_profile = var.instance_profile_name-WBAT_Main_Server
-  ebs_optimized        = true
+  # Cutover instance i-0118b8ede80b52ef7 launched with EbsOptimized=false;
+  # changing to true forces instance replacement.
+  ebs_optimized        = false
   monitoring           = false
 
   subnet_id                   = data.aws_subnet.selected.id
