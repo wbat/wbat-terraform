@@ -6,12 +6,12 @@ set -euo pipefail
 
 MODE="${1:-help}"
 NEW_IP="${2:-}"
-OLD_IP="${OLD_IP:-172.30.0.87}"
+OLD_IP="${OLD_IP:-}"
 RSYNC_USER="${RSYNC_USER:-ec2-user}"
 RSYNC_SSH_OPTS="${RSYNC_SSH_OPTS:--o StrictHostKeyChecking=no -o ConnectTimeout=10}"
 RSYNC_PATH="${RSYNC_PATH:---rsync-path=sudo rsync}"
-EXPECTED_EIP="${EXPECTED_EIP:-44.214.133.234}"
-EXPECTED_HOSTNAME="${EXPECTED_HOSTNAME:-server.wbat.net}"
+EXPECTED_EIP="${EXPECTED_EIP:-}"
+EXPECTED_HOSTNAME="${EXPECTED_HOSTNAME:-}"
 RSYNC_EXCLUDES=(
   --exclude=/proc/*
   --exclude=/sys/*

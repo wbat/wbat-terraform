@@ -1,5 +1,7 @@
 # Cost Optimization Checklist
 
+> **Note:** Historical snapshot from January 2026. Verify live resource IDs and instance types before acting on any recommendation.
+
 ## Current Findings (2026-01-06)
 
 ### CPU Analysis ✅

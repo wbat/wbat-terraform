@@ -1,0 +1,86 @@
+# WBAT primary EBS shrink migration — example config
+# Copy to shrink-migration.config.yaml (gitignored) and fill in real values.
+# Used by scripts/shrink_migration.py
+
+aws_profile: your-aws-profile
+aws_region: us-east-1
+
+# Source instance (current production before cutover)
+old:
+  instance_id: i-0123456789abcdef0
+  private_ip: 10.0.0.10
+  root_volume_id: vol-0123456789abcdef0
+  name_tag: WBAT Primary Server OLD-retired
+
+# Target instance (new smaller root volume)
+new:
+  instance_id: i-0fedcba9876543210
+  private_ip: 10.0.0.20
+  root_volume_id: vol-0fedcba9876543210
+  name_tag_temp: WBAT-Primary-200-temp
+  name_tag_final: WBAT Primary Server
+
+eip:
+  public_ip: 203.0.113.10
+  allocation_id: eipalloc-0123456789abcdef0
+  association_id: eipassoc-0123456789abcdef0
+
+expected:
+  hostname: origin.example.com
+  root_size_gb: 200
+
+ssh:
+  user: ec2-user
+  # Do NOT set identity_file — use default keys on the source host
+  options:
+    - StrictHostKeyChecking=no
+    - ConnectTimeout=30
+
+rsync:
+  flags:
+    - -aHAxx
+    - --numeric-ids
+    - --info=progress2
+    - --rsync-path=sudo rsync
+  excludes:
+    - /proc/*
+    - /sys/*
+    - /dev/*
+    - /run/*
+    - /tmp/*
+    - /mnt/*
+    - /media/*
+    - /lost+found
+    - /swapfile
+    - /home/ec2-user/.ssh/authorized_keys
+
+s3:
+  bucket: your-backup-bucket-name
+  prefix: migration
+
+paths:
+  validate_script: /usr/local/sbin/shrink-migration-validate.sh
+  rsync_log_live: /var/log/shrink-rsync-live.log
+  rsync_log_final: /var/log/shrink-rsync-final.log
+
+snapshots:
+  pre_cutover: snap-0123456789abcdef0
+
+migration_pubkey: ssh-ed25519 AAAA...comment
+
+services:
+  - directadmin
+  - httpd
+  - nginx
+  - mysqld
+  - mariadb
+  - exim
+  - dovecot
+  - named
+
+# Retired primary after cutover — cleanup via shrink-cleanup-old.sh
+retired:
+  instance_id: i-0123456789abcdef0
+  root_volume_id: vol-0123456789abcdef0
+  cutover_date: "YYYY-MM-DD"
+  bake_days: 7
