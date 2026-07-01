@@ -141,15 +141,16 @@ resource "aws_cloudfront_origin_request_policy" "wordpress" {
         # WordPress. Forwarded via the ORIGIN REQUEST policy only (not the cache
         # policy), so these do NOT become part of the cache key and do not
         # fragment the page cache.
+        #
+        # NOTE: CloudFront caps an origin request policy at 10 headers (soft quota
+        # L-C646B44B). The 7 headers above + these 3 hit that limit exactly, so we
+        # forward only country/region/city (the ISO country code maps to a name and
+        # flag downstream). To add lat/long, postal code, or time zone, request a
+        # quota increase first, otherwise CloudFront returns
+        # TooManyHeadersInOriginRequestPolicy.
         "CloudFront-Viewer-Country",
-        "CloudFront-Viewer-Country-Name",
         "CloudFront-Viewer-Country-Region",
-        "CloudFront-Viewer-Country-Region-Name",
         "CloudFront-Viewer-City",
-        "CloudFront-Viewer-Postal-Code",
-        "CloudFront-Viewer-Latitude",
-        "CloudFront-Viewer-Longitude",
-        "CloudFront-Viewer-Time-Zone",
       ]
     }
   }
