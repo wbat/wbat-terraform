@@ -9,11 +9,31 @@
 #   id = "E1BJFU3JD7PL7F"
 # }
 
-# EC2 Instances - importing existing "pet" servers into Terraform management
-import {
-  to = module.us-east-1.module.ec2.aws_instance.primary
-  id = "i-0572702f0a58f6dcd"
-}
+# EC2 Instances - imported 2026-06-30 (primary cutover + EIPs); comment out after apply
+# import {
+#   to = module.us-east-1.module.ec2.aws_instance.primary
+#   id = "i-0118b8ede80b52ef7"
+# }
+#
+# import {
+#   to = module.us-east-1.module.ec2.aws_eip.primary
+#   id = "eipalloc-0e4834de5c1e13061"
+# }
+#
+# import {
+#   to = module.us-east-1.module.ec2.aws_eip_association.primary
+#   id = "eipassoc-007018a225625abbb"
+# }
+#
+# import {
+#   to = module.us-east-1.module.ec2.aws_eip.secondary
+#   id = "eipalloc-08734964d45fd5694"
+# }
+#
+# import {
+#   to = module.us-east-1.module.ec2.aws_eip_association.secondary
+#   id = "eipassoc-0830bef1c1753210c"
+# }
 
 import {
   to = module.us-east-1.module.ec2.aws_instance.secondary

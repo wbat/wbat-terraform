@@ -39,3 +39,14 @@ output "briefs_bucket_arn" {
   value       = aws_s3_bucket.briefs.arn
   description = "ARN of the briefs backup bucket (for IAM)."
 }
+
+# S3 DirectAdmin backups
+output "directadmin_backups_bucket_id" {
+  value       = aws_s3_bucket.directadmin_backups.id
+  description = "S3 bucket for DirectAdmin Enhanced Backups; configure this bucket name in DA."
+}
+
+output "directadmin_backup_iam_user" {
+  value       = aws_iam_user.directadmin_backup.name
+  description = "IAM user DirectAdmin uses for S3 backups; create an access key for it and paste into DA."
+}
