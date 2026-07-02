@@ -32,6 +32,7 @@ resource "github_repository" "tellerstech-website" {
   allow_merge_commit = true
   allow_squash_merge = true
   allow_rebase_merge = true
+  allow_update_branch = true
 }
 
 resource "github_branch_default" "tellerstech-website-main" {
