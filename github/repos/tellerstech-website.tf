@@ -21,17 +21,17 @@ resource "github_repository" "tellerstech-website" {
   description = "The WordPress Files for TellersTech.com (and ShipItWeekly.fm, OnCallBrief.com, and CodeDuck.ai)"
   visibility  = "private"
 
-  has_issues           = true
-  has_wiki             = false
-  has_projects         = true
-  has_downloads        = true
-  vulnerability_alerts = true
+  has_issues    = true
+  has_wiki      = false
+  has_projects  = true
+  has_downloads = true
 
   delete_branch_on_merge = true
 
-  allow_merge_commit = true
-  allow_squash_merge = true
-  allow_rebase_merge = true
+  allow_merge_commit  = true
+  allow_squash_merge  = true
+  allow_rebase_merge  = true
+  allow_auto_merge    = false
   allow_update_branch = true
 }
 
