@@ -40,10 +40,10 @@ resource "github_branch_protection" "wbat-terraform-main" {
       "Terraform Cloud/WBAT/wbat-terraform-tfc",
 
       # Github Actions
-      "Format (~1.14)",
-      "Validate (~1.14, aws)",
-      "Validate (~1.14, github)",
-      "Validate (~1.14, tfc)",
+      "Format (~1.15)",
+      "Validate (~1.15, aws)",
+      "Validate (~1.15, github)",
+      "Validate (~1.15, tfc)",
     ]
     strict = true
   }

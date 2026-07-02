@@ -9,7 +9,7 @@ jobs:
     strategy:
       matrix:
         terraform_version:
-          - "~1.14"
+          - "~1.15"
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
@@ -27,7 +27,7 @@ jobs:
     strategy:
       matrix:
         terraform_version:
-          - "~1.14"
+          - "~1.15"
         workspaces:
           - aws
           - github
