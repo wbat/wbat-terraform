@@ -73,6 +73,7 @@ Brownfield resources are imported via blocks in [`aws/imports.tf`](aws/imports.t
 | Document | Description |
 |----------|-------------|
 | [CloudFront 502 troubleshooting](aws/docs/cloudfront-tellerstech-502-troubleshooting.md) | Origin connectivity and CloudFront error diagnosis |
+| [Terraform version upgrade](aws/docs/terraform-version-upgrade.md) | Incremental HCP Terraform / CI version bump process |
 | [Cost optimization checklist](aws/docs/cost-optimization-checklist.md) | EC2 sizing and cost review notes |
 | [Migration scripts](scripts/README.md) | Optional EC2 root-volume shrink tooling |
 
