@@ -19,6 +19,12 @@ provider "github" {
   owner = "wbat"
 }
 
+provider "github" {
+  alias = "tellerstechorg"
+  token = var.github_oauth_token
+  owner = "TellersTechOrg"
+}
+
 ######################################################
 # Modules
 ######################################################
@@ -26,4 +32,8 @@ module "repos" {
   source = "./repos"
 
   personal_email = var.personal_email
+
+  providers = {
+    github.tellerstechorg = github.tellerstechorg
+  }
 }
