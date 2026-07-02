@@ -9,6 +9,8 @@ resource "github_repository" "iTerm2-Git-Status-Bar" {
   has_projects         = true
   vulnerability_alerts = true
 
+  delete_branch_on_merge = true
+
   topics = [
     "bash",
     "iterm",
