@@ -6,7 +6,7 @@ HCP Terraform and this repo are upgraded in **small PRs** so branch protection a
 
 | Layer | Version |
 |-------|---------|
-| HCP Terraform workspaces | 1.14.3 (see `tfc/tfc-workspace-*.tf`) |
+| HCP Terraform workspaces | **1.15.7** (after step 4) |
 | GitHub Actions CI | ~1.15 (after step 3) |
 | `required_version` in workspace `versions.tf` | >= 1.15.0 (after step 3) |
 
