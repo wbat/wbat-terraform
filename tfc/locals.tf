@@ -1,4 +1,5 @@
 locals {
+  terraform_version = "~> 1.15.0"
 
   tfc-workspace_ids = [
     tfe_workspace.aws.id,

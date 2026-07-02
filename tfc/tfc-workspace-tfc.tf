@@ -6,7 +6,7 @@ resource "tfe_workspace" "tfc" {
   auto_apply     = false
   queue_all_runs = false
 
-  terraform_version     = "1.14.3"
+  terraform_version     = local.terraform_version
   working_directory     = "tfc"
   file_triggers_enabled = true
   trigger_patterns      = ["/tfc/**", "/tfc/**/*"]
