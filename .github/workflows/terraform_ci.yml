@@ -6,15 +6,11 @@ jobs:
   format:
     name: Format
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        terraform_version:
-          - "~1.14"
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: ${{ matrix.terraform_version }}
+          terraform_version: "~1.14"
 
       - name: Terraform fmt
         id: fmt
@@ -22,12 +18,10 @@ jobs:
         working-directory: ./
 
   validate:
-    name: Validate
+    name: Validate (${{ matrix.workspaces }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        terraform_version:
-          - "~1.14"
         workspaces:
           - aws
           - github
@@ -37,7 +31,7 @@ jobs:
 
       - uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: ${{ matrix.terraform_version }}
+          terraform_version: "~1.14"
           cli_config_credentials_hostname: app.terraform.io
           cli_config_credentials_token: ${{ secrets.TFC_API_TOKEN }}
 
