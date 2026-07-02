@@ -1,18 +1,7 @@
 # TellersTechOrg/tellerstech-website — WordPress site files (imported; pre-existing repo).
 # Branch protection is not managed here: private repos on the current GitHub plan
 # return 403 from the branch protection API (requires GitHub Pro or public repo).
-
-import {
-  to       = github_repository.tellerstech-website
-  id       = "tellerstech-website"
-  provider = github.tellerstechorg
-}
-
-import {
-  to       = github_branch_default.tellerstech-website-main
-  id       = "tellerstech-website:main"
-  provider = github.tellerstechorg
-}
+# Import blocks live in ../imports.tf (root module).
 
 resource "github_repository" "tellerstech-website" {
   provider = github.tellerstechorg

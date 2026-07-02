@@ -34,6 +34,7 @@ module "repos" {
   personal_email = var.personal_email
 
   providers = {
+    github                = github
     github.tellerstechorg = github.tellerstechorg
   }
 }
