@@ -11,6 +11,7 @@ Optional operational tooling for **EC2 root-volume shrink** via rsync and Elasti
 | [`shrink-migration-validate.sh`](shrink-migration-validate.sh) | Validation gates (rsync-diff, pre/post-cutover, services) |
 | [`shrink-rsync-live.sh`](shrink-rsync-live.sh) | Standalone incremental rsync helper |
 | [`shrink-cleanup-old.sh`](shrink-cleanup-old.sh) | Post-bake cleanup of retired source instance and volume |
+| [`directadmin/`](directadmin/) | DA post-backup hooks: admin + system backups → S3, local cleanup |
 
 ## Setup
 

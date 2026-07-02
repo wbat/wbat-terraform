@@ -1,0 +1,49 @@
+# DirectAdmin backup hooks (server install)
+
+Install on **both** DirectAdmin servers (`server` and `server2`) under `/usr/local/directadmin/scripts/custom/`.
+
+## Hooks
+
+| File | DirectAdmin event |
+|------|-------------------|
+| `all_backups_post.sh` | After **Admin Backup** (`.tar.zst` or `.tar.gz` under `/home/admin_backups`) |
+| `system_backup_post.sh` | After **System Backup** (`apache/`, `bind/`, `custom/`, `mysql/` under `/home/backup/MM-DD-YY/`) |
+
+Both upload to `s3://wbat-tellerstech-directadmin-backups-<account>/<hostname>/YYYY-MM-DD/` (e.g. `server/` or `server2/`) via rclone remote `s3backup`, then **delete local copies** after a successful upload.
+
+## Install / update on server
+
+```bash
+install -m 700 scripts/directadmin/all_backups_post.sh \
+  /usr/local/directadmin/scripts/custom/all_backups_post.sh
+install -m 700 scripts/directadmin/system_backup_post.sh \
+  /usr/local/directadmin/scripts/custom/system_backup_post.sh
+```
+
+Requires root rclone config at `/root/.config/rclone/rclone.conf` with `s3backup` remote and `no_check_bucket = true`.
+
+`/home/admin_backups` must be mode **711** (`drwx--x--x`) so per-user backup staging dirs are reachable. If it is `700`, DirectAdmin logs `create_backup_domain_dir: ... did not exist` and backups produce nothing to upload.
+
+On **server2**, also confirm `backup_crons.list` uses `when=cron` (not `when=now`) so the Wed 5:30 AM schedule keeps firing.
+
+## S3 retention
+
+Objects are **not** deleted immediately after upload. The bucket lifecycle (Terraform `s3-directadmin-backups.tf`) tiers to STANDARD_IA / GLACIER_IR and **expires at 365 days**.
+
+## One-time catch-up (already on disk)
+
+```bash
+/usr/local/directadmin/scripts/custom/all_backups_post.sh
+tail -30 /var/log/da-backup-s3.log
+df -h /
+```
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| S3 only has `hook-test.txt` or tiny files | `/home/admin_backups` is `700` | `chmod 711 /home/admin_backups` |
+| `create_backup_domain_dir: ... did not exist` in `errortaskq.log` | Same permission issue | `chmod 711` and re-run backup from DA UI |
+| Hook never runs for system backups | Missing `system_backup_post.sh` | Install both hook scripts (see above) |
+| Nothing new in S3 after schedule | `backup_crons.list` has `when=now` | Set `when=cron` to match `server` |
+| Upload works but local disk stays full | Old stub hook (no cleanup) | Deploy current `all_backups_post.sh` from this repo |
