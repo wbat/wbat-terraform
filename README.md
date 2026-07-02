@@ -2,7 +2,7 @@
 
 [![Terraform CI](https://github.com/wbat/wbat-terraform/actions/workflows/terraform_ci.yml/badge.svg)](https://github.com/wbat/wbat-terraform/actions/workflows/terraform_ci.yml)
 [![Infracost](https://github.com/wbat/wbat-terraform/actions/workflows/infracost.yml/badge.svg)](https://github.com/wbat/wbat-terraform/actions/workflows/infracost.yml)
-[![Terraform](https://img.shields.io/badge/Terraform-~1.14-844FBA)](https://developer.hashicorp.com/terraform)
+[![Terraform](https://img.shields.io/badge/Terraform-~1.15-844FBA)](https://developer.hashicorp.com/terraform)
 [![AWS Provider](https://img.shields.io/badge/AWS_Provider-~>5.0-orange)](https://registry.terraform.io/providers/hashicorp/aws/latest)
 [![HCP Terraform](https://img.shields.io/badge/HCP_Terraform-managed-844FBA)](https://developer.hashicorp.com/terraform/cloud-docs)
 [![License: MIT](https://img.shields.io/github/license/wbat/wbat-terraform)](https://github.com/wbat/wbat-terraform/blob/main/LICENSE)
@@ -46,7 +46,7 @@ flowchart LR
 
 ## Prerequisites
 
-- [Terraform](https://developer.hashicorp.com/terraform/install) **≥ 1.10** (CI uses **~1.14**)
+- [Terraform](https://developer.hashicorp.com/terraform/install) **≥ 1.15.0** (CI uses **~1.15**; HCP pins in a follow-up PR)
 - Access to the **HCP Terraform** organization for plan/apply
 - AWS credentials via HCP Terraform role assumption — **no long-lived access keys in this repository**
 

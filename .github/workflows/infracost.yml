@@ -27,7 +27,7 @@ jobs:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "~1.14"
+          terraform_version: "~1.15"
           cli_config_credentials_hostname: app.terraform.io
           cli_config_credentials_token: ${{ secrets.TFC_API_TOKEN }}
           terraform_wrapper: false
