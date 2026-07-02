@@ -46,7 +46,7 @@ flowchart LR
 
 ## Prerequisites
 
-- [Terraform](https://developer.hashicorp.com/terraform/install) **≥ 1.15.0** (CI and HCP Terraform use **1.15.7**)
+- [Terraform](https://developer.hashicorp.com/terraform/install) **≥ 1.15.0** (CI uses **~1.15**; HCP workspaces use **~> 1.15.0**)
 - Access to the **HCP Terraform** organization for plan/apply
 - AWS credentials via HCP Terraform role assumption — **no long-lived access keys in this repository**
 
