@@ -13,6 +13,7 @@ resource "github_repository" "this" {
   vulnerability_alerts = var.vulnerability_alerts
 
   delete_branch_on_merge = var.delete_branch_on_merge
+  allow_update_branch    = var.allow_update_branch
 }
 
 resource "github_branch_default" "this" {

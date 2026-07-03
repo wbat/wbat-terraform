@@ -9,4 +9,7 @@ module "terraform_module_example" {
   name        = "terraform_module_example"
   description = "An Example of a Terraform Module"
   has_wiki    = false
+
+  # Preserve the repo's existing "suggest updating PR branches" setting.
+  allow_update_branch = true
 }

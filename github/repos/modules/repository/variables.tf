@@ -63,6 +63,12 @@ variable "delete_branch_on_merge" {
   default     = true
 }
 
+variable "allow_update_branch" {
+  description = "Always suggest updating pull request branches."
+  type        = bool
+  default     = false
+}
+
 variable "default_branch" {
   description = "Default branch name."
   type        = string
