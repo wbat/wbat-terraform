@@ -45,12 +45,22 @@ AWS_REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
 
 
 def _setup_logging() -> logging.Logger:
-    """Prefer file log; never crash the pipe if the file is unwritable (Exim != root)."""
-    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+    """
+    Log to file when possible. Never write to stdout/stderr under Exim:
+    DA's pipe transport treats command output as a delivery failure even when
+    the process exits 0 (which produced the Mailer-Daemon bounce after SES
+    had already succeeded).
+    """
+    handlers: list[logging.Handler] = []
     try:
-        handlers.insert(0, logging.FileHandler(LOG_PATH))
+        handlers.append(logging.FileHandler(LOG_PATH))
     except OSError:
         pass
+    # Interactive/manual runs only — not when Exim pipes mail on stdin.
+    if sys.stderr.isatty():
+        handlers.append(logging.StreamHandler(sys.stderr))
+    if not handlers:
+        handlers.append(logging.NullHandler())
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
