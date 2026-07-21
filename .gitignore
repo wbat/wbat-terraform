@@ -23,3 +23,6 @@ venv
 scripts/__pycache__/
 *.pyc
 scripts/shrink-migration.config.yaml
+
+# Generated Lambda zip artifacts
+aws/global/ses/lambda/*.zip

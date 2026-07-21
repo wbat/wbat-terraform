@@ -46,8 +46,11 @@ module "global" {
   billing_threshold_warning  = 75  # Alert at $75
   billing_threshold_critical = 100 # Critical at $100
 
-  # SES email forwarding - uses tellerstech_email from credentials.tf
-  tellerstech_email = var.tellerstech_email
+  # SES — set inbound_* in TFC sensitive variable set before enabling
+  tellerstech_email         = var.tellerstech_email
+  enable_inbound_forwarding = var.enable_inbound_forwarding
+  inbound_recipients        = var.inbound_recipients
+  inbound_alert_email       = var.inbound_alert_email
 }
 
 ######################################################

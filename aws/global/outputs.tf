@@ -50,3 +50,24 @@ output "directadmin_backup_iam_user" {
   value       = aws_iam_user.directadmin_backup.name
   description = "IAM user DirectAdmin uses for S3 backups; create an access key for it and paste into DA."
 }
+
+# SES inbound → Gmail / Roundcube
+output "ses_inbound_mx_records" {
+  value       = module.ses.ses_inbound_mx_records
+  description = "MX records for SES inbound cutover (set in DirectAdmin DNS)"
+}
+
+output "ses_inbound_cutover_checklist" {
+  value       = module.ses.inbound_cutover_checklist
+  description = "Post-apply steps for SES inbound (addresses live in TFC + Secrets Manager)"
+}
+
+output "ses_inbound_runtime_config_secret_name" {
+  value       = module.ses.inbound_runtime_config_secret_name
+  description = "Secrets Manager secret for inbound runtime config"
+}
+
+output "ses_inbound_alerts_topic_arn" {
+  value       = module.ses.inbound_alerts_topic_arn
+  description = "SNS topic for inbound flood/error alarms"
+}
