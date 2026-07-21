@@ -1,30 +1,44 @@
-# DirectAdmin → Gmail via SES (keep MX on DirectAdmin)
+# DirectAdmin → Gmail via SES (most seamless DA setup)
 
-Inbound mail stays on **DirectAdmin / Exim**. This pipe sends an authenticated
-**copy** to Gmail through SES so you do not hit `554 Email address is not verified`
-(that happens when Exim relays a forward through SES with the original From).
+**Keep MX on DirectAdmin.** Use the normal **Forwarders** UI with a pipe.
+Do not forward to a Gmail address through the SES SMTP smart host (that causes
+`554 Email address is not verified`).
 
-**Do not** point the domain MX at SES for this flow.
+## What you do in DirectAdmin (ongoing)
+
+For each mailbox that should also land in Gmail:
+
+1. **E-Mail Accounts** — keep/create the account (Roundcube stays as today).
+2. **Forwarders** → Create forwarder  
+   - From: the local address (same as the mailbox)  
+   - To: `| /usr/local/bin/ses-gmail-forward.py`  
+     (leading pipe is required)
+3. Confirm DA still delivers to the mailbox (account + forwarder). If a forwarder
+   *replaces* delivery on your DA version, use a destination that keeps local
+   delivery as well (DA/Exim often stores `user: user, |/path/script` in aliases).
+
+That is the whole day-to-day UX. Allowlist / Gmail destination live in AWS
+Secrets Manager (not in git).
 
 ## Flow
 
 ```
-Internet → MX DirectAdmin → local mailbox (Roundcube)
-                         ↘ unseen pipe → ses-gmail-forward.py → SES → Gmail
+Internet → MX DirectAdmin → mailbox (Roundcube)
+                         ↘ DA Forwarder pipe → ses-gmail-forward.py → SES → Gmail
 ```
 
-SES `From` = allowlisted local address (verified domain). `Reply-To` = original sender.
+SES sends as the local allowlisted address; `Reply-To` is the original sender.
 
-## 1. Terraform / IAM (this repo)
+## One-time server setup
 
-Apply the AWS workspace so that:
+### 1. Terraform
 
-- Instance role `WBAT_Main_Server` can `ses:SendRawEmail` and read the secret
-- Secret `tellerstech/ses-gmail-forward/runtime-config` exists
+Apply AWS workspace so `WBAT_Main_Server` can `ses:SendRawEmail` and read
+`tellerstech/ses-gmail-forward/runtime-config`.
 
-## 2. Populate Secrets Manager
+### 2. Secrets Manager
 
-Edit `tellerstech/ses-gmail-forward/runtime-config` (values only in AWS, not git):
+Populate `tellerstech/ses-gmail-forward/runtime-config`:
 
 ```json
 {
@@ -39,81 +53,44 @@ Edit `tellerstech/ses-gmail-forward/runtime-config` (values only in AWS, not git
 }
 ```
 
-## 3. Install script on the mail server
+`recipients` must include every address you create a pipe forwarder for.
+
+### 3. Install the pipe binary
 
 ```bash
 install -m 755 scripts/directadmin/ses_gmail_forward.py \
   /usr/local/bin/ses-gmail-forward.py
-
-mkdir -p /var/lib/ses-gmail-forward /var/log
+mkdir -p /var/lib/ses-gmail-forward
 touch /var/log/ses-gmail-forward.log
 chmod 750 /var/lib/ses-gmail-forward
-```
-
-Needs Python 3 + `boto3` (or a venv) and the instance profile credentials.
-
-```bash
 python3 -c 'import boto3; print(boto3.__version__)'
-# Optional smoke test (paste a tiny .eml on stdin):
-# printf 'From: a@example.com\nDate: Tue, 21 Jul 2026 12:00:00 +0000\nSubject: t\n\nbody\n' \
-#   | /usr/local/bin/ses-gmail-forward.py user1@example.com
 ```
 
-## 4. Wire Exim / DirectAdmin (unseen pipe)
+### 4. Remove broken Gmail address forwarders
 
-Deliver **locally as today**, and add an **unseen** pipe so the original is not
-stolen by the pipe.
+Delete Forwarders whose destination was a Gmail address (SES smart-host path).
 
-### Option A — Exim system filter (recommended pattern)
+### 5. Test
 
-On the DA box, add a system filter snippet that pipes only after local routing
-(exact path varies by DA/Exim layout). Conceptually:
+1. External mail → allowlisted address  
+2. Roundcube has it  
+3. Gmail has the SES copy  
+4. `/var/log/ses-gmail-forward.log` shows success  
 
-```
-# Pseudocode — adapt to your Exim system_filter / DA custom router docs.
-# For each message where $local_part@$domain is allowlisted on the server,
-# also run:
-unseen pipe "/usr/local/bin/ses-gmail-forward.py ${local_part}@${domain}"
-```
+## Why a small script is still required
 
-Because the script no-ops for non-allowlisted recipients, you may pipe all
-local mail for the domain and keep the allowlist only in Secrets Manager.
+DirectAdmin Forwarders only send to **addresses** or **pipes**. They cannot
+call Lambda/HTTP. A pipe to this script is the DA-native way to reach SES’s
+API (instance role) without changing MX.
 
-### Option B — Per-address alias (local + pipe)
-
-In the domain aliases file (DA virtual aliases), use a dual destination so
-mail is saved **and** piped (syntax depends on Exim/DA version), e.g. concept:
-
-```
-localpart: localpart, |/usr/local/bin/ses-gmail-forward.py localpart@example.com
-```
-
-Confirm with a test that Roundcube still gets the message if the pipe fails
-(script exits `0` on SES errors so Exim should not bounce local delivery).
-
-### Remove broken Gmail forwarders
-
-Delete DirectAdmin forwarders that pointed allowlisted addresses at Gmail via
-the SES smart host (those caused the 554 unverified-From bounces).
-
-## 5. Test
-
-1. From an **external** account, mail an allowlisted address.
-2. Confirm Roundcube has the message (MX still DA).
-3. Confirm Gmail received the SES copy (`Reply-To` = original sender).
-4. Check `/var/log/ses-gmail-forward.log`.
-
-## 6. Leave SES inbound receive disabled
-
-`enable_inbound_forwarding` should stay **false**. That stack receives mail at
-SES MX and is the wrong model when DirectAdmin owns inbound.
+Leave `enable_inbound_forwarding = false` (SES-as-MX is a different model).
 
 ## Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
-| Nothing in Gmail | Recipient not in secret allowlist; check log |
-| `AccessDenied` on SES | Instance profile policy not applied / wrong role |
-| `Email address is not verified` | Sending as an address/domain not verified in SES |
-| Roundcube empty | Pipe replaced delivery instead of `unseen` — fix Exim/alias |
-| Flood of SES sends | Rate limits in secret; check `/var/lib/ses-gmail-forward` |
+| Nothing in Gmail | Address missing from secret `recipients`; check log |
+| Roundcube empty | Forwarder replaced mailbox delivery — keep local account + pipe |
+| `AccessDenied` | Instance profile IAM not applied |
+| `Email address is not verified` | Local From domain/address not verified in SES |
+| Script not run | Forwarder missing leading `\|` or wrong path |

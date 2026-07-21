@@ -1,31 +1,28 @@
 #!/usr/bin/env python3
 """
-DirectAdmin / Exim pipe: copy allowlisted inbound mail to Gmail via SES.
+DirectAdmin pipe forwarder → Gmail via SES.
 
-MX stays on DirectAdmin (local delivery unchanged). Configure Exim/DA to also
-pipe a copy into this script (unseen). The script re-sends via SES as the
-local recipient (verified domain identity) with Reply-To = original From.
+Most seamless DA usage:
+  1. Keep the Email Account (Roundcube / local delivery).
+  2. E-Mail Accounts → Forwarders → create forwarder whose destination is:
+       | /usr/local/bin/ses-gmail-forward.py
+  3. Do NOT forward to a Gmail address through the SES smart host (554 unverified From).
 
-Usage (Exim pipe):
-  unseen pipe \"/usr/local/bin/ses-gmail-forward.py ${local_part}@${domain}\"
+MX stays on DirectAdmin. This script only sends an authenticated SES *copy*
+(From = allowlisted local address, Reply-To = original sender).
 
-Config: Secrets Manager tellerstech/ses-gmail-forward/runtime-config
-  {
-    \"gmail_destination\": \"your-gmail@example.com\",
-    \"recipients\": [\"user1@example.com\", \"user2@example.com\"],
-    \"rate_limit_per_recipient_per_hour\": 30,
-    \"rate_limit_global_per_hour\": 100,
-    \"max_message_bytes\": 10485760
-  }
+Recipient is taken from argv if present, otherwise from envelope/Delivered-To
+headers matched against the Secrets Manager allowlist.
 
-Requires: boto3, instance profile with ses:SendRawEmail + secretsmanager:GetSecretValue.
-Exit 0 on success / intentional skip so Exim does not defer local mail.
+Config secret: tellerstech/ses-gmail-forward/runtime-config
+Exit 0 always on skip/error so Exim does not bounce local mail.
 """
 
 from __future__ import annotations
 
 import email
 import email.policy
+import email.utils
 import json
 import logging
 import os
@@ -75,6 +72,37 @@ def _config() -> dict:
 
 def _allowlist(cfg: dict) -> set[str]:
     return {a.strip().lower() for a in (cfg.get("recipients") or []) if a}
+
+
+def _addresses_from_headers(mail_obj: email.message.Message) -> list[str]:
+    found: list[str] = []
+    for header in (
+        "Envelope-To",
+        "X-Envelope-To",
+        "Delivered-To",
+        "X-Original-To",
+        "X-Forwarded-To",
+        "To",
+        "Cc",
+    ):
+        for value in mail_obj.get_all(header) or []:
+            for _, addr in email.utils.getaddresses([value]):
+                if addr:
+                    found.append(addr.strip().lower())
+    return found
+
+
+def _resolve_recipient(argv: list[str], mail_obj: email.message.Message, allow: set[str]) -> str | None:
+    if len(argv) >= 2 and argv[1].strip():
+        candidate = argv[1].strip().lower()
+        if candidate in allow:
+            return candidate
+        logger.warning("argv recipient not allowlisted; trying headers")
+
+    for addr in _addresses_from_headers(mail_obj):
+        if addr in allow:
+            return addr
+    return None
 
 
 def _rate_ok(key: str, limit: int) -> bool:
@@ -140,14 +168,9 @@ def _build_forward_raw(original: email.message.Message, from_addr: str, gmail_de
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 2:
-        logger.error("Usage: ses-gmail-forward.py local@domain < message.eml")
-        return 0
-
-    recipient = argv[1].strip().lower()
     raw = sys.stdin.buffer.read()
     if not raw:
-        logger.warning("Empty stdin for %s; skip", recipient)
+        logger.warning("Empty stdin; skip")
         return 0
 
     try:
@@ -156,8 +179,15 @@ def main(argv: list[str]) -> int:
         logger.exception("Failed to load runtime config")
         return 0
 
-    if recipient not in _allowlist(cfg):
-        logger.info("Recipient not allowlisted; skip")
+    allow = _allowlist(cfg)
+    if not allow:
+        logger.error("recipients allowlist empty in runtime config")
+        return 0
+
+    mail_obj = email.message_from_bytes(raw, policy=email.policy.default)
+    recipient = _resolve_recipient(argv, mail_obj, allow)
+    if not recipient:
+        logger.info("No allowlisted recipient in argv/headers; skip")
         return 0
 
     max_bytes = int(cfg.get("max_message_bytes") or 10 * 1024 * 1024)
@@ -176,7 +206,6 @@ def main(argv: list[str]) -> int:
         logger.error("gmail_destination missing in runtime config")
         return 0
 
-    mail_obj = email.message_from_bytes(raw, policy=email.policy.default)
     if not (mail_obj.get("From") and mail_obj.get("Date")):
         logger.warning("Missing From/Date; skip")
         return 0
@@ -190,10 +219,9 @@ def main(argv: list[str]) -> int:
             Destinations=[gmail_dest],
             RawMessage={"Data": _build_forward_raw(mail_obj, recipient, gmail_dest)},
         )
-        logger.info("Forwarded copy for allowlisted recipient via SES")
+        logger.info("Forwarded SES copy for %s", recipient)
     except ClientError:
         logger.exception("SES SendRawEmail failed")
-        # Exit 0 so Exim does not bounce/defer the original local delivery.
         return 0
 
     return 0

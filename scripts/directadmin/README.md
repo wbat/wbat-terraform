@@ -4,8 +4,9 @@ Install on **both** DirectAdmin servers (`server` and `server2`) under `/usr/loc
 
 ## Related: Gmail copy via SES (MX stays on DA)
 
-See [ses_gmail_forward.md](./ses_gmail_forward.md) and `ses_gmail_forward.py`. That path
-keeps inbound MX on DirectAdmin and pipes a SES-authenticated copy to Gmail.
+Most seamless: DA **Forwarders** → `| /usr/local/bin/ses-gmail-forward.py`  
+(see [ses_gmail_forward.md](./ses_gmail_forward.md)). Keep the mailbox for Roundcube;
+do not forward to Gmail over the SES smart host.
 
 ## Hooks
 
