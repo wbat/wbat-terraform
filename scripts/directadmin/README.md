@@ -1,14 +1,22 @@
-# DirectAdmin backup hooks (server install)
+# DirectAdmin operational scripts
+
+## Mail → Gmail via SES (canonical)
+
+Inbound MX stays on DirectAdmin. Pipe forwarder runs
+[`ses_gmail_forward.py`](./ses_gmail_forward.py) → **dovecot-lda** (Roundcube) +
+**SES** (Gmail copy).
+
+Full runbook: [`ses_gmail_forward.md`](./ses_gmail_forward.md).
+
+Forwarder destination in DA UI:
+
+```text
+|/usr/local/bin/ses-gmail-forward.py
+```
+
+## Backup hooks (server install)
 
 Install on **both** DirectAdmin servers (`server` and `server2`) under `/usr/local/directadmin/scripts/custom/`.
-
-## Related: Gmail copy via SES (MX stays on DA)
-
-Most seamless: DA **Forwarders** → `| /usr/local/bin/ses-gmail-forward.py`  
-(see [ses_gmail_forward.md](./ses_gmail_forward.md)). Keep the mailbox for Roundcube;
-do not forward to Gmail over the SES smart host.
-
-## Hooks
 
 | File | DirectAdmin event |
 |------|-------------------|
@@ -17,7 +25,7 @@ do not forward to Gmail over the SES smart host.
 
 Both upload to `s3://wbat-tellerstech-directadmin-backups-<account>/<hostname>/YYYY-MM-DD/` (e.g. `server/` or `server2/`) via rclone remote `s3backup`, then **delete local copies** after a successful upload.
 
-## Install / update on server
+## Install / update backup hooks
 
 ```bash
 install -m 700 scripts/directadmin/all_backups_post.sh \
@@ -44,7 +52,7 @@ tail -30 /var/log/da-backup-s3.log
 df -h /
 ```
 
-## Troubleshooting
+## Troubleshooting (backups)
 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|

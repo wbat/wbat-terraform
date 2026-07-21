@@ -44,23 +44,3 @@ variable "tellerstech_email" {
   sensitive   = true
   default     = ""
 }
-
-variable "enable_inbound_forwarding" {
-  description = "Provision SES inbound receive + gated Lambda forward"
-  type        = bool
-  default     = false
-}
-
-variable "inbound_recipients" {
-  description = "Allowlisted addresses for SES receipt rules (TFC sensitive HCL list; never commit)"
-  type        = list(string)
-  sensitive   = true
-  default     = []
-}
-
-variable "inbound_alert_email" {
-  description = "Optional SNS email for inbound alarms (TFC sensitive)"
-  type        = string
-  sensitive   = true
-  default     = ""
-}

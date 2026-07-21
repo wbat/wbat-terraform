@@ -4,8 +4,7 @@ DirectAdmin pipe forwarder → local Maildir (Roundcube) + Gmail via SES.
 
 Aliases must be pipe-only (DA cannot safely expand bare/local+backslash forms):
 
-  brian: "|/usr/local/bin/ses-gmail-forward.py"
-  bteller: "|/usr/local/bin/ses-gmail-forward.py"
+  localpart: "|/usr/local/bin/ses-gmail-forward.py"
 
 This script:
   1) Delivers into the virtual mailbox via dovecot-lda (bypasses aliases)
