@@ -71,3 +71,8 @@ output "ses_inbound_alerts_topic_arn" {
   value       = module.ses.inbound_alerts_topic_arn
   description = "SNS topic for inbound flood/error alarms"
 }
+
+output "ses_da_gmail_forward_secret_name" {
+  value       = module.ses.da_gmail_forward_secret_name
+  description = "Secrets Manager secret for DirectAdmin → SES Gmail pipe (MX stays on DA)"
+}

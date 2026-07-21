@@ -2,6 +2,11 @@
 
 Install on **both** DirectAdmin servers (`server` and `server2`) under `/usr/local/directadmin/scripts/custom/`.
 
+## Related: Gmail copy via SES (MX stays on DA)
+
+See [ses_gmail_forward.md](./ses_gmail_forward.md) and `ses_gmail_forward.py`. That path
+keeps inbound MX on DirectAdmin and pipes a SES-authenticated copy to Gmail.
+
 ## Hooks
 
 | File | DirectAdmin event |

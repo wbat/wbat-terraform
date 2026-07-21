@@ -116,6 +116,34 @@ resource "aws_iam_role_policy" "WBAT_Main_Server-SNSReadOnly" {
   })
 }
 
+# DirectAdmin pipe → SES SendRawEmail (Gmail copy). MX stays on DirectAdmin.
+# Secret: tellerstech/ses-gmail-forward/runtime-config (random suffix on ARN).
+resource "aws_iam_role_policy" "WBAT_Main_Server-SesGmailForward" {
+  name = "SesGmailForward"
+  role = aws_iam_role.WBAT_Main_Server.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "SesSendAsVerifiedIdentity"
+        Effect   = "Allow"
+        Action   = ["ses:SendRawEmail", "ses:SendEmail"]
+        Resource = "*"
+      },
+      {
+        Sid    = "ReadForwardRuntimeConfig"
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret"
+        ]
+        Resource = "arn:aws:secretsmanager:us-east-1:${data.aws_caller_identity.current.account_id}:secret:tellerstech/ses-gmail-forward/runtime-config*"
+      }
+    ]
+  })
+}
+
 resource "aws_iam_instance_profile" "WBAT_Main_Server" {
   name = "WBAT_Main_Server"
   role = aws_iam_role.WBAT_Main_Server.name
