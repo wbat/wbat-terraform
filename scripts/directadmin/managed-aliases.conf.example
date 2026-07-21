@@ -1,0 +1,12 @@
+# Desired-state for SES Gmail pipe aliases.
+# Install as /etc/ses-gmail-forward/managed-aliases.conf (mode 600).
+# Do not commit real mailbox addresses to git.
+#
+# Format (one domain per line):
+#   domain localpart[,localpart...]
+#
+# Each local-part is forced to:
+#   localpart: "|/usr/local/bin/ses-gmail-forward.py"
+#
+# Example:
+# example.com user1,user2

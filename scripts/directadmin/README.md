@@ -14,6 +14,37 @@ Forwarder destination in DA UI:
 |/usr/local/bin/ses-gmail-forward.py
 ```
 
+### Persist pipe aliases (DA Forwarders UI rewrite)
+
+DA rewrites `/etc/virtual/<domain>/aliases` when Forwarders change. Prefer DA
+**hooks** (immediate) over cron; optional cron is a safety net.
+
+| File | Install path |
+|------|----------------|
+| `ensure_ses_gmail_aliases.sh` | `/usr/local/bin/ensure-ses-gmail-aliases.sh` |
+| `managed-aliases.conf.example` | `/etc/ses-gmail-forward/managed-aliases.conf` (edit; mode 600) |
+| `forwarder_create_post.sh` | `/usr/local/directadmin/scripts/custom/forwarder_create_post.sh` |
+| `forwarder_delete_post.sh` | `/usr/local/directadmin/scripts/custom/forwarder_delete_post.sh` |
+
+```bash
+install -m 755 scripts/directadmin/ensure_ses_gmail_aliases.sh \
+  /usr/local/bin/ensure-ses-gmail-aliases.sh
+mkdir -p /etc/ses-gmail-forward
+install -m 600 scripts/directadmin/managed-aliases.conf.example \
+  /etc/ses-gmail-forward/managed-aliases.conf
+# edit /etc/ses-gmail-forward/managed-aliases.conf — real domain + local-parts
+
+install -m 700 scripts/directadmin/forwarder_create_post.sh \
+  /usr/local/directadmin/scripts/custom/forwarder_create_post.sh
+install -m 700 scripts/directadmin/forwarder_delete_post.sh \
+  /usr/local/directadmin/scripts/custom/forwarder_delete_post.sh
+
+/usr/local/bin/ensure-ses-gmail-aliases.sh
+# optional safety net:
+# echo '*/15 * * * * root /usr/local/bin/ensure-ses-gmail-aliases.sh' \
+#   >/etc/cron.d/ses-gmail-aliases
+```
+
 ## Backup hooks (server install)
 
 Install on **both** DirectAdmin servers (`server` and `server2`) under `/usr/local/directadmin/scripts/custom/`.
