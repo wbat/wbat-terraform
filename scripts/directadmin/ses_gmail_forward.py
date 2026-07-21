@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-DirectAdmin pipe forwarder → Gmail via SES.
+DirectAdmin pipe forwarder → local Maildir (Roundcube) + Gmail via SES.
 
-Most seamless DA usage:
-  1. Keep the Email Account (Roundcube / local delivery).
-  2. E-Mail Accounts → Forwarders → create forwarder whose destination is:
-       | /usr/local/bin/ses-gmail-forward.py
-  3. Do NOT forward to a Gmail address through the SES smart host (554 unverified From).
+Aliases must be pipe-only (DA cannot safely expand bare/local+backslash forms):
 
-MX stays on DirectAdmin. This script only sends an authenticated SES *copy*
-(From = allowlisted local address, Reply-To = original sender).
+  brian: "|/usr/local/bin/ses-gmail-forward.py"
+  bteller: "|/usr/local/bin/ses-gmail-forward.py"
 
-Recipient is taken from argv if present, otherwise from envelope/Delivered-To
-headers matched against the Secrets Manager allowlist.
+This script:
+  1) Delivers into the virtual mailbox via dovecot-lda (bypasses aliases)
+  2) Sends an authenticated SES copy to Gmail (verified From + Reply-To original)
 
-Config secret: tellerstech/ses-gmail-forward/runtime-config
-Exit 0 always on skip/error so Exim does not bounce local mail.
+Do NOT forward to a Gmail address through the SES smart host (554 unverified From).
+Do NOT change MX away from DirectAdmin.
+
+Config: Secrets Manager tellerstech/ses-gmail-forward/runtime-config
+Never write to stdout/stderr under Exim (treated as pipe failure).
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ import email.utils
 import json
 import logging
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -42,21 +43,20 @@ SECRET_ID = os.environ.get(
 )
 STATE_DIR = Path(os.environ.get("SES_GMAIL_FORWARD_STATE", "/var/lib/ses-gmail-forward"))
 AWS_REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+DOVECOT_LDA_CANDIDATES = (
+    "/usr/libexec/dovecot/dovecot-lda",
+    "/usr/sbin/dovecot-lda",
+    "/usr/libexec/dovecot/deliver",
+    "/usr/sbin/deliver",
+)
 
 
 def _setup_logging() -> logging.Logger:
-    """
-    Log to file when possible. Never write to stdout/stderr under Exim:
-    DA's pipe transport treats command output as a delivery failure even when
-    the process exits 0 (which produced the Mailer-Daemon bounce after SES
-    had already succeeded).
-    """
     handlers: list[logging.Handler] = []
     try:
         handlers.append(logging.FileHandler(LOG_PATH))
     except OSError:
         pass
-    # Interactive/manual runs only — not when Exim pipes mail on stdin.
     if sys.stderr.isatty():
         handlers.append(logging.StreamHandler(sys.stderr))
     if not handlers:
@@ -111,15 +111,29 @@ def _addresses_from_headers(mail_obj: email.message.Message) -> list[str]:
     return found
 
 
-def _resolve_recipient(argv: list[str], mail_obj: email.message.Message, allow: set[str]) -> str | None:
-    if len(argv) >= 2 and argv[1].strip():
-        candidate = argv[1].strip().lower()
-        if candidate in allow:
-            return candidate
-        logger.warning("argv recipient not allowlisted; trying headers")
+def _recipient_from_env() -> str | None:
+    local = os.environ.get("LOCAL_PART") or os.environ.get("local_part")
+    domain = os.environ.get("DOMAIN") or os.environ.get("domain")
+    if local and domain:
+        return f"{local}@{domain}".lower()
+    return None
 
-    for addr in _addresses_from_headers(mail_obj):
+
+def _resolve_recipient(argv: list[str], mail_obj: email.message.Message, allow: set[str]) -> str | None:
+    candidates: list[str] = []
+    if len(argv) >= 2 and argv[1].strip():
+        candidates.append(argv[1].strip().lower())
+    env_recip = _recipient_from_env()
+    if env_recip:
+        candidates.append(env_recip)
+    candidates.extend(_addresses_from_headers(mail_obj))
+
+    for addr in candidates:
         if addr in allow:
+            return addr
+    # Pipe-only aliases: still deliver locally if we can identify the mailbox.
+    for addr in candidates:
+        if "@" in addr:
             return addr
     return None
 
@@ -140,7 +154,6 @@ def _rate_ok(key: str, limit: int) -> bool:
         path.write_text(str(count + 1))
         return True
     except OSError:
-        # If state dir is not writable, do not block forwarding.
         logger.warning("Rate-limit state unwritable; allowing send")
         return True
 
@@ -158,6 +171,37 @@ def _has_payload(msg: email.message.Message) -> bool:
         return False
     payload = msg.get_payload(decode=True)
     return bool(payload and payload.strip())
+
+
+def _find_dovecot_lda() -> str | None:
+    for path in DOVECOT_LDA_CANDIDATES:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def _deliver_local(raw: bytes, recipient: str) -> bool:
+    lda = _find_dovecot_lda()
+    if not lda:
+        logger.error("dovecot-lda not found; cannot deliver to Roundcube")
+        return False
+    try:
+        proc = subprocess.run(
+            [lda, "-d", recipient],
+            input=raw,
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+    except OSError:
+        logger.exception("Failed to exec dovecot-lda")
+        return False
+    if proc.returncode != 0:
+        err = (proc.stderr or b"").decode("utf-8", errors="replace")[:500]
+        logger.error("dovecot-lda failed rc=%s: %s", proc.returncode, err)
+        return False
+    logger.info("Delivered local mailbox copy for %s via dovecot-lda", recipient)
+    return True
 
 
 def _build_forward_raw(original: email.message.Message, from_addr: str, gmail_dest: str) -> bytes:
@@ -191,6 +235,39 @@ def _build_forward_raw(original: email.message.Message, from_addr: str, gmail_de
     return msg.as_bytes()
 
 
+def _send_ses(
+    mail_obj: email.message.Message,
+    raw: bytes,
+    recipient: str,
+    gmail_dest: str,
+    cfg: dict,
+) -> None:
+    max_bytes = int(cfg.get("max_message_bytes") or 10 * 1024 * 1024)
+    if len(raw) > max_bytes:
+        logger.warning("Message oversized (%s bytes); skip SES", len(raw))
+        return
+    per_recip = int(cfg.get("rate_limit_per_recipient_per_hour") or 30)
+    global_lim = int(cfg.get("rate_limit_global_per_hour") or 100)
+    if not _rate_ok(f"r-{recipient}", per_recip) or not _rate_ok("global", global_lim):
+        logger.warning("Rate limit exceeded for %s; skip SES", recipient)
+        return
+    if not (mail_obj.get("From") and mail_obj.get("Date")):
+        logger.warning("Missing From/Date; skip SES")
+        return
+    if not _has_payload(mail_obj):
+        logger.warning("Empty payload; skip SES")
+        return
+    try:
+        ses.send_raw_email(
+            Source=recipient,
+            Destinations=[gmail_dest],
+            RawMessage={"Data": _build_forward_raw(mail_obj, recipient, gmail_dest)},
+        )
+        logger.info("Forwarded SES copy for %s", recipient)
+    except ClientError:
+        logger.exception("SES SendRawEmail failed")
+
+
 def main(argv: list[str]) -> int:
     raw = sys.stdin.buffer.read()
     if not raw:
@@ -204,49 +281,23 @@ def main(argv: list[str]) -> int:
         return 0
 
     allow = _allowlist(cfg)
-    if not allow:
-        logger.error("recipients allowlist empty in runtime config")
-        return 0
-
     mail_obj = email.message_from_bytes(raw, policy=email.policy.default)
     recipient = _resolve_recipient(argv, mail_obj, allow)
     if not recipient:
-        logger.info("No allowlisted recipient in argv/headers; skip")
-        return 0
+        logger.error("Could not resolve recipient for local+SES delivery")
+        return 1
 
-    max_bytes = int(cfg.get("max_message_bytes") or 10 * 1024 * 1024)
-    if len(raw) > max_bytes:
-        logger.warning("Message oversized (%s bytes); skip forward", len(raw))
-        return 0
-
-    per_recip = int(cfg.get("rate_limit_per_recipient_per_hour") or 30)
-    global_lim = int(cfg.get("rate_limit_global_per_hour") or 100)
-    if not _rate_ok(f"r-{recipient}", per_recip) or not _rate_ok("global", global_lim):
-        logger.warning("Rate limit exceeded for %s; skip forward", recipient)
-        return 0
+    # Roundcube/Maildir first (aliases are pipe-only).
+    if not _deliver_local(raw, recipient):
+        return 1
 
     gmail_dest = (cfg.get("gmail_destination") or "").strip()
-    if not gmail_dest:
+    if recipient in allow and gmail_dest:
+        _send_ses(mail_obj, raw, recipient, gmail_dest, cfg)
+    elif recipient not in allow:
+        logger.info("Recipient not in SES allowlist; local-only delivery")
+    else:
         logger.error("gmail_destination missing in runtime config")
-        return 0
-
-    if not (mail_obj.get("From") and mail_obj.get("Date")):
-        logger.warning("Missing From/Date; skip")
-        return 0
-    if not _has_payload(mail_obj):
-        logger.warning("Empty payload; skip")
-        return 0
-
-    try:
-        ses.send_raw_email(
-            Source=recipient,
-            Destinations=[gmail_dest],
-            RawMessage={"Data": _build_forward_raw(mail_obj, recipient, gmail_dest)},
-        )
-        logger.info("Forwarded SES copy for %s", recipient)
-    except ClientError:
-        logger.exception("SES SendRawEmail failed")
-        return 0
 
     return 0
 
