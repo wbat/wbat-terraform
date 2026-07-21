@@ -13,9 +13,42 @@ For each mailbox that should also land in Gmail:
    - From: the local address (same as the mailbox)  
    - To: `| /usr/local/bin/ses-gmail-forward.py`  
      (leading pipe is required)
-3. Confirm DA still delivers to the mailbox (account + forwarder). If a forwarder
-   *replaces* delivery on your DA version, use a destination that keeps local
-   delivery as well (DA/Exim often stores `user: user, |/path/script` in aliases).
+3. Confirm DA still delivers to the mailbox. After saving, check aliases:
+
+```bash
+grep -E '^(brian|bteller):' /etc/virtual/tellerstech.com/aliases
+```
+
+Bare `brian` in the alias is rewritten to `brian@server.wbat.net` and fails.
+Use a backslash-qualified address so Exim delivers to the virtual mailbox
+without re-aliasing (and keep the pipe):
+
+```text
+brian: \brian@tellerstech.com, "|/usr/local/bin/ses-gmail-forward.py"
+bteller: \bteller@tellerstech.com, "|/usr/local/bin/ses-gmail-forward.py"
+```
+
+Apply with:
+
+```bash
+python3 <<'PY'
+from pathlib import Path
+path = Path("/etc/virtual/tellerstech.com/aliases")
+lines = []
+for line in path.read_text().splitlines():
+    if line.startswith("brian:"):
+        lines.append(r'brian: \brian@tellerstech.com, "|/usr/local/bin/ses-gmail-forward.py"')
+    elif line.startswith("bteller:"):
+        lines.append(r'bteller: \bteller@tellerstech.com, "|/usr/local/bin/ses-gmail-forward.py"')
+    else:
+        lines.append(line)
+path.write_text("\n".join(lines) + "\n")
+print(path.read_text())
+PY
+```
+
+**Important:** Do not edit these forwarders again in the DA UI without re-checking
+aliases — the UI may rewrite them to pipe-only or unqualified `brian`.
 
 That is the whole day-to-day UX. Allowlist / Gmail destination live in AWS
 Secrets Manager (not in git).
