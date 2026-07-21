@@ -62,7 +62,10 @@ install -m 755 scripts/directadmin/ses_gmail_forward.py \
   /usr/local/bin/ses-gmail-forward.py
 mkdir -p /var/lib/ses-gmail-forward
 touch /var/log/ses-gmail-forward.log
-chmod 750 /var/lib/ses-gmail-forward
+# Exim runs the pipe as the mail/DA user — must be group-writable.
+chgrp mail /var/log/ses-gmail-forward.log /var/lib/ses-gmail-forward
+chmod 665 /var/log/ses-gmail-forward.log
+chmod 775 /var/lib/ses-gmail-forward
 python3 -c 'import boto3; print(boto3.__version__)'
 ```
 
