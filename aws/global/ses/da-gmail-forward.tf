@@ -1,11 +1,15 @@
-# DirectAdmin → SES Gmail forward (MX stays on DirectAdmin).
+# DirectAdmin → SES Gmail forward (canonical TellersTech mail path).
+#
+# MX stays on DirectAdmin. Server pipe script:
+#   scripts/directadmin/ses_gmail_forward.py
+# delivers via dovecot-lda (Roundcube) then SES SendRawEmail (Gmail copy).
 #
 # Runtime config secret is always provisioned. Populate in AWS console / CLI;
 # Terraform ignores secret_string changes after create. No addresses in git.
 
 resource "aws_secretsmanager_secret" "da_gmail_forward" {
   name        = "tellerstech/ses-gmail-forward/runtime-config"
-  description = "DA pipe forward config: recipients, gmail_destination, rate limits (no MX change)"
+  description = "DA pipe forward config: recipients, gmail_destination, rate limits (MX stays on DirectAdmin)"
 
   tags = merge(
     var.core_tags,

@@ -46,11 +46,8 @@ module "global" {
   billing_threshold_warning  = 75  # Alert at $75
   billing_threshold_critical = 100 # Critical at $100
 
-  # SES — set inbound_* in TFC sensitive variable set before enabling
-  tellerstech_email         = var.tellerstech_email
-  enable_inbound_forwarding = var.enable_inbound_forwarding
-  inbound_recipients        = var.inbound_recipients
-  inbound_alert_email       = var.inbound_alert_email
+  # SES bounce/complaint SNS + DA→Gmail pipe secret (see scripts/directadmin/)
+  tellerstech_email = var.tellerstech_email
 }
 
 ######################################################

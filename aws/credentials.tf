@@ -15,11 +15,11 @@
 #
 # Prefer Terraform Cloud sensitive variables / variable sets for real values.
 # credentials.auto.tfvars is gitignored — never commit real addresses.
-# For SES inbound, also set:
-#   enable_inbound_forwarding = true
-#   inbound_recipients        = ["recipient@example.com"]  # sensitive HCL
-#   inbound_alert_email       = "alerts@example.com"       # optional, sensitive
-# And populate Secrets Manager tellerstech/ses-inbound/runtime-config after apply.
+#
+# TellersTech inbound mail (canonical):
+#   MX stays on DirectAdmin. Pipe script + Secrets Manager
+#   tellerstech/ses-gmail-forward/runtime-config
+#   See scripts/directadmin/ses_gmail_forward.md
 #
 ######################################################
 variable "personal_email" {
@@ -31,26 +31,6 @@ variable "personal_email" {
 
 variable "tellerstech_email" {
   description = "Business notification email for legacy SES SNS topics (TFC sensitive preferred)"
-  type        = string
-  sensitive   = true
-  default     = ""
-}
-
-variable "enable_inbound_forwarding" {
-  description = "Provision SES inbound receive + gated Lambda forward to Gmail/Roundcube"
-  type        = bool
-  default     = false
-}
-
-variable "inbound_recipients" {
-  description = "Allowlisted addresses for SES receipt rules (TFC sensitive HCL list)"
-  type        = list(string)
-  sensitive   = true
-  default     = []
-}
-
-variable "inbound_alert_email" {
-  description = "Optional SNS email for inbound flood/error alarms (TFC sensitive)"
   type        = string
   sensitive   = true
   default     = ""
