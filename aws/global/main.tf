@@ -37,9 +37,9 @@ module "cloudwatch" {
 module "ses" {
   source = "./ses"
 
-  core_tags            = var.core_tags
-  tellerstech_email    = var.tellerstech_email
+  core_tags                 = var.core_tags
+  tellerstech_email         = var.tellerstech_email
   enable_inbound_forwarding = var.enable_inbound_forwarding
-  inbound_recipients   = var.inbound_recipients
-  inbound_alert_email  = var.inbound_alert_email
+  inbound_recipients        = var.inbound_recipients
+  inbound_alert_email       = var.inbound_alert_email
 }
