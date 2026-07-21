@@ -64,7 +64,7 @@ output "inbound_alerts_topic_arn" {
 }
 
 output "ses_inbound_mx_records" {
-  description = "MX to publish in DirectAdmin DNS for the receiving domain after apply + runtime secret is populated"
+  description = "Only if enable_inbound_forwarding=true (not used when DirectAdmin owns MX)"
   value = var.enable_inbound_forwarding ? [
     {
       priority = 10
@@ -74,15 +74,29 @@ output "ses_inbound_mx_records" {
 }
 
 output "inbound_cutover_checklist" {
-  description = "Post-apply steps (no mailbox addresses — those live in TFC + Secrets Manager)"
+  description = "Legacy SES-receive cutover (prefer DA pipe forward; keep enable_inbound_forwarding=false)"
   value = var.enable_inbound_forwarding ? [
+    "WARNING: Enabling this moves inbound MX to SES; DirectAdmin will not be primary MX.",
+    "Prefer scripts/directadmin/ses_gmail_forward.py with MX left on DirectAdmin instead.",
     "1. Set TFC sensitive variable inbound_recipients (HCL list of allowlisted addresses)",
     "2. Optionally set TFC sensitive inbound_alert_email for alarm SNS email confirm",
-    "3. Put runtime JSON in Secrets Manager secret tellerstech/ses-inbound/runtime-config (recipients, gmail_destination, alert_email, smtp.host/port/mailboxes)",
-    "4. Confirm allowlisted mailboxes exist in DirectAdmin for Roundcube",
+    "3. Put runtime JSON in Secrets Manager secret tellerstech/ses-inbound/runtime-config",
+    "4. Confirm allowlisted mailboxes exist in DirectAdmin for Roundcube reinject",
     "5. Delete DirectAdmin forwarders that pointed those addresses at Gmail",
-    "6. In DirectAdmin DNS for the domain, set MX 10 to inbound-smtp.<region>.amazonaws.com and remove the old MX",
-    "7. Send a test from an external account; verify Gmail + Roundcube + gate/worker logs; confirm SNS alarm email if configured",
-    "8. Rollback: restore previous MX; set enable_inbound_forwarding=false or deactivate the receipt rule set",
-  ] : []
+    "6. Set MX 10 to inbound-smtp.<region>.amazonaws.com (replaces DA as inbound)",
+    "7. Test externally; verify Gmail + Roundcube reinject + Lambda logs",
+    "8. Rollback: restore previous MX; set enable_inbound_forwarding=false",
+    ] : [
+    "enable_inbound_forwarding is false — use DirectAdmin MX + ses_gmail_forward.py (see scripts/directadmin/ses_gmail_forward.md)",
+  ]
+}
+
+output "da_gmail_forward_secret_name" {
+  description = "Secrets Manager secret for DirectAdmin → SES Gmail pipe forward"
+  value       = aws_secretsmanager_secret.da_gmail_forward.name
+}
+
+output "da_gmail_forward_secret_arn" {
+  description = "Secrets Manager ARN for DirectAdmin → SES Gmail pipe forward"
+  value       = aws_secretsmanager_secret.da_gmail_forward.arn
 }

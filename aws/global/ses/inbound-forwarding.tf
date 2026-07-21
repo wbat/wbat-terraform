@@ -1,14 +1,11 @@
 # SES inbound receive → sync gate → S3 → SQS → worker → Gmail + Roundcube.
 #
-# Cutover (no mailbox addresses in this public repo):
-#   1. Set TFC sensitive var inbound_recipients (HCL list)
-#   2. Populate Secrets Manager runtime-config JSON (see secret name output)
-#   3. terraform apply
-#   4. Remove DirectAdmin Gmail forwarders for allowlisted addresses
-#   5. Point domain MX at SES inbound (see ses_inbound_mx_records output)
-#   6. Test from an external account; check Gmail, Roundcube, Lambda logs
+# DEPRECATED for TellersTech mail: prefer DirectAdmin MX + scripts/directadmin/
+# ses_gmail_forward.py so Postfix/Exim keeps inbound. Leave
+# enable_inbound_forwarding = false unless you intentionally point MX at SES.
 #
-# Roundcube copies use SMTP submission :587 (AUTH). Port 25 from Lambda is blocked.
+# If enabled, MX must point at SES (DirectAdmin is no longer primary inbound).
+# Roundcube copies then require SMTP :587 reinject (port 25 from Lambda is blocked).
 
 data "aws_region" "current" {}
 
