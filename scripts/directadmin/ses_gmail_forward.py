@@ -43,15 +43,24 @@ SECRET_ID = os.environ.get(
 STATE_DIR = Path(os.environ.get("SES_GMAIL_FORWARD_STATE", "/var/lib/ses-gmail-forward"))
 AWS_REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_PATH),
-        logging.StreamHandler(sys.stderr),
-    ],
-)
-logger = logging.getLogger("ses-gmail-forward")
+
+def _setup_logging() -> logging.Logger:
+    """Prefer file log; never crash the pipe if the file is unwritable (Exim != root)."""
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+    try:
+        handlers.insert(0, logging.FileHandler(LOG_PATH))
+    except OSError:
+        pass
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        handlers=handlers,
+        force=True,
+    )
+    return logging.getLogger("ses-gmail-forward")
+
+
+logger = _setup_logging()
 
 secretsmanager = boto3.client("secretsmanager", region_name=AWS_REGION)
 ses = boto3.client("ses", region_name=AWS_REGION)
@@ -106,19 +115,24 @@ def _resolve_recipient(argv: list[str], mail_obj: email.message.Message, allow: 
 
 
 def _rate_ok(key: str, limit: int) -> bool:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
-    path = STATE_DIR / f"rate-{key.replace('/', '_')}-{hour}.count"
     try:
-        count = int(path.read_text().strip() or "0")
-    except FileNotFoundError:
-        count = 0
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+        path = STATE_DIR / f"rate-{key.replace('/', '_')}-{hour}.count"
+        try:
+            count = int(path.read_text().strip() or "0")
+        except FileNotFoundError:
+            count = 0
+        except OSError:
+            count = 0
+        if count >= limit:
+            return False
+        path.write_text(str(count + 1))
+        return True
     except OSError:
-        count = 0
-    if count >= limit:
-        return False
-    path.write_text(str(count + 1))
-    return True
+        # If state dir is not writable, do not block forwarding.
+        logger.warning("Rate-limit state unwritable; allowing send")
+        return True
 
 
 def _has_payload(msg: email.message.Message) -> bool:
