@@ -39,7 +39,28 @@ variable "billing_threshold_critical" {
 }
 
 variable "tellerstech_email" {
-  description = "TellersTech email address for SES forwarding notifications"
+  description = "Legacy SNS email for the old forwarding-notification topic (TFC sensitive)"
   type        = string
+  sensitive   = true
+  default     = ""
+}
+
+variable "enable_inbound_forwarding" {
+  description = "Provision SES inbound receive + gated Lambda forward"
+  type        = bool
+  default     = false
+}
+
+variable "inbound_recipients" {
+  description = "Allowlisted addresses for SES receipt rules (TFC sensitive HCL list; never commit)"
+  type        = list(string)
+  sensitive   = true
+  default     = []
+}
+
+variable "inbound_alert_email" {
+  description = "Optional SNS email for inbound alarms (TFC sensitive)"
+  type        = string
+  sensitive   = true
   default     = ""
 }
