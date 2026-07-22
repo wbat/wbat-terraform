@@ -59,7 +59,18 @@ user2: "|/usr/local/bin/ses-gmail-forward.py"
 Do **not** use bare `user` or `\user@domain` in the alias — those fail on this host
 (`user@serverhostname` or LMTP `501 Invalid character in localpart`).
 
-Re-check aliases after any Forwarders UI edit; DA may rewrite them.
+### Persist against Forwarders UI rewrites
+
+Aliases are **not** DA templates — there is no `templates/custom` override for them.
+Use DirectAdmin’s email hooks + a desired-state file (preferred) and optional cron:
+
+1. Config: `/etc/ses-gmail-forward/managed-aliases.conf` (from `managed-aliases.conf.example`)
+2. Enforcer: `/usr/local/bin/ensure-ses-gmail-aliases.sh`
+3. Hooks: `forwarder_create_post.sh` / `forwarder_delete_post.sh` under
+   `/usr/local/directadmin/scripts/custom/`
+4. Optional: cron every 15 minutes calling the enforcer
+
+See [`README.md`](./README.md) install block. Log: `/var/log/ses-gmail-forward-aliases.log`.
 
 ## Server install / update
 
