@@ -1,6 +1,7 @@
 # Private S3 origin for CloudFront custom error pages (www.tellerstech.com).
 # HTML lives under errors/; objects are keyed as errors/*.html so CF can serve
-# /errors/404.html etc. via OAC when WordPress is down or returns 4xx/5xx.
+# /errors/*.html via OAC. Only 5xx are remapped via custom_error_response —
+# 404/403 stay with WordPress / nginx so the full-chrome TT 404 remains.
 
 data "aws_caller_identity" "current" {}
 

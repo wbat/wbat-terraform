@@ -8,17 +8,19 @@ When the site returns **502 Bad Gateway** from CloudFront, the failure is betwee
 - **Origin domain**: `origin.tellerstech.com` (variable `origin_fqdn`, default in `cloudfront/variables.tf`). *Not* the server IP.
 - **Origin protocol**: HTTPS only (port 443), TLS 1.2.
 - **Custom header**: `X-CloudFront-Secret` = `var.cloudfront_origin_secret` (TFC/credentials).
-- **Custom error pages**: private S3 bucket + OAC (`error-pages.tf`); `custom_error_response` maps viewer-facing 403/404 → branded HTML and 500/502/503/504 → `/errors/503.html`, keeping the **real status code**.
+- **Custom error pages**: private S3 bucket + OAC (`error-pages.tf`); `custom_error_response` maps **5xx only** (500/502/503/504 → `/errors/503.html`), keeping the **real status code**. **404/403 are not remapped** so WordPress keeps the full-chrome TT 404.
 - **DNS**: `origin.tellerstech.com` is described as "managed in BIND" (outside this repo). `www.tellerstech.com` CNAMEs to the CloudFront domain.
 
 CloudFront therefore connects to **https://origin.tellerstech.com** and sends the secret header. The server must respond successfully to that request.
 
 ## Branded error pages (www)
 
-When WordPress returns 403/404/5xx, or CloudFront cannot reach the origin (502/504), viewers of **www.tellerstech.com** get static HTML from S3 (`aws/global/cloudfront/errors/`), not the raw nginx/WP body. Status codes are unchanged (no fake 200).
+When CloudFront cannot reach the origin or the origin returns **5xx** (500/502/503/504), viewers of **www.tellerstech.com** get static HTML from S3 (`/errors/503.html`). Status codes are unchanged (no fake 200).
+
+**404** (and origin **403**) are left alone so WordPress can serve the full-chrome TT 404 (`tt_render_404_page`). Static `403.html` / `404.html` remain in the bucket under `/errors/*` for direct checks, but are not wired as `custom_error_response`.
 
 - Direct check: `curl -sI https://www.tellerstech.com/errors/503.html` → **200** from the S3 origin behavior.
-- Missing path: `curl -sI https://www.tellerstech.com/this-path-does-not-exist-tt/` → **404** with branded page.
+- Missing path: `curl -sI https://www.tellerstech.com/this-path-does-not-exist-tt/` → **404** from WordPress (site nav/footer), not S3.
 - Direct `origin.tellerstech.com` bypasses CloudFront and does **not** get these pages.
 
 ## Server-side companions (not in this repo)
@@ -47,8 +49,8 @@ Ops docs and scripts live in **TellersTechOrg/tellerstech-website**:
 
 3. **Nginx origin gate (403, not 502)**
    - Anonymous `https://origin.tellerstech.com/` without `X-CloudFront-Secret` returns **403** by design (scraper protection). That is **not** a CloudFront 502.
-   - Secret mismatch (CF header ≠ nginx cust_nginx ≠ wp-config) also yields origin **403**. On **www**, CloudFront keeps status **403** and may serve the branded `/errors/403.html` body via `custom_error_response` — it does **not** turn 403 into 502. Debug secret rotation when you observe **403**, not when debugging **502**.
-   - Reserve **502** for connection/TLS/DNS/origin-unreachable failures (checklist items 1–2 and 4). A viewer-facing **502** may show the branded “Temporarily unavailable” page while the status remains 502.
+   - Secret mismatch (CF header ≠ nginx cust_nginx ≠ wp-config) also yields origin **403**. CloudFront does **not** remap 403 to a custom page (or to 502). Debug secret rotation when you observe **403**, not when debugging **502**.
+   - Reserve **502** for connection/TLS/DNS/origin-unreachable failures (checklist items 1–2 and 4). A viewer-facing **502** may show the branded “Temporarily unavailable” S3 page while the status remains 502.
    - When debugging **403** after a rotation: align all four secret copies; reinstall gate with `install-cloudfront-origin-gate.sh`.
    - **DirectAdmin**: use parent `tellerstech.com.cust_nginx` (host-conditional). `origin.tellerstech.com.cust_nginx` is ignored (subdomain, not a DA domain). After `rewrite nginx`, immediately re-run the loopback fixer.
 
@@ -81,7 +83,7 @@ Ops docs and scripts live in **TellersTechOrg/tellerstech-website**:
 | DNS for origin    | BIND / external DNS → must point to origin server             |
 | SSL for origin    | Server: name/SAN covering `origin.tellerstech.com`; loopback listens required (**502** if wrong) |
 | Nginx vhost       | DA + `fix-nginx-loopback-listeners.sh`; parent cust_nginx gate |
-| Error HTML (www)  | Terraform: S3 + OAC + `custom_error_response` → `/errors/*.html` |
+| Error HTML (www)  | Terraform: S3 + OAC; `custom_error_response` for **5xx only** → `/errors/503.html` |
 
 For **502**, fix the first failing DNS/TLS/reachability check. For **403**, align the secret gate.
 
