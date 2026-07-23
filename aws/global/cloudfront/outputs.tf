@@ -12,3 +12,8 @@ output "distribution_arn" {
   value       = aws_cloudfront_distribution.tellerstech_website.arn
   description = "CloudFront distribution ARN"
 }
+
+output "error_pages_bucket_id" {
+  value       = aws_s3_bucket.cf_errors.id
+  description = "Private S3 bucket for CloudFront custom error HTML"
+}
