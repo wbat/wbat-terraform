@@ -12,39 +12,55 @@ When the site returns **502 Bad Gateway** from CloudFront, the failure is betwee
 
 CloudFront therefore connects to **https://origin.tellerstech.com** and sends the secret header. The server must respond successfully to that request.
 
+## Server-side companions (not in this repo)
+
+Ops docs and scripts live in **TellersTechOrg/tellerstech-website**:
+
+- [docs/cloudfront-wp-admin-setup.md](https://github.com/TellersTechOrg/tellerstech-website/blob/main/docs/cloudfront-wp-admin-setup.md) — nginx origin gate + wp-config Host override
+- [docs/nginx-loopback-listeners.md](https://github.com/TellersTechOrg/tellerstech-website/blob/main/docs/nginx-loopback-listeners.md) — DA split-horizon listens (`172.30.0.71` / `127.0.0.1`)
+- `scripts/install-cloudfront-origin-gate.sh` — install/rotate nginx gate after secret changes
+
+**Secret must match in four places:** TFC `cloudfront_origin_secret` → CloudFront header (via TF apply) → server `wp-config.php` → DirectAdmin `tellerstech.com.cust_nginx`.
+
 ## Checklist (when 502 appears)
 
 1. **DNS for origin**
    - `origin.tellerstech.com` must resolve to the origin server IP (e.g. the EC2 instance).
    - From your machine: `dig +short origin.tellerstech.com` (or `nslookup origin.tellerstech.com`). If it’s wrong or missing, fix BIND (or wherever the zone is managed).
 
-2. **HTTPS and certificate**
-   - The server must listen on 443 for `origin.tellerstech.com` and present a **valid** certificate for that name (or a SAN that includes it). CloudFront does not use the IP for SNI; it uses the origin hostname.
-   - From your machine:  
-     `openssl s_client -connect origin.tellerstech.com:443 -servername origin.tellerstech.com </dev/null`  
-     Check that the cert matches `origin.tellerstech.com` and is not expired.
+2. **HTTPS and certificate (split-horizon trap)**
+   - The server must present a cert whose name/SAN covers **`origin.tellerstech.com`** on the socket CloudFront actually hits (exact `origin.tellerstech.com` or a parent wildcard such as `*.tellerstech.com`). A cert for `*.origin.tellerstech.com` alone does **not** cover the origin host.
+   - On this host, internet/CloudFront traffic often lands on **`172.30.0.71` / `127.0.0.1`**, while DirectAdmin only generates listens on the EIP + `172.30.0.87`. Missing loopback injects → default vhost cert **`CN=server.wbat.net`** → CloudFront TLS failure → **502**.
+   - On-box curls to the public EIP can still succeed (hairpin). Always check Subject **and** SANs:
+     `openssl s_client -connect 127.0.0.1:443 -servername origin.tellerstech.com </dev/null 2>/dev/null | openssl x509 -noout -subject -ext subjectAltName`
+     Expect a name that covers `origin.tellerstech.com`, **not** `server.wbat.net` (and not only `*.origin.tellerstech.com`).
+   - Fix: `sudo /home/tellerstec/bin/fix-nginx-loopback-listeners.sh --verify` (and keep DirectAdmin `lan_ip=172.30.0.87`).
 
-3. **Nginx (or origin server)**
-   - A vhost must handle `server_name origin.tellerstech.com` on 443 and serve the WordPress docroot (or proxy correctly). If the only vhost is for `www.tellerstech.com`, requests to `origin.tellerstech.com` may get the wrong site or 4xx/5xx.
-   - If the server requires the `X-CloudFront-Secret` header, its value must match the Terraform variable `cloudfront_origin_secret` (e.g. in TFC variable set). A mismatch can cause the server to reject requests and CloudFront to see 403/502.
-   - **DirectAdmin**: Nginx is managed by DirectAdmin; upgrades can overwrite or revert custom vhost config. If 502 appears with no Terraform changes, check that the origin vhost (and any customizations for `origin.tellerstech.com` / `www.tellerstech.com`) are still present and correct after a DirectAdmin or package update. To make custom nginx persist, use **Admin Level → Custom Httpd Config → &lt;domain&gt;** (or the domain’s `cust_nginx` / custom template), not direct edits to generated configs; then run `da build rewrite_confs`.
+3. **Nginx origin gate (403, not 502)**
+   - Anonymous `https://origin.tellerstech.com/` without `X-CloudFront-Secret` returns **403** by design (scraper protection). That is **not** a CloudFront 502.
+   - Secret mismatch (CF header ≠ nginx cust_nginx ≠ wp-config) also yields origin **403**. This distribution has no `custom_error_response` that rewrites origin 403 → 502, so CloudFront typically **passes through 403**. Debug secret rotation when you observe **403** (viewer or origin curl), not when debugging **502**.
+   - Reserve **502** for connection/TLS/DNS/origin-unreachable failures (checklist items 1–2 and 4).
+   - When debugging **403** after a rotation: align all four secret copies; reinstall gate with `install-cloudfront-origin-gate.sh`.
+   - **DirectAdmin**: use parent `tellerstech.com.cust_nginx` (host-conditional). `origin.tellerstech.com.cust_nginx` is ignored (subdomain, not a DA domain). After `rewrite nginx`, immediately re-run the loopback fixer.
 
 4. **Reachability from the internet**
-   - From outside AWS:  
-     `curl -sI -H "Host: origin.tellerstech.com" https://origin.tellerstech.com/`  
-     (or to the server IP with `Host: origin.tellerstech.com` if you’re testing by IP). You should get a 200 (or 301/302 to login, etc.), not connection or TLS errors. If this fails, CloudFront will also fail.
+   - `curl -sI https://origin.tellerstech.com/` → expect **403** (gate).
+   - `curl -sI -H "X-CloudFront-Secret: $SECRET" https://origin.tellerstech.com/` → expect **200** (or WP redirect), not TLS errors.
+   - If TLS shows `server.wbat.net`, fix loopback listens before debugging Terraform.
 
 5. **Terraform / TFC**
-   - If you recently changed `origin_fqdn`, `cloudfront_origin_secret`, or anything that triggers a CloudFront distribution update, run `terraform plan` and confirm no unintended change. If the secret was rotated, the server must be updated to the new value.
+   - If you recently changed `origin_fqdn`, `cloudfront_origin_secret`, or anything that triggers a CloudFront distribution update, run `terraform plan` and confirm no unintended change. If the secret was rotated, update **server nginx + wp-config** in the same change window (see website install script).
 
 ## Quick verification
 
-- **Origin reachable by hostname**:  
-  `curl -sI https://origin.tellerstech.com/`  
-  Expect 200 or a redirect, not "connection refused" or TLS error.
-- **CloudFront**:  
-  `curl -sI https://www.tellerstech.com/`  
-  If this returns 502 but the origin curl above is OK, the problem is between CloudFront and the origin (DNS, cert, vhost, or secret).
+- **Origin TLS on loopback**:
+  `openssl s_client -connect 127.0.0.1:443 -servername origin.tellerstech.com </dev/null 2>/dev/null | openssl x509 -noout -subject -ext subjectAltName`
+  Must cover `origin.tellerstech.com` (not only `*.origin.tellerstech.com`); not `server.wbat.net`.
+- **Origin gate (403 path)**:
+  `curl -sI https://origin.tellerstech.com/` → **403** without secret.
+  `curl -sI -H "X-CloudFront-Secret: $SECRET" https://origin.tellerstech.com/` → **200** (or WP redirect).
+- **CloudFront**:
+  `curl -sI https://www.tellerstech.com/` → **200**. If this is **502**, prioritize DNS/TLS/loopback (items 1–2, 4). If this is **403**, check secret alignment (item 3).
 
 ## Summary
 
@@ -52,20 +68,18 @@ CloudFront therefore connects to **https://origin.tellerstech.com** and sends th
 |-------------------|---------------------------------------------------------------|
 | Origin hostname   | Terraform: `origin_fqdn` → `origin.tellerstech.com`          |
 | Origin HTTPS      | Terraform: `origin_protocol_policy = "https-only"`           |
-| Secret header     | Terraform: `cloudfront_origin_secret` (TFC); must match server|
+| Secret header     | TFC `cloudfront_origin_secret` = CF header = wp-config = cust_nginx → mismatch is **403**, not 502 |
 | DNS for origin    | BIND / external DNS → must point to origin server             |
-| SSL for origin    | Server: cert for `origin.tellerstech.com` on 443              |
-| Nginx vhost       | Server: `server_name origin.tellerstech.com`, correct docroot|
+| SSL for origin    | Server: name/SAN covering `origin.tellerstech.com`; loopback listens required (**502** if wrong) |
+| Nginx vhost       | DA + `fix-nginx-loopback-listeners.sh`; parent cust_nginx gate |
 
-Fix the first item that fails in the checklist; that usually resolves the 502.
+For **502**, fix the first failing DNS/TLS/reachability check. For **403**, align the secret gate.
 
 ## 502 only on uncached paths (e.g. wp-login.php)
 
 If the homepage or cached pages work but **wp-login.php** (or other uncached URLs) return 502, CloudFront is forwarding to the origin with **Host: origin.tellerstech.com**. WordPress then sees the wrong host and can redirect or error.
 
-**Fix**: The origin request policy in `tellerstech-website.tf` must **forward the Host header** so the origin receives `Host: www.tellerstech.com`. The policy’s `headers_config` whitelist must include `"Host"`.
-
-**Critical**: Each cache behavior has its own `origin_request_policy_id`. The **default** behavior uses the custom WordPress policy (with Host), but path-specific behaviors for `/wp-login.php`, `/wp-admin/*`, `/wp-json/*`, `/wp-cron.php`, and `/feed` were originally set to the AWS Managed **AllViewer** policy (`216adef6-...`). Those paths must use the custom `aws_cloudfront_origin_request_policy.wordpress` (same as default) so Host is forwarded; otherwise those URLs still get `Host: origin.tellerstech.com` and can 502.
+**Fix**: Keep the origin request policy and `wp-config.php` CloudFront block aligned (secret-gated Host override to `www.tellerstech.com`). See the website `cloudfront-wp-admin-setup.md`. Path-specific cache behaviors must use the same WordPress origin request policy as the default behavior (not Managed AllViewer) where applicable in `tellerstech-website.tf`.
 
 **Confirm with AWS CLI** (with valid credentials):
 
@@ -77,7 +91,3 @@ aws cloudfront list-distributions --query "DistributionList.Items[?contains(Alia
 aws cloudfront get-distribution-config --id DIST_ID \
   --query 'DistributionConfig.{Default:DefaultCacheBehavior.OriginRequestPolicyId,Behaviors:CacheBehaviors.Items[*].{Path:PathPattern,Policy:OriginRequestPolicyId}}' --output table
 ```
-
-If `/wp-login.php` and `/wp-admin/*` show `216adef6-5c7f-47e4-b989-5492eafa07d3` (AllViewer) and the default shows a different (custom) ID, those paths were not using the Host-forwarding policy. See also `aws/docs/cloudfront-check-origin-policies.sh`.
-
-**Server requirement**: Nginx must accept requests with `Host: www.tellerstech.com` on the same vhost (e.g. `server_name origin.tellerstech.com www.tellerstech.com;`). Otherwise requests with the forwarded Host may hit the wrong server block.
