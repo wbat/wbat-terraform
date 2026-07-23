@@ -29,16 +29,18 @@ Ops docs and scripts live in **TellersTechOrg/tellerstech-website**:
    - From your machine: `dig +short origin.tellerstech.com` (or `nslookup origin.tellerstech.com`). If it’s wrong or missing, fix BIND (or wherever the zone is managed).
 
 2. **HTTPS and certificate (split-horizon trap)**
-   - The server must present a cert for `origin.tellerstech.com` on the socket CloudFront actually hits.
+   - The server must present a cert whose name/SAN covers **`origin.tellerstech.com`** on the socket CloudFront actually hits (exact `origin.tellerstech.com` or a parent wildcard such as `*.tellerstech.com`). A cert for `*.origin.tellerstech.com` alone does **not** cover the origin host.
    - On this host, internet/CloudFront traffic often lands on **`172.30.0.71` / `127.0.0.1`**, while DirectAdmin only generates listens on the EIP + `172.30.0.87`. Missing loopback injects → default vhost cert **`CN=server.wbat.net`** → CloudFront TLS failure → **502**.
-   - On-box curls to the public EIP can still succeed (hairpin). Always check:
-     `openssl s_client -connect 127.0.0.1:443 -servername origin.tellerstech.com </dev/null | openssl x509 -noout -subject`
-     Expect `CN=*.origin.tellerstech.com` (or similar), **not** `server.wbat.net`.
+   - On-box curls to the public EIP can still succeed (hairpin). Always check Subject **and** SANs:
+     `openssl s_client -connect 127.0.0.1:443 -servername origin.tellerstech.com </dev/null 2>/dev/null | openssl x509 -noout -subject -ext subjectAltName`
+     Expect a name that covers `origin.tellerstech.com`, **not** `server.wbat.net` (and not only `*.origin.tellerstech.com`).
    - Fix: `sudo /home/tellerstec/bin/fix-nginx-loopback-listeners.sh --verify` (and keep DirectAdmin `lan_ip=172.30.0.87`).
 
-3. **Nginx origin gate vs 502**
+3. **Nginx origin gate (403, not 502)**
    - Anonymous `https://origin.tellerstech.com/` without `X-CloudFront-Secret` returns **403** by design (scraper protection). That is **not** a CloudFront 502.
-   - Secret mismatch (CF header ≠ nginx cust_nginx ≠ wp-config) → origin **403** → CloudFront may surface **502** or pass through 403 depending on path/caching. Align all four secret copies; reinstall gate with `install-cloudfront-origin-gate.sh` after rotation.
+   - Secret mismatch (CF header ≠ nginx cust_nginx ≠ wp-config) also yields origin **403**. This distribution has no `custom_error_response` that rewrites origin 403 → 502, so CloudFront typically **passes through 403**. Debug secret rotation when you observe **403** (viewer or origin curl), not when debugging **502**.
+   - Reserve **502** for connection/TLS/DNS/origin-unreachable failures (checklist items 1–2 and 4).
+   - When debugging **403** after a rotation: align all four secret copies; reinstall gate with `install-cloudfront-origin-gate.sh`.
    - **DirectAdmin**: use parent `tellerstech.com.cust_nginx` (host-conditional). `origin.tellerstech.com.cust_nginx` is ignored (subdomain, not a DA domain). After `rewrite nginx`, immediately re-run the loopback fixer.
 
 4. **Reachability from the internet**
@@ -52,12 +54,13 @@ Ops docs and scripts live in **TellersTechOrg/tellerstech-website**:
 ## Quick verification
 
 - **Origin TLS on loopback**:
-  `openssl s_client -connect 127.0.0.1:443 -servername origin.tellerstech.com </dev/null 2>/dev/null | openssl x509 -noout -subject`
-  Not `server.wbat.net`.
-- **Origin gate**:
+  `openssl s_client -connect 127.0.0.1:443 -servername origin.tellerstech.com </dev/null 2>/dev/null | openssl x509 -noout -subject -ext subjectAltName`
+  Must cover `origin.tellerstech.com` (not only `*.origin.tellerstech.com`); not `server.wbat.net`.
+- **Origin gate (403 path)**:
   `curl -sI https://origin.tellerstech.com/` → **403** without secret.
+  `curl -sI -H "X-CloudFront-Secret: $SECRET" https://origin.tellerstech.com/` → **200** (or WP redirect).
 - **CloudFront**:
-  `curl -sI https://www.tellerstech.com/` → **200**. If this is 502 but loopback TLS and gated origin-with-secret are OK, re-check CF custom header value vs server.
+  `curl -sI https://www.tellerstech.com/` → **200**. If this is **502**, prioritize DNS/TLS/loopback (items 1–2, 4). If this is **403**, check secret alignment (item 3).
 
 ## Summary
 
@@ -65,12 +68,12 @@ Ops docs and scripts live in **TellersTechOrg/tellerstech-website**:
 |-------------------|---------------------------------------------------------------|
 | Origin hostname   | Terraform: `origin_fqdn` → `origin.tellerstech.com`          |
 | Origin HTTPS      | Terraform: `origin_protocol_policy = "https-only"`           |
-| Secret header     | TFC `cloudfront_origin_secret` = CF header = wp-config = cust_nginx |
+| Secret header     | TFC `cloudfront_origin_secret` = CF header = wp-config = cust_nginx → mismatch is **403**, not 502 |
 | DNS for origin    | BIND / external DNS → must point to origin server             |
-| SSL for origin    | Server: cert for `origin.tellerstech.com`; loopback listens required |
+| SSL for origin    | Server: name/SAN covering `origin.tellerstech.com`; loopback listens required (**502** if wrong) |
 | Nginx vhost       | DA + `fix-nginx-loopback-listeners.sh`; parent cust_nginx gate |
 
-Fix the first item that fails in the checklist; that usually resolves the 502.
+For **502**, fix the first failing DNS/TLS/reachability check. For **403**, align the secret gate.
 
 ## 502 only on uncached paths (e.g. wp-login.php)
 
