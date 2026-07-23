@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Page not found — Teller's Tech</title>
+  <style>
+    :root {
+      --deep: #050d1a;
+      --tt-mid: #235668;
+      --cyan: #649aa9;
+      --blue: #4c98b0;
+      --text: #e2e8f0;
+      --dim: #a1afc4;
+      --lightest: #7dbeca;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 2rem 1.25rem;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background:
+        radial-gradient(ellipse 80% 50% at 50% -20%, rgba(100, 154, 169, 0.22), transparent),
+        linear-gradient(165deg, var(--deep) 0%, #0a1a28 45%, #0d2433 100%);
+      color: var(--text);
+      text-align: center;
+    }
+    .brand {
+      font-size: 0.8rem;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--lightest);
+      margin-bottom: 1.5rem;
+    }
+    .code {
+      font-size: clamp(3.5rem, 12vw, 5.5rem);
+      font-weight: 800;
+      line-height: 1;
+      letter-spacing: -0.03em;
+      background: linear-gradient(135deg, var(--lightest), var(--cyan), var(--blue));
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 0.75rem;
+    }
+    h1 {
+      font-size: clamp(1.35rem, 3.5vw, 1.75rem);
+      font-weight: 700;
+      margin-bottom: 0.75rem;
+      letter-spacing: -0.01em;
+    }
+    p {
+      color: var(--dim);
+      max-width: 28rem;
+      line-height: 1.55;
+      margin: 0 auto 1.75rem;
+      font-size: 1rem;
+    }
+    .cta {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0.9rem 1.6rem;
+      border-radius: 12px;
+      font-weight: 700;
+      font-size: 1rem;
+      text-decoration: none;
+      color: #fff;
+      background: linear-gradient(135deg, var(--cyan), var(--blue));
+      box-shadow: 0 4px 20px rgba(100, 154, 169, 0.3);
+      margin-bottom: 2rem;
+    }
+    .cta:hover { filter: brightness(1.08); }
+    .cta:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+    nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem 1.25rem;
+      justify-content: center;
+      font-size: 0.875rem;
+    }
+    nav a {
+      color: var(--cyan);
+      text-decoration: none;
+    }
+    nav a:hover { color: var(--lightest); text-decoration: underline; }
+    nav a:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; border-radius: 2px; }
+  </style>
+</head>
+<body>
+  <p class="brand">Teller's Tech</p>
+  <p class="code" aria-hidden="true">404</p>
+  <h1>That page wandered off.</h1>
+  <p>The URL may be mistyped, moved, or retired. Head home or try one of the links below.</p>
+  <a class="cta" href="/">Back to home</a>
+  <nav aria-label="Popular destinations">
+    <a href="/ship-it-weekly-podcast/">Ship It Weekly</a>
+    <a href="/on-call-brief-news/">On Call Brief</a>
+    <a href="/labs/code-duck/">Code Duck</a>
+    <a href="/contact-us/">Contact</a>
+  </nav>
+</body>
+</html>

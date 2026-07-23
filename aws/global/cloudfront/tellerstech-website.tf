@@ -206,6 +206,14 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     }
   }
 
+  # Static branded error pages (private S3 + OAC). Used by custom_error_response
+  # and by direct GETs to /errors/*.html when debugging.
+  origin {
+    domain_name              = aws_s3_bucket.cf_errors.bucket_regional_domain_name
+    origin_id                = "error-pages-s3"
+    origin_access_control_id = aws_cloudfront_origin_access_control.cf_errors.id
+  }
+
   # Default behavior - WordPress pages with session cookie handling
   default_cache_behavior {
     allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
@@ -215,6 +223,17 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     compress                 = true
     cache_policy_id          = aws_cloudfront_cache_policy.wordpress.id
     origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+  }
+
+  # Preferential: serve error HTML from S3 (must be first ordered behavior).
+  ordered_cache_behavior {
+    path_pattern           = "/errors/*"
+    allowed_methods        = ["GET", "HEAD"]
+    cached_methods         = ["GET", "HEAD"]
+    target_origin_id       = "error-pages-s3"
+    viewer_protocol_policy = "redirect-to-https"
+    compress               = true
+    cache_policy_id        = "658327ea-f89d-4fab-a63d-7e88639e58f6" # AWS Managed CachingOptimized
   }
 
   # Ship It Weekly hub page - capped at 12 hours (Podcast-CachePolicy) so the
@@ -387,6 +406,50 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     compress                   = true
     cache_policy_id            = aws_cloudfront_cache_policy.static_assets.id
     response_headers_policy_id = aws_cloudfront_response_headers_policy.static_assets.id
+  }
+
+  # Branded static pages from the error-pages-s3 origin. response_code matches
+  # error_code (no fake 200). 5xx cache briefly; 4xx a bit longer.
+  custom_error_response {
+    error_code            = 403
+    response_code         = 403
+    response_page_path    = "/errors/403.html"
+    error_caching_min_ttl = 120
+  }
+
+  custom_error_response {
+    error_code            = 404
+    response_code         = 404
+    response_page_path    = "/errors/404.html"
+    error_caching_min_ttl = 120
+  }
+
+  custom_error_response {
+    error_code            = 500
+    response_code         = 500
+    response_page_path    = "/errors/503.html"
+    error_caching_min_ttl = 30
+  }
+
+  custom_error_response {
+    error_code            = 502
+    response_code         = 502
+    response_page_path    = "/errors/503.html"
+    error_caching_min_ttl = 30
+  }
+
+  custom_error_response {
+    error_code            = 503
+    response_code         = 503
+    response_page_path    = "/errors/503.html"
+    error_caching_min_ttl = 30
+  }
+
+  custom_error_response {
+    error_code            = 504
+    response_code         = 504
+    response_page_path    = "/errors/503.html"
+    error_caching_min_ttl = 30
   }
 
   restrictions {
