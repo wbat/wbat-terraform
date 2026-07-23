@@ -5,10 +5,15 @@
 ```
 Internet
   → MX DirectAdmin / Exim
-  → virtual alias pipe: |/usr/local/bin/ses-gmail-forward.py
-       ├─ dovecot-lda  → Maildir / Roundcube
-       └─ SES SendRawEmail → personal Gmail (verified From + Reply-To original)
+       ├─ Email Account → virtual_mailbox (LMTP) → Maildir / Roundcube
+       └─ Forwarder pipe → ses-gmail-forward.py → SES → Gmail
+            (verified From + Reply-To original)
 ```
+
+**Critical:** Keep the **Email Account** in DA. Exim delivers Roundcube that way.
+The pipe runs as user `mail` and **must not** call `dovecot-lda` (Maildir is `0700`
+owned by the DA user → lda rc=75 → Exim bounce). The pipe only sends the SES copy
+and **always exits 0**.
 
 Outbound “Send mail as” from Gmail uses **SES SMTP** (`email-smtp.us-east-1.amazonaws.com:587`) with SES SMTP IAM credentials — separate from this inbound pipe.
 
@@ -84,9 +89,18 @@ touch /var/log/ses-gmail-forward.log
 chmod 666 /var/log/ses-gmail-forward.log
 chmod 777 /var/lib/ses-gmail-forward
 
-ls -la /usr/libexec/dovecot/dovecot-lda /usr/sbin/dovecot-lda 2>/dev/null
 python3 -c 'import boto3; print(boto3.__version__)'
 # Alma/Rocky: dnf install -y python3-boto3
+
+# Health check (self-heal aliases + alert on recent ERROR)
+curl -fsSL -o /usr/local/bin/ses-gmail-forward-health.sh \
+  https://raw.githubusercontent.com/wbat/wbat-terraform/main/scripts/directadmin/ses_gmail_forward_health.sh
+chmod 755 /usr/local/bin/ses-gmail-forward-health.sh
+install -m 600 scripts/directadmin/health.conf.example \
+  /etc/ses-gmail-forward/health.conf  # or curl the example; set HEALTH_ALERT_TO
+echo '*/5 * * * * root /usr/local/bin/ses-gmail-forward-health.sh' \
+  >/etc/cron.d/ses-gmail-forward-health
+chmod 644 /etc/cron.d/ses-gmail-forward-health
 ```
 
 ## Gmail (outbound)
