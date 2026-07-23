@@ -1,0 +1,5 @@
+# Optional health-check alert destination (local MTA).
+# Install as /etc/ses-gmail-forward/health.conf (mode 600).
+# Example:
+# HEALTH_ALERT_TO="user1@example.com"
+HEALTH_ALERT_TO=""

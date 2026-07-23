@@ -2,9 +2,9 @@
 
 ## Mail → Gmail via SES (canonical)
 
-Inbound MX stays on DirectAdmin. Pipe forwarder runs
-[`ses_gmail_forward.py`](./ses_gmail_forward.py) → **dovecot-lda** (Roundcube) +
-**SES** (Gmail copy).
+Inbound MX stays on DirectAdmin. Keep the **Email Account** (Exim → Roundcube).
+Pipe forwarder runs [`ses_gmail_forward.py`](./ses_gmail_forward.py) → **SES only**
+(Gmail copy). Do not use dovecot-lda in the pipe (fails as user `mail`).
 
 Full runbook: [`ses_gmail_forward.md`](./ses_gmail_forward.md).
 
@@ -43,6 +43,16 @@ install -m 700 scripts/directadmin/forwarder_delete_post.sh \
 # optional safety net:
 # echo '*/15 * * * * root /usr/local/bin/ensure-ses-gmail-aliases.sh' \
 #   >/etc/cron.d/ses-gmail-aliases
+
+# Health check (every 5m): self-heal aliases + flag recent forward ERROR
+install -m 755 scripts/directadmin/ses_gmail_forward_health.sh \
+  /usr/local/bin/ses-gmail-forward-health.sh
+install -m 600 scripts/directadmin/health.conf.example \
+  /etc/ses-gmail-forward/health.conf
+# edit HEALTH_ALERT_TO if you want local mail alerts
+echo '*/5 * * * * root /usr/local/bin/ses-gmail-forward-health.sh' \
+  >/etc/cron.d/ses-gmail-forward-health
+chmod 644 /etc/cron.d/ses-gmail-forward-health
 ```
 
 ## Backup hooks (server install)
