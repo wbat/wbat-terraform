@@ -408,22 +408,9 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     response_headers_policy_id = aws_cloudfront_response_headers_policy.static_assets.id
   }
 
-  # Branded static pages from the error-pages-s3 origin. response_code matches
-  # error_code (no fake 200). 5xx cache briefly; 4xx a bit longer.
-  custom_error_response {
-    error_code            = 403
-    response_code         = 403
-    response_page_path    = "/errors/403.html"
-    error_caching_min_ttl = 120
-  }
-
-  custom_error_response {
-    error_code            = 404
-    response_code         = 404
-    response_page_path    = "/errors/404.html"
-    error_caching_min_ttl = 120
-  }
-
+  # Branded static pages from the error-pages-s3 origin for outages only.
+  # Do NOT remap 404/403 — WordPress serves the full-chrome TT 404 (and origin
+  # gate 403s stay as nginx). response_code matches error_code (no fake 200).
   custom_error_response {
     error_code            = 500
     response_code         = 500
