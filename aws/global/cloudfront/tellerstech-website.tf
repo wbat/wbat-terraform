@@ -33,24 +33,36 @@ resource "aws_cloudfront_cache_policy" "wordpress" {
     }
 
     query_strings_config {
-      # Soft quota: max 10 query strings per cache policy (TooManyQueryStringsInCachePolicy).
+      # Hard quota: max 10 query strings per cache policy (TooManyQueryStringsInCachePolicy;
+      # raisable via Service Quotas). Origin request policy still forwards *all*
+      # query strings on a miss, so any param that changes public HTML MUST be
+      # in this whitelist — otherwise the first miss with that param poisons the
+      # clean-URL cache entry until TTL expires.
       query_string_behavior = "whitelist"
       query_strings {
         items = [
           "s",
           "p",
           "page_id",
-          "page",
           "paged",
           "preview",
           "preview_id",
           "preview_nonce",
+          # WP public query vars that reorder archive/search listings. Kept even
+          # though this site rarely links them: origin still forwards them, so
+          # omitting them from the cache key would let ?orderby=title&order=asc
+          # poison the clean archive entry.
+          "order",
+          "orderby",
           # Ship It Weekly episode-category facets, rendered server-side. Needed
           # on this policy too (not just Podcast-CachePolicy): the podcast
           # behaviors match the exact paths /ship-it-weekly-podcast/[host|media-kit]/,
           # so paginated facet URLs like /ship-it-weekly-podcast/page/2/?category=news
           # fall through to this default behavior.
           "category",
+          # Dropped to stay under the 10-query quota: `page` (multipage posts via
+          # <!--nextpage-->). Pretty-permalink /page/N/ and `paged` cover the
+          # pagination this site actually emits.
         ]
       }
     }
@@ -88,22 +100,31 @@ resource "aws_cloudfront_cache_policy" "podcast" {
     }
 
     query_strings_config {
-      # Soft quota: max 10 query strings per cache policy (TooManyQueryStringsInCachePolicy).
+      # Hard quota: max 10 query strings per cache policy (TooManyQueryStringsInCachePolicy;
+      # raisable via Service Quotas). Origin request policy still forwards *all*
+      # query strings on a miss, so any param that changes public HTML MUST be
+      # in this whitelist — otherwise the first miss with that param poisons the
+      # clean-URL cache entry until TTL expires.
       query_string_behavior = "whitelist"
       query_strings {
         items = [
           "s",
           "p",
           "page_id",
-          "page",
           "paged",
           "preview",
           "preview_id",
           "preview_nonce",
+          # See WordPress-CachePolicy: kept because origin forwards them.
+          "order",
+          "orderby",
           # Episode-category facets on the SIW hub. Without this in the cache
           # key the page cache is effectively keyed on path alone, so every
           # ?category= URL serves one cached copy of the unfiltered episode list.
           "category",
+          # Dropped to stay under the 10-query quota: `page` (multipage posts).
+          # Pretty-permalink /page/N/ and `paged` cover the pagination this
+          # site actually emits.
         ]
       }
     }
