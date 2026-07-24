@@ -33,6 +33,7 @@ resource "aws_cloudfront_cache_policy" "wordpress" {
     }
 
     query_strings_config {
+      # Soft quota: max 10 query strings per cache policy (TooManyQueryStringsInCachePolicy).
       query_string_behavior = "whitelist"
       query_strings {
         items = [
@@ -46,11 +47,6 @@ resource "aws_cloudfront_cache_policy" "wordpress" {
           "preview_nonce",
           "order",
           "orderby",
-          "cat",
-          "tag",
-          "author",
-          "attachment_id",
-          "replytocom",
         ]
       }
     }
@@ -88,6 +84,7 @@ resource "aws_cloudfront_cache_policy" "podcast" {
     }
 
     query_strings_config {
+      # Soft quota: max 10 query strings per cache policy (TooManyQueryStringsInCachePolicy).
       query_string_behavior = "whitelist"
       query_strings {
         items = [
@@ -101,11 +98,6 @@ resource "aws_cloudfront_cache_policy" "podcast" {
           "preview_nonce",
           "order",
           "orderby",
-          "cat",
-          "tag",
-          "author",
-          "attachment_id",
-          "replytocom",
         ]
       }
     }
