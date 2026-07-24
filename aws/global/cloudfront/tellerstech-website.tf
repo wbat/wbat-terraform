@@ -45,8 +45,12 @@ resource "aws_cloudfront_cache_policy" "wordpress" {
           "preview",
           "preview_id",
           "preview_nonce",
-          "order",
-          "orderby",
+          # Ship It Weekly episode-category facets, rendered server-side. Needed
+          # on this policy too (not just Podcast-CachePolicy): the podcast
+          # behaviors match the exact paths /ship-it-weekly-podcast/[host|media-kit]/,
+          # so paginated facet URLs like /ship-it-weekly-podcast/page/2/?category=news
+          # fall through to this default behavior.
+          "category",
         ]
       }
     }
@@ -96,8 +100,10 @@ resource "aws_cloudfront_cache_policy" "podcast" {
           "preview",
           "preview_id",
           "preview_nonce",
-          "order",
-          "orderby",
+          # Episode-category facets on the SIW hub. Without this in the cache
+          # key the page cache is effectively keyed on path alone, so every
+          # ?category= URL serves one cached copy of the unfiltered episode list.
+          "category",
         ]
       }
     }
