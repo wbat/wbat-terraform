@@ -1,8 +1,8 @@
 # DirectAdmin → SES Gmail forward (canonical TellersTech mail path).
 #
-# MX stays on DirectAdmin. Server pipe script:
-#   scripts/directadmin/ses_gmail_forward.py
-# delivers via dovecot-lda (Roundcube) then SES SendRawEmail (Gmail copy).
+# MX stays on DirectAdmin. Exim Email Account → Roundcube (LMTP);
+# Forwarder pipe → scripts/directadmin/ses_gmail_forward.py → SES → Gmail.
+# The pipe must NOT call dovecot-lda (always exit 0).
 #
 # Runtime config secret is always provisioned. Populate in AWS console / CLI;
 # Terraform ignores secret_string changes after create. No addresses in git.

@@ -4,16 +4,33 @@
 # 502s). Nginx absolute redirects therefore use that host unless we rewrite them
 # at the edge. wp-config.php already fixes PHP redirects when the shared secret
 # matches; these functions cover nginx-level redirects (e.g. trailing slash).
+#
+# Max one CloudFront Function per event type per behavior — xmlrpc 403 and
+# /wp-admin trailing-slash redirect share this viewer-request function.
 
 resource "aws_cloudfront_function" "wp_admin_trailing_slash" {
   name    = "tellerstech-wp-admin-trailing-slash"
   runtime = "cloudfront-js-2.0"
-  comment = "Redirect /wp-admin → /wp-admin/ on www before nginx Host-based 301"
+  comment = "Block xmlrpc.php; redirect /wp-admin → /wp-admin/ on www"
   publish = true
   code    = <<-EOF
 function handler(event) {
   var request = event.request;
-  if (request.uri === '/wp-admin') {
+  var uri = request.uri;
+
+  // WordPress xmlrpc is a common brute-force / amplification vector; never origin.
+  if (uri === '/xmlrpc.php' || uri.indexOf('/xmlrpc.php?') === 0) {
+    return {
+      statusCode: 403,
+      statusDescription: 'Forbidden',
+      headers: {
+        'content-type': { value: 'text/plain' }
+      },
+      body: 'Forbidden'
+    };
+  }
+
+  if (uri === '/wp-admin') {
     var location = 'https://www.tellerstech.com/wp-admin/';
     var parts = [];
     Object.keys(request.querystring).forEach(function (key) {

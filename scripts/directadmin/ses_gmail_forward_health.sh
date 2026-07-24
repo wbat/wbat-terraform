@@ -52,23 +52,30 @@ if [[ -x "$ALIASES_ENSURE" ]]; then
   }
 fi
 
-# 4) Recent ERROR lines in forward log (pipe failures / SES)
+# 4) Recent ERROR / silent-skip lines in forward log (pipe failures / SES)
 if [[ -f "$FORWARD_LOG" ]]; then
-  # GNU find -mmin on the log isn't enough; scan recent ERROR lines by timestamp prefix.
+  # GNU find -mmin on the log isn't enough; scan recent lines by timestamp prefix.
   cutoff="$(date -d "-${WINDOW_MINUTES} minutes" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -v-"${WINDOW_MINUTES}"M '+%Y-%m-%d %H:%M:%S')"
   # shellcheck disable=SC2016
-  recent_errors="$(awk -v c="$cutoff" '
-    $0 ~ / ERROR / {
+  recent_bad="$(awk -v c="$cutoff" '
+    {
+      ts = substr($0, 1, 19)
+      if (ts < c) next
       # Obsolete path: lda under pipe as user mail (fixed; ignore historical noise)
       if ($0 ~ /dovecot-lda failed/) next
-      ts = substr($0, 1, 19)
-      if (ts >= c) print
+      if ($0 ~ / ERROR /) { print; next }
+      # Structured skips that mean Gmail never got a copy (alert-worthy)
+      if ($0 ~ /skip_ses reason=(rate_limit|ses_error|config_error|missing_gmail_dest)/) { print; next }
+      if ($0 ~ /Rate limit exceeded/) { print; next }
+      if ($0 ~ /SES SendRawEmail failed/) { print; next }
+      if ($0 ~ /gmail_destination missing/) { print; next }
+      if ($0 ~ /Failed to load runtime config/) { print; next }
     }
   ' "$FORWARD_LOG" | tail -20)"
-  if [[ -n "$recent_errors" ]]; then
+  if [[ -n "$recent_bad" ]]; then
     fail=1
-    reasons+=("recent_forward_errors")
-    log "RECENT_ERRORS:"$'\n'"$recent_errors"
+    reasons+=("recent_forward_errors_or_skips")
+    log "RECENT_BAD:"$'\n'"$recent_bad"
   fi
 fi
 
