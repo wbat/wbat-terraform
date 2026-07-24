@@ -13,6 +13,12 @@ When the site returns **502 Bad Gateway** from CloudFront, the failure is betwee
 
 CloudFront therefore connects to **https://origin.tellerstech.com** and sends the secret header. The server must respond successfully to that request.
 
+## wp-admin redirects to origin (403)
+
+Exact path `/wp-admin` (no trailing slash) is **not** matched by `/wp-admin/*`, so it used the default cache behavior. Nginx’s trailing-slash 301 used `Host: origin.tellerstech.com`, CloudFront cached `Location: https://origin.tellerstech.com/wp-admin/`, and browsers then hit the gated origin → **403**.
+
+Edge mitigations live in `aws/global/cloudfront/functions.tf` + exact `/wp-admin` behavior in `tellerstech-website.tf`. Workaround: use `https://www.tellerstech.com/wp-admin/`.
+
 ## Branded error pages (www)
 
 When CloudFront cannot reach the origin or the origin returns **5xx** (500/502/503/504), viewers of **www.tellerstech.com** get static HTML from S3 (`/errors/503.html`). Status codes are unchanged (no fake 200).

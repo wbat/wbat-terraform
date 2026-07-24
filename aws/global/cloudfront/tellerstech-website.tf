@@ -223,6 +223,17 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     compress                 = true
     cache_policy_id          = aws_cloudfront_cache_policy.wordpress.id
     origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+
+    # /wp-admin (no trailing slash) falls through here — not matched by /wp-admin/*.
+    # Edge functions stop nginx Host-based redirects to origin.tellerstech.com.
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.wp_admin_trailing_slash.arn
+    }
+    function_association {
+      event_type   = "viewer-response"
+      function_arn = aws_cloudfront_function.rewrite_origin_location.arn
+    }
   }
 
   # Preferential: serve error HTML from S3 (must be first ordered behavior).
@@ -276,6 +287,29 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
   }
 
+  # Exact /wp-admin (no trailing slash). /wp-admin/* does NOT match this path, so
+  # without this block it used the default cache policy and CloudFront cached
+  # nginx's 301 to https://origin.tellerstech.com/wp-admin/ → viewer 403.
+  ordered_cache_behavior {
+    path_pattern             = "/wp-admin"
+    allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods           = ["GET", "HEAD"]
+    target_origin_id         = "wordpress-origin"
+    viewer_protocol_policy   = "redirect-to-https"
+    compress                 = true
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.wp_admin_trailing_slash.arn
+    }
+    function_association {
+      event_type   = "viewer-response"
+      function_arn = aws_cloudfront_function.rewrite_origin_location.arn
+    }
+  }
+
   # wp-admin - no caching, use WordPress policy (origin gets Host: origin.tellerstech.com;
   # wp-config.php overrides $_SERVER['HTTP_HOST'] to www.tellerstech.com via X-CloudFront-Secret)
   ordered_cache_behavior {
@@ -287,6 +321,11 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     compress                 = true
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
     origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+
+    function_association {
+      event_type   = "viewer-response"
+      function_arn = aws_cloudfront_function.rewrite_origin_location.arn
+    }
   }
 
   # wp-login.php - no caching
@@ -299,6 +338,11 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     compress                 = true
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
     origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+
+    function_association {
+      event_type   = "viewer-response"
+      function_arn = aws_cloudfront_function.rewrite_origin_location.arn
+    }
   }
 
   # wp-json API - no caching
