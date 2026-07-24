@@ -13,6 +13,14 @@ When the site returns **502 Bad Gateway** from CloudFront, the failure is betwee
 
 CloudFront therefore connects to **https://origin.tellerstech.com** and sends the secret header. The server must respond successfully to that request.
 
+## Cache key vs query-string floods
+
+WordPress and podcast cache policies put only **functional** query strings (`s`,
+`p`, `paged`, preview, etc.) in the cache key. Marketing / random params
+(`utm_*`, `gclid`, `fbclid`, unique junk) share the same cached object as the
+clean URL, so a scrape of `/?x=<random>` cannot force a miss per request.
+Origin request policy still forwards **all** query strings on a cache miss.
+
 ## wp-admin redirects to origin (403)
 
 Exact path `/wp-admin` (no trailing slash) is **not** matched by `/wp-admin/*`, so it used the default cache behavior. Nginx’s trailing-slash 301 used `Host: origin.tellerstech.com`, CloudFront cached `Location: https://origin.tellerstech.com/wp-admin/`, and browsers then hit the gated origin → **403**.
