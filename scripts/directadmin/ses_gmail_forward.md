@@ -115,8 +115,6 @@ Before `SendRawEmail`, the pipe logs `WARNING skip_ses reason=…` and exits 0
 | `reason=` | Meaning |
 |---|---|
 | `auto_submitted` | `Auto-Submitted` present and not `no` |
-| `auto_response_suppress` | `X-Auto-Response-Suppress` present |
-| `precedence` | `Precedence: bulk\|list\|junk` |
 | `pipe_reentry` | `X-Ses-Gmail-Forward: 1` already set (this pipe; not generic `X-Forwarded-*`) |
 | `from_gmail_dest` | From/Sender/Reply-To is the Gmail destination |
 | `mailer_daemon` | From looks like mailer-daemon / postmaster |
@@ -124,7 +122,8 @@ Before `SendRawEmail`, the pipe logs `WARNING skip_ses reason=…` and exits 0
 | `ses_error` | `SendRawEmail` failed |
 | `oversized` / `missing_headers` / `empty_payload` | Message rejected before SES |
 
-`List-Unsubscribe` alone is **not** a skip reason (newsletters are legitimate).
+`Precedence`, `List-Unsubscribe`, and `X-Auto-Response-Suppress` alone are **not**
+skip reasons — newsletters and list mail commonly set them and should still reach Gmail.
 
 Rate-limit counters increment **only after a successful** `SendRawEmail`, so SES
 failures do not burn quota.

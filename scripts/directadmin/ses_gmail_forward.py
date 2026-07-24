@@ -165,17 +165,14 @@ def _addrs_in(mail_obj: email.message.Message, *headers: str) -> list[str]:
 
 
 def _should_skip_forward(mail_obj: email.message.Message, gmail_dest: str) -> str | None:
-    """Return skip reason, or None if the message may be forwarded to SES."""
+    """Return skip reason, or None if the message may be forwarded to SES.
+
+    Do not skip on Precedence / List-Unsubscribe / X-Auto-Response-Suppress alone —
+    those are common on legitimate newsletters and list mail.
+    """
     auto = (mail_obj.get("Auto-Submitted") or "").strip().lower()
     if auto and auto != "no":
         return "auto_submitted"
-
-    if mail_obj.get("X-Auto-Response-Suppress"):
-        return "auto_response_suppress"
-
-    prec = (mail_obj.get("Precedence") or "").strip().lower()
-    if prec in ("bulk", "list", "junk"):
-        return "precedence"
 
     marker = (mail_obj.get(_PIPE_MARKER_HEADER) or "").strip()
     if marker == _PIPE_MARKER_VALUE:
