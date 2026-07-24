@@ -49,8 +49,10 @@ SECRET_ID = os.environ.get(
 STATE_DIR = Path(os.environ.get("SES_GMAIL_FORWARD_STATE", "/var/lib/ses-gmail-forward"))
 AWS_REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
 
-# Marker headers this pipe sets — presence means re-entry / loop.
-_PIPE_MARKERS = ("X-Forwarded-For", "X-Forwarded-To")
+# Pipe-specific re-entry marker (do NOT use generic X-Forwarded-* — those are
+# set by legitimate upstream forwards and would silently skip Gmail copies).
+_PIPE_MARKER_HEADER = "X-Ses-Gmail-Forward"
+_PIPE_MARKER_VALUE = "1"
 _MAILER_DAEMON_RE = re.compile(
     r"(?i)^(mailer-daemon|postmaster|mail-daemon|majordomo)(@|$)",
 )
@@ -175,9 +177,9 @@ def _should_skip_forward(mail_obj: email.message.Message, gmail_dest: str) -> st
     if prec in ("bulk", "list", "junk"):
         return "precedence"
 
-    for marker in _PIPE_MARKERS:
-        if mail_obj.get(marker):
-            return "pipe_reentry"
+    marker = (mail_obj.get(_PIPE_MARKER_HEADER) or "").strip()
+    if marker == _PIPE_MARKER_VALUE:
+        return "pipe_reentry"
 
     gmail_dest_l = gmail_dest.strip().lower()
     for addr in _addrs_in(mail_obj, "From", "Sender", "Reply-To"):
@@ -269,6 +271,7 @@ def _build_forward_raw(original: email.message.Message, from_addr: str, gmail_de
     msg["X-Original-From"] = original_from
     msg["X-Forwarded-To"] = gmail_dest
     msg["X-Forwarded-For"] = from_addr
+    msg[_PIPE_MARKER_HEADER] = _PIPE_MARKER_VALUE
     return msg.as_bytes()
 
 

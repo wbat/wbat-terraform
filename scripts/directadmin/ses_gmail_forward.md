@@ -117,7 +117,7 @@ Before `SendRawEmail`, the pipe logs `WARNING skip_ses reason=…` and exits 0
 | `auto_submitted` | `Auto-Submitted` present and not `no` |
 | `auto_response_suppress` | `X-Auto-Response-Suppress` present |
 | `precedence` | `Precedence: bulk\|list\|junk` |
-| `pipe_reentry` | `X-Forwarded-For` / `X-Forwarded-To` already set (this pipe) |
+| `pipe_reentry` | `X-Ses-Gmail-Forward: 1` already set (this pipe; not generic `X-Forwarded-*`) |
 | `from_gmail_dest` | From/Sender/Reply-To is the Gmail destination |
 | `mailer_daemon` | From looks like mailer-daemon / postmaster |
 | `rate_limit` | Per-recipient or global hourly cap |
