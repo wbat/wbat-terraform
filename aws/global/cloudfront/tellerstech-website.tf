@@ -1,10 +1,14 @@
 # CloudFront Distribution for www.tellerstech.com
 # WordPress-optimized caching with full page cache for anonymous visitors
 
-# Cache policy for WordPress - forwards session cookies to bypass cache for logged-in users
+# Cache policy for WordPress - forwards session cookies to bypass cache for logged-in users.
+# Query strings in the *cache key* are whitelisted only: marketing params (utm_*, gclid,
+# fbclid, …) must not fragment the cache or a scrape of unique ?x= values will miss-cache
+# every request and burn PHP-FPM. Origin request policy still forwards all query strings
+# on a miss so WordPress can see them when needed.
 resource "aws_cloudfront_cache_policy" "wordpress" {
   name        = "WordPress-CachePolicy"
-  comment     = "Cache policy for WordPress - bypasses cache when session cookies present"
+  comment     = "WordPress pages: session cookies + functional query strings only in cache key"
   min_ttl     = 0
   default_ttl = 7200  # 2 hours
   max_ttl     = 86400 # 1 day
@@ -29,7 +33,26 @@ resource "aws_cloudfront_cache_policy" "wordpress" {
     }
 
     query_strings_config {
-      query_string_behavior = "all"
+      query_string_behavior = "whitelist"
+      query_strings {
+        items = [
+          "s",
+          "p",
+          "page_id",
+          "page",
+          "paged",
+          "preview",
+          "preview_id",
+          "preview_nonce",
+          "order",
+          "orderby",
+          "cat",
+          "tag",
+          "author",
+          "attachment_id",
+          "replytocom",
+        ]
+      }
     }
   }
 }
@@ -40,7 +63,7 @@ resource "aws_cloudfront_cache_policy" "wordpress" {
 # keep the default 1 day ceiling.
 resource "aws_cloudfront_cache_policy" "podcast" {
   name        = "Podcast-CachePolicy"
-  comment     = "Cache policy for key Ship It Weekly landing pages - 12 hour max TTL"
+  comment     = "SIW landing pages: 12h max TTL; functional query strings only in cache key"
   min_ttl     = 0
   default_ttl = 7200  # 2 hours
   max_ttl     = 43200 # 12 hours
@@ -65,7 +88,26 @@ resource "aws_cloudfront_cache_policy" "podcast" {
     }
 
     query_strings_config {
-      query_string_behavior = "all"
+      query_string_behavior = "whitelist"
+      query_strings {
+        items = [
+          "s",
+          "p",
+          "page_id",
+          "page",
+          "paged",
+          "preview",
+          "preview_id",
+          "preview_nonce",
+          "order",
+          "orderby",
+          "cat",
+          "tag",
+          "author",
+          "attachment_id",
+          "replytocom",
+        ]
+      }
     }
   }
 }
