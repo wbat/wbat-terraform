@@ -379,6 +379,25 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     }
   }
 
+  # Exact /wp-json (no trailing path). /wp-json/* does NOT match this path, so
+  # without this block it used the default cache policy — same class of bug as
+  # exact /wp-admin (cached origin Location / odd redirects on the API root).
+  ordered_cache_behavior {
+    path_pattern             = "/wp-json"
+    allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods           = ["GET", "HEAD"]
+    target_origin_id         = "wordpress-origin"
+    viewer_protocol_policy   = "redirect-to-https"
+    compress                 = true
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+
+    function_association {
+      event_type   = "viewer-response"
+      function_arn = aws_cloudfront_function.rewrite_origin_location.arn
+    }
+  }
+
   # wp-json API - no caching
   ordered_cache_behavior {
     path_pattern             = "/wp-json/*"
@@ -389,6 +408,11 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     compress                 = true
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
     origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+
+    function_association {
+      event_type   = "viewer-response"
+      function_arn = aws_cloudfront_function.rewrite_origin_location.arn
+    }
   }
 
   # wp-cron.php - no caching

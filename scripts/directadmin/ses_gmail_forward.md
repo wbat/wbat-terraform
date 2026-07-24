@@ -92,7 +92,7 @@ chmod 777 /var/lib/ses-gmail-forward
 python3 -c 'import boto3; print(boto3.__version__)'
 # Alma/Rocky: dnf install -y python3-boto3
 
-# Health check (self-heal aliases + alert on recent ERROR)
+# Health check (self-heal aliases + alert on recent ERROR / silent SES skips)
 curl -fsSL -o /usr/local/bin/ses-gmail-forward-health.sh \
   https://raw.githubusercontent.com/wbat/wbat-terraform/main/scripts/directadmin/ses_gmail_forward_health.sh
 chmod 755 /usr/local/bin/ses-gmail-forward-health.sh
@@ -102,6 +102,32 @@ echo '*/5 * * * * root /usr/local/bin/ses-gmail-forward-health.sh' \
   >/etc/cron.d/ses-gmail-forward-health
 chmod 644 /etc/cron.d/ses-gmail-forward-health
 ```
+
+After merging pipe/health changes, re-copy both scripts to `/usr/local/bin/` on the
+server (`install -m 755 …`). No service restart is required for the pipe.
+
+## Skip guards (pipe → SES)
+
+Before `SendRawEmail`, the pipe logs `WARNING skip_ses reason=…` and exits 0
+(Roundcube already has the message via Exim). Health alerts on
+`rate_limit`, `ses_error`, `config_error`, and `missing_gmail_dest`.
+
+| `reason=` | Meaning |
+|---|---|
+| `auto_submitted` | `Auto-Submitted` present and not `no` |
+| `auto_response_suppress` | `X-Auto-Response-Suppress` present |
+| `precedence` | `Precedence: bulk\|list\|junk` |
+| `pipe_reentry` | `X-Forwarded-For` / `X-Forwarded-To` already set (this pipe) |
+| `from_gmail_dest` | From/Sender/Reply-To is the Gmail destination |
+| `mailer_daemon` | From looks like mailer-daemon / postmaster |
+| `rate_limit` | Per-recipient or global hourly cap |
+| `ses_error` | `SendRawEmail` failed |
+| `oversized` / `missing_headers` / `empty_payload` | Message rejected before SES |
+
+`List-Unsubscribe` alone is **not** a skip reason (newsletters are legitimate).
+
+Rate-limit counters increment **only after a successful** `SendRawEmail`, so SES
+failures do not burn quota.
 
 ## Gmail (outbound)
 

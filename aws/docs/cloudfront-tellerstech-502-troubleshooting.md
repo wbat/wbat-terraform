@@ -27,6 +27,12 @@ request. Origin request policy still forwards **all** query strings on a cache m
 Exact path `/wp-admin` (no trailing slash) is **not** matched by `/wp-admin/*`, so it used the default cache behavior. Nginx’s trailing-slash 301 used `Host: origin.tellerstech.com`, CloudFront cached `Location: https://origin.tellerstech.com/wp-admin/`, and browsers then hit the gated origin → **403**.
 
 **Mitigations (applied):** `aws/global/cloudfront/functions.tf` redirects `/wp-admin` → `https://www.tellerstech.com/wp-admin/` and rewrites any `Location: …origin.tellerstech.com…` → www; an exact `/wp-admin` CachingDisabled behavior avoids re-caching a bad 301. Prefer `https://www.tellerstech.com/wp-admin/` (trailing slash) as the bookmark.
+
+## xmlrpc and exact `/wp-json`
+
+- **`/xmlrpc.php`**: blocked at the edge (CloudFront Function viewer-request → **403**) and in DirectAdmin parent `tellerstech.com.cust_nginx` (nginx `return 403`). Keeps xmlrpc brute-force / amplification off PHP-FPM.
+- **Exact `/wp-json`**: `/wp-json/*` does not match `/wp-json`. An exact CachingDisabled behavior + Location rewrite (same pattern as `/wp-admin`) avoids cache poison / origin Location on the bare REST root.
+
 ## Branded error pages (www)
 
 When CloudFront cannot reach the origin or the origin returns **5xx** (500/502/503/504), viewers of **www.tellerstech.com** get static HTML from S3 (`/errors/503.html`). Status codes are unchanged (no fake 200).
