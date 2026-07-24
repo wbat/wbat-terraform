@@ -26,8 +26,7 @@ request. Origin request policy still forwards **all** query strings on a cache m
 
 Exact path `/wp-admin` (no trailing slash) is **not** matched by `/wp-admin/*`, so it used the default cache behavior. Nginx’s trailing-slash 301 used `Host: origin.tellerstech.com`, CloudFront cached `Location: https://origin.tellerstech.com/wp-admin/`, and browsers then hit the gated origin → **403**.
 
-Edge mitigations live in `aws/global/cloudfront/functions.tf` + exact `/wp-admin` behavior in `tellerstech-website.tf`. Workaround: use `https://www.tellerstech.com/wp-admin/`.
-
+**Mitigations (applied):** `aws/global/cloudfront/functions.tf` redirects `/wp-admin` → `https://www.tellerstech.com/wp-admin/` and rewrites any `Location: …origin.tellerstech.com…` → www; an exact `/wp-admin` CachingDisabled behavior avoids re-caching a bad 301. Prefer `https://www.tellerstech.com/wp-admin/` (trailing slash) as the bookmark.
 ## Branded error pages (www)
 
 When CloudFront cannot reach the origin or the origin returns **5xx** (500/502/503/504), viewers of **www.tellerstech.com** get static HTML from S3 (`/errors/503.html`). Status codes are unchanged (no fake 200).
@@ -42,7 +41,7 @@ When CloudFront cannot reach the origin or the origin returns **5xx** (500/502/5
 
 Ops docs and scripts live in **TellersTechOrg/tellerstech-website**:
 
-- [docs/cloudfront-wp-admin-setup.md](https://github.com/TellersTechOrg/tellerstech-website/blob/main/docs/cloudfront-wp-admin-setup.md) — nginx origin gate + wp-config Host override
+- [docs/cloudfront-wp-admin-setup.md](https://github.com/TellersTechOrg/tellerstech-website/blob/main/docs/cloudfront-wp-admin-setup.md) — nginx origin gate + wp-config Host override + pointers to this runbook (5xx pages, cache keys, `/wp-admin`)
 - [docs/nginx-loopback-listeners.md](https://github.com/TellersTechOrg/tellerstech-website/blob/main/docs/nginx-loopback-listeners.md) — DA split-horizon listens (`172.30.0.71` / `127.0.0.1`)
 - `scripts/install-cloudfront-origin-gate.sh` — install/rotate nginx gate after secret changes
 
