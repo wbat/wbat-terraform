@@ -66,6 +66,7 @@ Ops docs and scripts live in **TellersTechOrg/tellerstech-website**:
      `openssl s_client -connect 127.0.0.1:443 -servername origin.tellerstech.com </dev/null 2>/dev/null | openssl x509 -noout -subject -ext subjectAltName`
      Expect a name that covers `origin.tellerstech.com`, **not** `server.wbat.net` (and not only `*.origin.tellerstech.com`).
    - Fix: `sudo /home/tellerstec/bin/fix-nginx-loopback-listeners.sh --verify` (and keep DirectAdmin `lan_ip=172.30.0.87`).
+   - ⚠️ **Injecting these listens for one domain breaks every other domain on the box.** Nginx selects the listen-address group before `server_name`, so any vhost lacking that address falls to the catch-all (default page + `CN=server.wbat.net`). Apply listens server-wide and verify all domains — see [nginx-vhost-catchall-regression.md](nginx-vhost-catchall-regression.md).
 
 3. **Nginx origin gate (403, not 502)**
    - Anonymous `https://origin.tellerstech.com/` without `X-CloudFront-Secret` returns **403** by design (scraper protection). That is **not** a CloudFront 502.
