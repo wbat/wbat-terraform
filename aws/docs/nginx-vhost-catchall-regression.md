@@ -108,31 +108,28 @@ lack.
 **Do not** simply re-run the per-domain fixer for `iots.com` and `lmgt.com`. That repeats the
 mistake that caused this and has to be redone after every DirectAdmin `rewrite_confs`.
 
-Fix the root cause — make DirectAdmin generate vhosts on the address that actually receives
-traffic:
+Fix the root cause with DirectAdmin **Linked IP** (`apply=yes`) so every domain emits a
+`listen` on the arrival private IP via `|LINKEDIP|` / `|LINKEDIPSSL|`. Full operator
+procedure (backups, hand-patch cron disable ordering, `nginx -t` gate, rollback):
 
-1. Point DirectAdmin's server IP at the instance's real primary private IP (`172.30.0.71`),
-   or configure the vhost template to use **wildcard listens** (`listen 80;` /
-   `listen 443 ssl;`) so vhost selection falls back to SNI/Host for every domain regardless
-   of which local address the packet arrived on.
-2. Rebuild: `da build rewrite_confs`, then `nginx -t && systemctl reload nginx`.
-3. Re-verify **every** domain, not just `tellerstech.com` (see the script below).
-4. Once vhosts bind the correct address server-wide, `fix-nginx-loopback-listeners.sh`
-   becomes redundant for `tellerstech.com` — keep it only if the loopback (`127.0.0.1`)
-   listen is still needed for on-box checks.
+→ [`da-vhost-listen-change-window.md`](da-vhost-listen-change-window.md)
 
-Interim mitigation, if the DirectAdmin IP change cannot be made immediately: extend
-`fix-nginx-loopback-listeners.sh` (in `TellersTechOrg/tellerstech-website`) to iterate **all**
-DirectAdmin domains rather than `tellerstech.com` only, and run it from a
-`post_rewrite_confs` hook so it survives regeneration.
+Known-bad `nginx -T` captured before the fix (offline detector fixture):
+
+→ [`fixtures/nginx-catchall-broken-2026-07-26/`](fixtures/nginx-catchall-broken-2026-07-26/)
+
+Scripts: `scripts/directadmin/da_vhost_listen_reconcile.sh` (cron/boot `--enforce`,
+hook `--check`) and `scripts/directadmin/nginx_vhost_listen_invariant.sh`.
+
+The per-domain `fix-nginx-loopback-listeners.sh` path is **retired** (cron disabled;
+`~/bin/fix-nginx-loopback-listeners.sh.retired`). Do not re-enable it.
 
 ## Prevention
 
 - Treat any per-domain `listen` injection on this host as a **server-wide** change. Adding an
   explicit address to one vhost silently removes that address from every vhost that lacks it.
-- Make the catch-all fail loudly instead of returning `200`. A default vhost that answers
-  `webserver is functioning normally` with a `200` looks healthy to uptime checks; returning
-  `421`/`444` there would have surfaced this within minutes.
+- Catch-all responses now include `X-DA-Catchall: 1` (hostname `nginx-vhosts.conf`). Hard-fail
+  with `421`/`444` remains opt-in. Use `check-vhost-listeners.sh` (ports 80+443, ACME, header).
 - After any `rewrite nginx` / `da build rewrite_confs`, run the multi-domain verification
   below before closing the change window.
 

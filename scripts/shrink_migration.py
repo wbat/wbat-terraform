@@ -425,6 +425,18 @@ def cmd_aws_rollback(cfg: Config, yes: bool) -> None:
 def cmd_post_start(cfg: Config) -> None:
     ip = cfg.eip_public_ip
     run(ssh_cmd(cfg, f"sudo {cfg.validate_script} start-services", ip=ip))
+    # Reconcile DirectAdmin Linked IP / lan_ip to the NEW private address before
+    # signing off cutover — private IP changes on instance replacement.
+    reconcile = "/usr/local/sbin/da-vhost-listen-reconcile.sh"
+    run(
+        ssh_cmd(
+            cfg,
+            f"sudo test -x {reconcile} && sudo {reconcile} --enforce || "
+            f"echo 'WARN: {reconcile} not installed; skip vhost listen reconcile'",
+            ip=ip,
+        ),
+        check=False,
+    )
     run(ssh_cmd(cfg, remote_validate_cmd(cfg, "post-cutover"), ip=ip))
     run(ssh_cmd(cfg, "sudo setenforce 1; sudo restorecon -Rv /home /var/www /usr/local/directadmin", ip=ip), check=False)
 

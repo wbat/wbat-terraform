@@ -1,0 +1,8 @@
+add_to_device=no
+gateway=
+global=no
+netmask=255.255.255.0
+ns=
+reseller=
+status=free
+value=

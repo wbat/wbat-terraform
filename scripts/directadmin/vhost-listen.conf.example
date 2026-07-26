@@ -1,0 +1,27 @@
+# DirectAdmin vhost listen reconciler config.
+# Install as /etc/da-vhost-listen/vhost-listen.conf (mode 600).
+#
+# Placeholders only in git — fill real values on the box.
+
+# Optional local-MTA alert destination (rate-limited by the reconciler).
+HEALTH_ALERT_TO=""
+
+# Expected public EIP for this host (IMDS ENI selection + sanity checks).
+# Example: EXPECTED_PUBLIC_IP="203.0.113.10"
+EXPECTED_PUBLIC_IP=""
+
+# Optional override for the arrival / private IP. Leave empty to auto-detect
+# via IMDSv2 (ENI whose public-ipv4s contains EXPECTED_PUBLIC_IP) or
+# `ip route get` fallback.
+# Example: ARRIVAL_IP="172.16.0.10"
+ARRIVAL_IP=""
+
+# Hostnames that legitimately have no site vhost of their own (report OK when
+# they hit the catch-all). Space-separated.
+# Example: ALLOWLIST_CATCHALL_HOSTS="server.example.net example.net"
+ALLOWLIST_CATCHALL_HOSTS=""
+
+# When non-empty, --enforce will refuse to run unless this matches the
+# detected public IP (safety for multi-host installs).
+# ENFORCE_REQUIRE_PUBLIC_IP="203.0.113.10"
+ENFORCE_REQUIRE_PUBLIC_IP=""

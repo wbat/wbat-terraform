@@ -4,55 +4,55 @@ overview: 'Fix the root cause with DirectAdmin''s native Linked IP, then make it
 todos:
   - id: ssm-preflight
     content: 'FIRST: SSM preflight from Local mode. Confirm the AWS profile reaches the instance (aws ssm describe-instance-information), that amazon-ssm-agent is installed and running on this Alma/Rocky AMI, and open a session. Instance role already has AmazonSSMManagedInstanceCore, so no IAM change is expected'
-    status: pending
+    status: completed
   - id: capture-fixture
     content: 'SECOND, before changing anything: capture the currently-broken state as a regression fixture (nginx -T listen/server_name snapshot, DA IP records, lan_ip, web stack mode, where the tellerstech hand-patch injects). The broken state is the ideal known-bad fixture for the invariant parser and is unrecoverable once fixed'
-    status: pending
+    status: completed
   - id: reconciler
     content: 'Write scripts/directadmin/da_vhost_listen_reconcile.sh with --check/--enforce/--dry-run, IMDSv2 arrival-IP detection (select ENI whose public-ipv4s contains the EIP, fall back to ip route get), linked-IP apply via task.queue, lan_ip set, synchronous rewrite, nginx -t gate, revert-and-alert on failure, flock and logging per ensure_ses_gmail_aliases.sh conventions'
-    status: pending
+    status: completed
   - id: reconciler-conf
     content: 'Add scripts/directadmin/vhost-listen.conf.example (mode 600) with HEALTH_ALERT_TO, enforce-vs-check mode, expected public IP, and an allowlist for hostnames that legitimately have no vhost'
-    status: pending
+    status: completed
   - id: static-invariant
     content: 'Implement the nginx -T static invariant check: for every server_name, assert a listen covering the arrival address on both :80 and :443'
-    status: pending
+    status: completed
   - id: triggers
     content: 'Wire triggers: /etc/cron.d/da-vhost-listen every 10 min in --enforce (auto-repair approved), systemd oneshot at boot in --enforce (After=network-online.target directadmin.service), scripts/custom/user_httpd_write_post/ directory-form hook in --check only (never mutates, avoids rewrite loops), and update_post.sh'
-    status: pending
+    status: completed
   - id: catchall-marker
     content: Add X-DA-Catchall marker header to the catch-all via custombuild/custom/nginx/conf/nginx-vhosts.conf so detection does not rely on body or cert fingerprinting; keep server.wbat.net webapps working; leave 421/444 hard-fail opt-in
-    status: pending
+    status: completed
   - id: extend-external-check
     content: 'Extend aws/docs/check-vhost-listeners.sh: add port 80 (it broke too), ACME challenge path, X-DA-Catchall header detection, --json output, and on-box enumeration of the real DA domain list'
-    status: pending
+    status: completed
   - id: migration-gate
     content: Add verify_vhost_listens() to run_post_cutover() in scripts/shrink-migration-validate.sh and a DA reconcile step to cmd_post_start in scripts/shrink_migration.py so a future cutover cannot reintroduce this
-    status: pending
+    status: completed
   - id: ci-shellcheck
     content: Add a shellcheck + bash -n CI job so the new and existing shell scripts are linted
-    status: pending
+    status: completed
   - id: change-window-runbook
     content: 'Write the operator change window: backups, listen snapshot diff, hand-patch removal ordering, IP register with add_to_device=no, link with apache=yes/dns=no/apply=yes, drop stale .87, set lan_ip, rewrite, nginx -t gate, reload, rollback'
-    status: pending
+    status: completed
   - id: prove-detector
     content: 'Prove the detector without breaking production (no server2 rehearsal): offline fixture test of the nginx -T invariant parser against a known-bad config, plus a live negative control asserting a hostname with no vhost is reported as catch-all, plus a forced alert path test'
-    status: pending
+    status: completed
   - id: sanitize-config-driven
     content: 'Make new scripts and docs config-driven against vhost-listen.conf.example placeholders instead of hardcoded EIP, private IPs, hostname, and domain names; leave the pre-existing 502 runbook values alone'
-    status: pending
+    status: completed
   - id: acme-repair
     content: 'Repair certificate renewals: confirm challenge paths serve from each domain docroot, force renewal via backdated cert.creation_time plus taskq letsencrypt rewrite, re-verify expiry'
-    status: pending
+    status: completed
   - id: docs
     content: 'Update aws/docs/nginx-vhost-catchall-regression.md with the Linked IP procedure and the no-per-domain-listens invariant, correct the lan_ip guidance and dead links in aws/docs/cloudfront-tellerstech-502-troubleshooting.md, and add install tables to scripts/directadmin/README.md and README.md'
-    status: pending
+    status: completed
   - id: retire-fixer
     content: 'Once tellerstech-site access is granted, determine where fix-nginx-loopback-listeners.sh injects, retire it, and reconcile its docs'
-    status: pending
+    status: completed
   - id: update-pr
     content: 'Update PR #95 with the corrected root cause, the resilience layers, and the validation results'
-    status: pending
+    status: completed
 isProject: false
 ---
 2# Resilient DirectAdmin vhost listens for all domains

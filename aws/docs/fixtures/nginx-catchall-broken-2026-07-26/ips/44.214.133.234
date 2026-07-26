@@ -1,0 +1,7 @@
+gateway=
+linked_ips=%31%37%32%2E%33%30%2E%30%2E%38%37=apache%3Dyes%26dns%3Dno
+netmask=/32
+ns=
+reseller=
+status=server
+value=13

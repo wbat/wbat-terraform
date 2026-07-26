@@ -45,11 +45,12 @@ When CloudFront cannot reach the origin or the origin returns **5xx** (500/502/5
 
 ## Server-side companions (not in this repo)
 
-Ops docs and scripts live in **TellersTechOrg/tellerstech-website**:
+Ops docs and scripts for the WordPress origin gate live in **TellersTechOrg/tellerstech-website**
+(private; may be unreachable from this GitHub App). On-box copies:
 
-- [docs/cloudfront-wp-admin-setup.md](https://github.com/TellersTechOrg/tellerstech-website/blob/main/docs/cloudfront-wp-admin-setup.md) — nginx origin gate + wp-config Host override + pointers to this runbook (5xx pages, cache keys, `/wp-admin`)
-- [docs/nginx-loopback-listeners.md](https://github.com/TellersTechOrg/tellerstech-website/blob/main/docs/nginx-loopback-listeners.md) — DA split-horizon listens (`172.30.0.71` / `127.0.0.1`)
-- `scripts/install-cloudfront-origin-gate.sh` — install/rotate nginx gate after secret changes
+- `/home/tellerstec/domains/tellerstech.com/public_html/wp-content/plugins/tellerstech-landing/docs/`
+- Loopback fixer **retired** 2026-07-26 — symlink moved to
+  `~/bin/fix-nginx-loopback-listeners.sh.retired`; use Linked IP instead.
 
 **Secret must match in four places:** TFC `cloudfront_origin_secret` → CloudFront header (via TF apply) → server `wp-config.php` → DirectAdmin `tellerstech.com.cust_nginx`.
 
@@ -61,19 +62,29 @@ Ops docs and scripts live in **TellersTechOrg/tellerstech-website**:
 
 2. **HTTPS and certificate (split-horizon trap)**
    - The server must present a cert whose name/SAN covers **`origin.tellerstech.com`** on the socket CloudFront actually hits (exact `origin.tellerstech.com` or a parent wildcard such as `*.tellerstech.com`). A cert for `*.origin.tellerstech.com` alone does **not** cover the origin host.
-   - On this host, internet/CloudFront traffic often lands on **`172.30.0.71` / `127.0.0.1`**, while DirectAdmin only generates listens on the EIP + `172.30.0.87`. Missing loopback injects → default vhost cert **`CN=server.wbat.net`** → CloudFront TLS failure → **502**.
+   - On this host, internet/CloudFront traffic lands on the instance **primary private IP**
+     (currently `172.30.0.71`), while DirectAdmin must emit that address via **Linked IP**
+     (`|LINKEDIP|` / `|LINKEDIPSSL|`). If only the EIP + a stale private IP are linked,
+     unmatched hosts fall to the hostname catch-all cert **`CN=server.wbat.net`** → CloudFront
+     TLS failure → **502**.
    - On-box curls to the public EIP can still succeed (hairpin). Always check Subject **and** SANs:
      `openssl s_client -connect 127.0.0.1:443 -servername origin.tellerstech.com </dev/null 2>/dev/null | openssl x509 -noout -subject -ext subjectAltName`
      Expect a name that covers `origin.tellerstech.com`, **not** `server.wbat.net` (and not only `*.origin.tellerstech.com`).
-   - Fix: `sudo /home/tellerstec/bin/fix-nginx-loopback-listeners.sh --verify` (and keep DirectAdmin `lan_ip=172.30.0.87`).
-   - ⚠️ **Injecting these listens for one domain breaks every other domain on the box.** Nginx selects the listen-address group before `server_name`, so any vhost lacking that address falls to the catch-all (default page + `CN=server.wbat.net`). Apply listens server-wide and verify all domains — see [nginx-vhost-catchall-regression.md](nginx-vhost-catchall-regression.md).
+   - Fix: DirectAdmin Linked IP with `apply=yes` for the arrival private IP, plus
+     `/usr/local/sbin/da-vhost-listen-reconcile.sh` (see
+     [da-vhost-listen-change-window.md](da-vhost-listen-change-window.md) and
+     [nginx-vhost-catchall-regression.md](nginx-vhost-catchall-regression.md)).
+     Confirm `lan_ip` matches the arrival private IP (not a retired cutover address).
+   - ⚠️ **Do not inject per-domain `listen` lines** (the old `fix-nginx-loopback-listeners.sh`
+     antipattern). Nginx selects the listen-address group before `server_name`, so adding an
+     address to one vhost silently removes that address from every vhost that lacks it.
 
 3. **Nginx origin gate (403, not 502)**
    - Anonymous `https://origin.tellerstech.com/` without `X-CloudFront-Secret` returns **403** by design (scraper protection). That is **not** a CloudFront 502.
    - Secret mismatch (CF header ≠ nginx cust_nginx ≠ wp-config) also yields origin **403**. CloudFront does **not** remap 403 to a custom page (or to 502). Debug secret rotation when you observe **403**, not when debugging **502**.
    - Reserve **502** for connection/TLS/DNS/origin-unreachable failures (checklist items 1–2 and 4). A viewer-facing **502** may show the branded “Temporarily unavailable” S3 page while the status remains 502.
    - When debugging **403** after a rotation: align all four secret copies; reinstall gate with `install-cloudfront-origin-gate.sh`.
-   - **DirectAdmin**: use parent `tellerstech.com.cust_nginx` (host-conditional). `origin.tellerstech.com.cust_nginx` is ignored (subdomain, not a DA domain). After `rewrite nginx`, immediately re-run the loopback fixer.
+   - **DirectAdmin**: use parent `tellerstech.com.cust_nginx` (host-conditional). `origin.tellerstech.com.cust_nginx` is ignored (subdomain, not a DA domain). After `rewrite nginx`, confirm Linked IP / `da-vhost-listen-reconcile.sh --check` still pass — do **not** re-enable the retired loopback fixer.
 
 4. **Reachability from the internet**
    - `curl -sI https://origin.tellerstech.com/` → expect **403** (gate).

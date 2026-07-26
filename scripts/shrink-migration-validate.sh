@@ -294,6 +294,34 @@ verify_stack_configs() {
   fi
 }
 
+# Ensure every domain vhost listens on the address public traffic arrives on.
+# Prevents reintroducing the catch-all regression after EIP cutover / private-IP change.
+verify_vhost_listens() {
+  info "Verifying nginx vhost listens cover arrival IP..."
+  local inv arrival
+  inv=""
+  for c in /usr/local/sbin/nginx-vhost-listen-invariant.sh \
+           /usr/local/sbin/da-vhost-listen-reconcile.sh; do
+    [[ -x "$c" ]] || continue
+    inv="$c"
+    break
+  done
+  if [[ -z "$inv" ]]; then
+    warn "vhost listen invariant script not installed; skipping"
+    return 0
+  fi
+  if [[ "$inv" == *reconcile* ]]; then
+    "$inv" --check && pass "da-vhost-listen --check" || fail "da-vhost-listen --check"
+    return 0
+  fi
+  arrival="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')"
+  if [[ -z "$arrival" ]]; then
+    warn "could not detect arrival IP; skipping vhost listen check"
+    return 0
+  fi
+  "$inv" --arrival "$arrival" && pass "vhost listens cover $arrival" || fail "vhost listens missing $arrival"
+}
+
 start_production_services() {
   info "Starting production services (NEW server post-cutover)..."
   systemctl start crond 2>/dev/null || true
@@ -332,6 +360,7 @@ run_post_cutover() {
   verify_config_paths
   verify_da_license
   verify_stack_configs
+  verify_vhost_listens
   if [[ -x /usr/local/sbin/verify-backups-s3.sh ]]; then
     /usr/local/sbin/verify-backups-s3.sh && pass "S3 backup verify script" || warn "S3 verify script reported issues"
   fi

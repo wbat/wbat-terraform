@@ -17,6 +17,30 @@ jobs:
         run: terraform fmt -recursive -check
         working-directory: ./
 
+  shell:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: bash -n
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' f; do
+            bash -n "$f"
+          done < <(find scripts aws/docs -type f -name '*.sh' -print0)
+      - name: shellcheck
+        run: |
+          set -euo pipefail
+          # SC1091: sourced runtime confs are not in-repo.
+          # Severity error only so pre-existing info/warnings in older scripts
+          # do not block PRs; new bugs that are errors still fail the job.
+          find scripts aws/docs -type f -name '*.sh' -print0 \
+            | xargs -0 shellcheck -S error -x -e SC1091
+      - name: Offline vhost-listen detector proof
+        run: ./scripts/directadmin/prove_vhost_listen_detector.sh
+
   validate:
     name: Validate (${{ matrix.workspaces }})
     runs-on: ubuntu-latest
