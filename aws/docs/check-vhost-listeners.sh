@@ -28,14 +28,25 @@ JSON=0
 CHECK_ACME=0
 ALLOWLIST=""
 
+need_arg() {
+  local opt="$1"
+  if [ $# -lt 2 ] || [ -z "${2}" ] || [[ "${2}" == -* ]]; then
+    echo "ERROR: ${opt} requires a value" >&2
+    sed -n '2,16p' "$0" >&2
+    exit 2
+  fi
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --ip)
-      SERVER_IP="${2:-}"
+      need_arg "$@"
+      SERVER_IP="$2"
       shift 2
       ;;
     --ports)
-      IFS=',' read -r -a PORTS <<<"${2:-443}"
+      need_arg "$@"
+      IFS=',' read -r -a PORTS <<<"$2"
       shift 2
       ;;
     --json)
@@ -47,11 +58,12 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     --allowlist)
-      ALLOWLIST="${2:-}"
+      need_arg "$@"
+      ALLOWLIST="$2"
       shift 2
       ;;
     -h | --help)
-      sed -n '2,20p' "$0"
+      sed -n '2,16p' "$0"
       exit 0
       ;;
     *)
@@ -109,10 +121,43 @@ is_allowlisted() {
   return 1
 }
 
+# Return 0 if the PEM on stdin covers hostname $1 (CN or SAN, including wildcards).
+cert_covers_host() {
+  local host="$1"
+  local pem
+  pem="$(cat)"
+  [ -n "$pem" ] || return 1
+  # OpenSSL 1.0.2+: -checkhost understands wildcards.
+  if printf '%s\n' "$pem" | openssl x509 -noout -checkhost "$host" >/dev/null 2>&1; then
+    return 0
+  fi
+  # Fallback for older openssl: compare CN and DNS SANs manually.
+  local cn sans name
+  cn=$(printf '%s\n' "$pem" | openssl x509 -noout -subject 2>/dev/null \
+    | sed -e 's/.*CN *= *//' -e 's/,.*//')
+  [ "$cn" = "$host" ] && return 0
+  if [[ "$cn" == \*.* ]]; then
+    local suffix="${cn#\*.}"
+    [[ "$host" == *."$suffix" && "$host" != *.*."$suffix" ]] && return 0
+  fi
+  sans=$(printf '%s\n' "$pem" | openssl x509 -noout -ext subjectAltName 2>/dev/null || true)
+  while IFS= read -r name; do
+    name="${name#DNS:}"
+    name="${name// /}"
+    [ -z "$name" ] && continue
+    [ "$name" = "$host" ] && return 0
+    if [[ "$name" == \*.* ]]; then
+      local suffix="${name#\*.}"
+      [[ "$host" == *."$suffix" && "$host" != *.*."$suffix" ]] && return 0
+    fi
+  done < <(printf '%s\n' "$sans" | tr ',' '\n' | grep -i 'DNS:')
+  return 1
+}
+
 check_one() {
   local d="$1" port="$2"
   local cert_cn="-" code body verdict catchall_hdr url resolve
-  local tmp
+  local tmp pem cert_ok=0
   tmp="$(mktemp)"
 
   if [ "$port" = "443" ]; then
@@ -124,10 +169,17 @@ check_one() {
     else
       _openssl() { openssl "$@"; }
     fi
-    cert_cn=$(echo \
-      | _openssl s_client -connect "${SERVER_IP}:443" -servername "$d" 2>/dev/null \
-      | openssl x509 -noout -subject 2>/dev/null \
-      | sed -e 's/.*CN *= *//' -e 's/,.*//')
+    pem=$(echo | _openssl s_client -connect "${SERVER_IP}:443" -servername "$d" 2>/dev/null \
+      | openssl x509 2>/dev/null || true)
+    if [ -n "$pem" ]; then
+      cert_cn=$(printf '%s\n' "$pem" | openssl x509 -noout -subject 2>/dev/null \
+        | sed -e 's/.*CN *= *//' -e 's/,.*//')
+      if printf '%s\n' "$pem" | cert_covers_host "$d"; then
+        cert_ok=1
+      fi
+    else
+      cert_cn="(tls failed)"
+    fi
     [ -z "$cert_cn" ] && cert_cn="(tls failed)"
     url="https://${d}/"
     resolve="${d}:443:${SERVER_IP}"
@@ -136,7 +188,8 @@ check_one() {
     resolve="${d}:80:${SERVER_IP}"
   fi
 
-  # Capture headers + body; prefer X-DA-Catchall when present.
+  # Fetch body/headers. -k is intentional: certificate identity is validated via
+  # openssl above; curl only retrieves the HTTP fingerprint here.
   code=$(curl -sk --max-time 15 -D "${tmp}.hdr" -o "$tmp" -w '%{http_code}' \
     "$url" --resolve "$resolve" 2>/dev/null)
   [ -n "$code" ] || code="000"
@@ -149,8 +202,9 @@ check_one() {
   elif [ -n "$catchall_hdr" ]; then
     verdict="CATCH-ALL (X-DA-Catchall=${catchall_hdr})"
     failed=1
-  elif [ "$port" = "443" ] && [ "$cert_cn" = "$CATCHALL_CERT_CN" ] && [[ "$body" == *"$CATCHALL_BODY"* ]]; then
-    verdict="CATCH-ALL (no vhost match, no valid SSL)"
+  elif [[ "$body" == *"$CATCHALL_BODY"* ]]; then
+    # Catch-all body is a failure on its own (any port), even if the cert CN changed.
+    verdict="CATCH-ALL (default page body)"
     failed=1
   elif [ "$port" = "443" ] && [ "$cert_cn" = "$CATCHALL_CERT_CN" ]; then
     verdict="WRONG CERT (default vhost cert)"
@@ -158,20 +212,19 @@ check_one() {
   elif [ "$port" = "443" ] && [ "$cert_cn" = "(tls failed)" ]; then
     verdict="TLS HANDSHAKE FAILED"
     failed=1
-  elif [ "$port" = "80" ] && [[ "$body" == *"$CATCHALL_BODY"* ]]; then
-    verdict="CATCH-ALL (default page body)"
+  elif [ "$port" = "443" ] && [ "$cert_ok" -ne 1 ]; then
+    verdict="WRONG CERT (does not cover ${d})"
     failed=1
   else
     verdict="ok"
   fi
 
   if [ "$CHECK_ACME" -eq 1 ]; then
-    local acme_code
+    local acme_code acme_body
     acme_code=$(curl -sk --max-time 15 -o /dev/null -w '%{http_code}' \
       "http://${d}/.well-known/acme-challenge/probe-test" \
-      --resolve "${d}:80:${SERVER_IP}" 2>/dev/null || echo "000")
-    # 404 from the domain docroot is fine; catching catch-all is not (same body).
-    local acme_body
+      --resolve "${d}:80:${SERVER_IP}" 2>/dev/null)
+    [ -n "$acme_code" ] || acme_code="000"
     acme_body=$(curl -sk --max-time 15 \
       "http://${d}/.well-known/acme-challenge/probe-test" \
       --resolve "${d}:80:${SERVER_IP}" 2>/dev/null | head -c 200 || true)
@@ -184,7 +237,6 @@ check_one() {
   fi
 
   if [ "$JSON" -eq 1 ]; then
-    # shellcheck disable=SC2086
     json_items+=("$(printf '{"port":%s,"host":"%s","cert_cn":"%s","http":"%s","verdict":"%s","catchall_header":"%s"}' \
       "$port" "$d" "$cert_cn" "$code" "$verdict" "$catchall_hdr")")
   else
