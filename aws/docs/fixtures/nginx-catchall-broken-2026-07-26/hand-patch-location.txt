@@ -1,0 +1,5 @@
+script=/home/tellerstec/bin/fix-nginx-loopback-listeners.sh
+plugin_copy=/home/tellerstec/domains/tellerstech.com/public_html/wp-content/plugins/tellerstech-landing/scripts/fix-nginx-loopback-listeners.sh
+injects_into=/usr/local/directadmin/data/users/tellerstec/nginx.conf
+cron=/var/spool/cron/root every 5 min with LOOPBACK_FIX_HEALTHCHECK_URL
+cust_nginx=absent

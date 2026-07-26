@@ -55,7 +55,52 @@ echo '*/5 * * * * root /usr/local/bin/ses-gmail-forward-health.sh' \
 chmod 644 /etc/cron.d/ses-gmail-forward-health
 ```
 
-## Backup hooks (server install)
+## Vhost listen reconciler (Linked IP drift)
+
+Keeps every domain's nginx `listen` on the address public traffic arrives on
+(primary private IP after EIP NAT). Root-cause fix is DirectAdmin Linked IP with
+`apply=yes`; the reconciler makes it self-healing after instance replacement.
+
+Change window: [`aws/docs/da-vhost-listen-change-window.md`](../../aws/docs/da-vhost-listen-change-window.md).
+Known-bad fixture: [`aws/docs/fixtures/nginx-catchall-broken-2026-07-26/`](../../aws/docs/fixtures/nginx-catchall-broken-2026-07-26/).
+
+| File | Install path |
+|------|----------------|
+| `da_vhost_listen_reconcile.sh` | `/usr/local/sbin/da-vhost-listen-reconcile.sh` |
+| `nginx_vhost_listen_invariant.sh` | `/usr/local/sbin/nginx-vhost-listen-invariant.sh` |
+| `vhost-listen.conf.example` | `/etc/da-vhost-listen/vhost-listen.conf` (edit; mode 600) |
+| `cron.d-da-vhost-listen` | `/etc/cron.d/da-vhost-listen` (mode 644) |
+| `da-vhost-listen-boot.service` | `/etc/systemd/system/da-vhost-listen-boot.service` |
+| `user_httpd_write_post-da-vhost-listen-check.sh` | `/usr/local/directadmin/scripts/custom/user_httpd_write_post/da-vhost-listen-check.sh` (mode 700, `diradmin:diradmin`) |
+| `update_post-da-vhost-listen.sh` | append/call from `/usr/local/directadmin/scripts/custom/update_post.sh` |
+
+```bash
+install -m 755 scripts/directadmin/da_vhost_listen_reconcile.sh \
+  /usr/local/sbin/da-vhost-listen-reconcile.sh
+install -m 755 scripts/directadmin/nginx_vhost_listen_invariant.sh \
+  /usr/local/sbin/nginx-vhost-listen-invariant.sh
+mkdir -p /etc/da-vhost-listen /usr/local/directadmin/scripts/custom/user_httpd_write_post
+install -m 600 scripts/directadmin/vhost-listen.conf.example \
+  /etc/da-vhost-listen/vhost-listen.conf
+# edit EXPECTED_PUBLIC_IP, HEALTH_ALERT_TO, ALLOWLIST_CATCHALL_HOSTS
+
+install -m 644 scripts/directadmin/cron.d-da-vhost-listen /etc/cron.d/da-vhost-listen
+install -m 644 scripts/directadmin/da-vhost-listen-boot.service \
+  /etc/systemd/system/da-vhost-listen-boot.service
+systemctl daemon-reload && systemctl enable da-vhost-listen-boot.service
+
+install -m 700 -o diradmin -g diradmin \
+  scripts/directadmin/user_httpd_write_post-da-vhost-listen-check.sh \
+  /usr/local/directadmin/scripts/custom/user_httpd_write_post/da-vhost-listen-check.sh
+
+# Offline detector proof (no box access needed):
+./scripts/directadmin/prove_vhost_listen_detector.sh
+```
+
+Bare reconciler invocations default to `--check`. Cron and the boot unit pass
+`--enforce` deliberately. The `user_httpd_write_post` hook is `--check` only.
+
+---
 
 Install on **both** DirectAdmin servers (`server` and `server2`) under `/usr/local/directadmin/scripts/custom/`.
 

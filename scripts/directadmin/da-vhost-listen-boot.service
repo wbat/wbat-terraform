@@ -1,0 +1,14 @@
+[Unit]
+Description=Reconcile DirectAdmin vhost listen addresses at boot
+After=network-online.target directadmin.service
+Wants=network-online.target
+Requires=directadmin.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/da-vhost-listen-reconcile.sh --enforce
+# Allow DA a moment after its own unit starts.
+ExecStartPre=/bin/sleep 5
+
+[Install]
+WantedBy=multi-user.target

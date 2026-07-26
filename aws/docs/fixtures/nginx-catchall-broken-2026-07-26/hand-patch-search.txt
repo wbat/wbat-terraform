@@ -1,0 +1,10 @@
+total 28
+drwx--x--x. 2 root root  140 Jul 23 16:31 .
+drwxr-xr-x. 3 root root 4096 Jul 23 16:31 ..
+-rw-r--r--  1 root root 6714 Jul 23 16:31 README
+-rwx------. 1 root root 2066 Jun 30 16:48 all_backups_post.sh
+-rwx------  1 root root  495 Jul 23 12:04 forwarder_create_post.sh
+-rwx------  1 root root  479 Jul 23 12:04 forwarder_delete_post.sh
+-rwx------  1 root root  226 Jun 30 16:48 system_backup_post.sh
+ls: cannot access '/usr/local/directadmin/custombuild/custom/nginx/': No such file or directory
+/usr/local/directadmin/custombuild/configure/unbound/loopback-listen.conf

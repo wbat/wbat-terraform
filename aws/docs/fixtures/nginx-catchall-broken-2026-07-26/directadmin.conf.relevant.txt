@@ -1,0 +1,7 @@
+apache_public_html=0
+lan_ip=172.30.0.87
+litespeed=0
+nginx=1
+nginx_proxy=0
+openlitespeed=0
+servername=server.wbat.net

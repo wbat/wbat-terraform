@@ -1,0 +1,5 @@
+# Reconcile DirectAdmin vhost listens every 10 minutes (auto-repair).
+# Install: copy to /etc/cron.d/da-vhost-listen (mode 644).
+SHELL=/bin/bash
+PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin
+*/10 * * * * root /usr/local/sbin/da-vhost-listen-reconcile.sh --enforce >/dev/null 2>&1

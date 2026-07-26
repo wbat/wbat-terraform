@@ -73,6 +73,9 @@ Brownfield resources are imported via blocks in [`aws/imports.tf`](aws/imports.t
 | Document | Description |
 |----------|-------------|
 | [CloudFront 502 troubleshooting](aws/docs/cloudfront-tellerstech-502-troubleshooting.md) | Origin connectivity and CloudFront error diagnosis |
+| [Nginx catch-all vhost regression](aws/docs/nginx-vhost-catchall-regression.md) | Other hosted domains serving the default page / wrong SSL cert |
+| [DA vhost listen change window](aws/docs/da-vhost-listen-change-window.md) | Linked IP fix, reconciler install, rollback |
+| [DirectAdmin scripts](scripts/directadmin/README.md) | SES forwarder + vhost-listen reconciler install tables |
 | [Terraform version upgrade](aws/docs/terraform-version-upgrade.md) | Incremental HCP Terraform / CI version bump process |
 | [Cost optimization checklist](aws/docs/cost-optimization-checklist.md) | EC2 sizing and cost review notes |
 | [Migration scripts](scripts/README.md) | Optional EC2 root-volume shrink tooling |
