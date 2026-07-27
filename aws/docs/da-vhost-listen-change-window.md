@@ -107,23 +107,51 @@ nginx -t && systemctl reload nginx
 ### Unlink a stale Linked IP (do **not** use task.queue delete)
 
 On this DA build, `action=linked_ips&ip_action=delete&...` in `task.queue` is a no-op
-(`dataskq: unknown taskq action`). Unlink via Admin UI (**IP Management** → EIP →
-Linked IPs → remove) or edit the EIP’s IP file, then rewrite:
+(`dataskq: unknown taskq action`). Prefer Admin UI (**IP Management** → EIP → Linked IPs →
+remove), **or** the file edit below. Do not proceed to `ip addr del` / reload until the
+stale address is gone from `linked_ips` and from `nginx -T`.
 
 ```bash
 EIP=44.214.133.234
 STALE=172.30.0.87   # example: forgotten cutover private IP
 KEEP=172.30.0.71    # must remain linked
+EIP_FILE=/usr/local/directadmin/data/admin/ips/$EIP
 
-# Backup, then set linked_ips to KEEP only (URL-encoding matches DA):
-#   linked_ips=<urlencoded KEEP>=apache%3Dyes%26dns%3Dno
-# File: /usr/local/directadmin/data/admin/ips/$EIP  (diradmin:diradmin, mode 600)
+cp -a "$EIP_FILE" "${EIP_FILE}.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+
+# Rewrite linked_ips to KEEP only (DA stores IP percent-encoded; '=' before flags stays).
+python3 - <<PY
+import pathlib, urllib.parse
+path = pathlib.Path("$EIP_FILE")
+keep, stale = "$KEEP", "$STALE"
+text = path.read_text().splitlines()
+enc = urllib.parse.quote(keep, safe="") + "=" + urllib.parse.quote("apache=yes&dns=no", safe="")
+out = []
+for line in text:
+    if line.startswith("linked_ips="):
+        out.append("linked_ips=" + enc)
+    else:
+        out.append(line)
+path.write_text("\\n".join(out) + "\\n")
+raw = urllib.parse.unquote(enc)
+assert keep in raw and stale not in raw, raw
+print("linked_ips now:", raw)
+PY
+chown diradmin:diradmin "$EIP_FILE"
+chmod 600 "$EIP_FILE"
 
 /usr/local/directadmin/directadmin taskq --run 'action=rewrite&value=httpd'
+
+# Gate: configs must no longer listen on STALE before touching the NIC / reload.
+count=$(nginx -T 2>/dev/null | grep -c "listen ${STALE}" || true)
+if [ "$count" -ne 0 ]; then
+  echo "ERROR: still $count listen lines for $STALE — aborting (restore $EIP_FILE.bak-*)" >&2
+  exit 1
+fi
+
 ip addr del "${STALE}/24" dev eth0 2>/dev/null || true
-# If the stale IP is status=free and not in ip.list, remove
-#   /usr/local/directadmin/data/admin/ips/$STALE
-nginx -T 2>/dev/null | grep -c "listen ${STALE}"   # expect 0
+# If the stale IP is status=free and not in ip.list:
+#   mv /usr/local/directadmin/data/admin/ips/$STALE /var/backups/da-vhost-listen/
 nginx -t && systemctl reload nginx
 ```
 
