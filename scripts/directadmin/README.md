@@ -61,6 +61,8 @@ Keeps every domain's nginx `listen` on the address public traffic arrives on
 (primary private IP after EIP NAT). Root-cause fix is DirectAdmin Linked IP with
 `apply=yes`; the reconciler makes it self-healing after instance replacement.
 
+Install on **both** DirectAdmin hosts (`server.wbat.net` and `server2.wbat.net`).
+
 Change window: [`aws/docs/da-vhost-listen-change-window.md`](../../aws/docs/da-vhost-listen-change-window.md).
 Known-bad fixture: [`aws/docs/fixtures/nginx-catchall-broken-2026-07-26/`](../../aws/docs/fixtures/nginx-catchall-broken-2026-07-26/).
 
@@ -74,15 +76,29 @@ Known-bad fixture: [`aws/docs/fixtures/nginx-catchall-broken-2026-07-26/`](../..
 | `user_httpd_write_post-da-vhost-listen-check.sh` | `/usr/local/directadmin/scripts/custom/user_httpd_write_post/da-vhost-listen-check.sh` (mode 700, `diradmin:diradmin`) |
 | `update_post-da-vhost-listen.sh` | append/call from `/usr/local/directadmin/scripts/custom/update_post.sh` |
 
+### Install / update (from a repo checkout on the box)
+
+The `install` sources are paths **inside this git repo**. They are not under a user
+home (e.g. `/home/tellerstec`). On the host:
+
 ```bash
+# First time:
+#   cd /root && git clone git@github.com:wbat/wbat-terraform.git
+cd /root/wbat-terraform
+git fetch origin && git checkout main && git pull
+
+# Full install (or re-install wiring). Do NOT overwrite an edited
+# /etc/da-vhost-listen/vhost-listen.conf with the example unless intentional.
 install -m 755 scripts/directadmin/da_vhost_listen_reconcile.sh \
   /usr/local/sbin/da-vhost-listen-reconcile.sh
 install -m 755 scripts/directadmin/nginx_vhost_listen_invariant.sh \
   /usr/local/sbin/nginx-vhost-listen-invariant.sh
 mkdir -p /etc/da-vhost-listen /usr/local/directadmin/scripts/custom/user_httpd_write_post
-install -m 600 scripts/directadmin/vhost-listen.conf.example \
-  /etc/da-vhost-listen/vhost-listen.conf
-# edit EXPECTED_PUBLIC_IP, HEALTH_ALERT_TO, ALLOWLIST_CATCHALL_HOSTS
+if [[ ! -f /etc/da-vhost-listen/vhost-listen.conf ]]; then
+  install -m 600 scripts/directadmin/vhost-listen.conf.example \
+    /etc/da-vhost-listen/vhost-listen.conf
+fi
+# Edit /etc/da-vhost-listen/vhost-listen.conf per host (see below).
 
 install -m 644 scripts/directadmin/cron.d-da-vhost-listen /etc/cron.d/da-vhost-listen
 install -m 644 scripts/directadmin/da-vhost-listen-boot.service \
@@ -93,12 +109,38 @@ install -m 700 -o diradmin -g diradmin \
   scripts/directadmin/user_httpd_write_post-da-vhost-listen-check.sh \
   /usr/local/directadmin/scripts/custom/user_httpd_write_post/da-vhost-listen-check.sh
 
-# Offline detector proof (no box access needed):
-./scripts/directadmin/prove_vhost_listen_detector.sh
+/usr/local/sbin/da-vhost-listen-reconcile.sh --check
 ```
+
+**Script-only update** after a reconciler PR (config/cron already present):
+
+```bash
+cd /root/wbat-terraform && git pull
+install -m 755 scripts/directadmin/da_vhost_listen_reconcile.sh \
+  /usr/local/sbin/da-vhost-listen-reconcile.sh
+install -m 755 scripts/directadmin/nginx_vhost_listen_invariant.sh \
+  /usr/local/sbin/nginx-vhost-listen-invariant.sh
+/usr/local/sbin/da-vhost-listen-reconcile.sh --check
+```
+
+### Per-host `vhost-listen.conf`
+
+| Host | `EXPECTED_PUBLIC_IP` | Typical arrival (auto if unset) | `ALLOWLIST_CATCHALL_HOSTS` (example) |
+|------|----------------------|----------------------------------|--------------------------------------|
+| `server.wbat.net` | `44.214.133.234` | `172.30.0.71` | `server.wbat.net wbat.net` |
+| `server2.wbat.net` | `34.205.151.236` | `172.30.0.57` | `server2.wbat.net` |
+
+Set `ENFORCE_REQUIRE_PUBLIC_IP` to the same EIP as `EXPECTED_PUBLIC_IP` on multi-host
+installs so `--enforce` cannot run against the wrong box.
 
 Bare reconciler invocations default to `--check`. Cron and the boot unit pass
 `--enforce` deliberately. The `user_httpd_write_post` hook is `--check` only.
+
+Offline detector proof (from a laptop checkout, no box access needed):
+
+```bash
+./scripts/directadmin/prove_vhost_listen_detector.sh
+```
 
 ---
 
