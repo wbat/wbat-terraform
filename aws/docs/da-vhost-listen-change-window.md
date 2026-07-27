@@ -1,6 +1,8 @@
 # Operator change window: fix DirectAdmin Linked IP / lan_ip (vhost catch-all)
 
-Primary only. No `server2` rehearsal. Backups + `nginx -t` gate + revert on failure.
+Primary only for the original catch-all fix. Install the reconciler on **both**
+`server` and `server2` afterward (see [`scripts/directadmin/README.md`](../../scripts/directadmin/README.md)).
+Backups + `nginx -t` gate + revert on failure.
 
 ## Status (2026-07-26)
 
