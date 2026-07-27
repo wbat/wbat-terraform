@@ -369,6 +369,19 @@ remove_ip_from_device() {
   fi
 }
 
+# Count generated listen lines for an address (must be 0 before ip addr del).
+nginx_listen_count_for_ip() {
+  local ip="$1"
+  local nginx_bin tmp count
+  nginx_bin="$(command -v nginx || true)"
+  [[ -x "$nginx_bin" ]] || nginx_bin=/usr/sbin/nginx
+  tmp="$(mktemp)"
+  "$nginx_bin" -T >"$tmp" 2>/dev/null || "$nginx_bin" -T >"$tmp" 2>&1 || true
+  count="$(grep -cE "listen[[:space:]]+${ip}([:[:space:]]|$)" "$tmp" 2>/dev/null || true)"
+  rm -f "$tmp"
+  printf '%s\n' "${count:-0}"
+}
+
 sync_rewrite() {
   "$DA_BIN" taskq --run 'action=rewrite&value=httpd'
 }
@@ -572,7 +585,50 @@ main() {
     exit 1
   fi
 
-  # After configs no longer listen on stales, drop OS secondaries.
+  # Gate before NIC delete: configs must not still listen on stales (nginx -t
+  # succeeds while the address remains assigned). Same order as the change-window.
+  if ((${#stales_to_drop[@]} > 0)); then
+    local stale count
+    for stale in "${stales_to_drop[@]}"; do
+      count="$(nginx_listen_count_for_ip "$stale")"
+      if [[ "$count" -ne 0 ]]; then
+        log "ERROR still ${count} listen line(s) for stale ${stale} after rewrite; reverting"
+        restore_state "$backup"
+        sync_rewrite || true
+        nginx_test && nginx_reload || true
+        rate_limited_alert "da-vhost-listen enforce REVERTED (stale listen) on $(hostname -f)" \
+          "nginx -T still has listen ${stale}; restored ${backup}"
+        exit 1
+      fi
+      log "OK no listen lines for stale ${stale}"
+    done
+  fi
+
+  if ! invariant_check "$arrival"; then
+    log "ERROR invariant still failing after rewrite (before NIC change); reverting"
+    restore_state "$backup"
+    sync_rewrite || true
+    nginx_test && nginx_reload || true
+    rate_limited_alert "da-vhost-listen enforce REVERTED (invariant) on $(hostname -f)" \
+      "invariant failed after rewrite; restored ${backup}"
+    exit 1
+  fi
+
+  if [[ -n "$public_ip" ]]; then
+    local leftover
+    leftover="$(stale_linked_ips "$public_ip" "$arrival" | tr '\n' ' ')"
+    if [[ -n "${leftover// }" ]]; then
+      log "ERROR stale linked_ip still present after rewrite: ${leftover}"
+      restore_state "$backup"
+      sync_rewrite || true
+      nginx_test && nginx_reload || true
+      rate_limited_alert "da-vhost-listen enforce REVERTED (stale linked_ip) on $(hostname -f)" \
+        "stale still linked: ${leftover}; restored ${backup}"
+      exit 1
+    fi
+  fi
+
+  # Safe now: no listen on stales, arrival invariant holds, Linked IP file clean.
   if ((${#stales_to_drop[@]} > 0)); then
     local stale
     for stale in "${stales_to_drop[@]}"; do
@@ -581,31 +637,28 @@ main() {
     done
   fi
 
+  if ! nginx_test; then
+    log "ERROR nginx -t failed after removing stale addresses; reverting"
+    restore_state "$backup"
+    # Best-effort: re-add may need startips / manual; restore DA state + rewrite first.
+    sync_rewrite || true
+    nginx_test && nginx_reload || true
+    rate_limited_alert "da-vhost-listen enforce REVERTED (post-del nginx -t) on $(hostname -f)" \
+      "nginx -t failed after ip addr del; restored ${backup}"
+    exit 1
+  fi
+
   nginx_reload
   log "FIXED nginx reloaded"
 
   if ! invariant_check "$arrival"; then
-    log "ERROR invariant still failing after enforce; reverting"
+    log "ERROR invariant still failing after reload; reverting"
     restore_state "$backup"
     sync_rewrite || true
     nginx_test && nginx_reload || true
-    rate_limited_alert "da-vhost-listen enforce REVERTED (invariant) on $(hostname -f)" \
+    rate_limited_alert "da-vhost-listen enforce REVERTED (invariant post-reload) on $(hostname -f)" \
       "invariant failed after reload; restored ${backup}"
     exit 1
-  fi
-
-  if [[ -n "$public_ip" ]]; then
-    local leftover
-    leftover="$(stale_linked_ips "$public_ip" "$arrival" | tr '\n' ' ')"
-    if [[ -n "${leftover// }" ]]; then
-      log "ERROR stale linked_ip still present after enforce: ${leftover}"
-      restore_state "$backup"
-      sync_rewrite || true
-      nginx_test && nginx_reload || true
-      rate_limited_alert "da-vhost-listen enforce REVERTED (stale linked_ip) on $(hostname -f)" \
-        "stale still linked: ${leftover}; restored ${backup}"
-      exit 1
-    fi
   fi
 
   log "OK enforce complete"
