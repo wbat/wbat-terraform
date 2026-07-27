@@ -2,6 +2,24 @@
 
 Primary only. No `server2` rehearsal. Backups + `nginx -t` gate + revert on failure.
 
+## Status (2026-07-26)
+
+Done on primary (`server.wbat.net` / `i-0118b8ede80b52ef7`):
+
+| Step | Result |
+|------|--------|
+| Link arrival IP `172.30.0.71` to EIP `44.214.133.234` (`apache=yes`, `dns=no`) | Done |
+| Set `lan_ip=172.30.0.71` | Done |
+| Retire tellerstech loopback fixer | Done |
+| Unlink stale cutover IP `172.30.0.87` + remove eth0 secondary + drop free DA IP object | Done (backup under `/var/backups/da-vhost-listen/unlink87-20260727T004556Z`) |
+
+Primary now matches **server2**’s pattern: one EIP ↔ one AWS private IP only.
+`server2` (`34.205.151.236` ↔ `172.30.0.57`) was already clean and needed no change.
+
+`172.30.0.87` was the old primary’s private IP before the 2026-06-30 shrink cutover
+(large volume → 200 GB instance). It was never reassigned on the new ENI; leaving it
+linked was forgotten cleanup, not required for traffic once `.71` was linked.
+
 ## Preflight
 
 1. SSM session to primary (`i-0118b8ede80b52ef7` / `server.wbat.net`).
@@ -71,21 +89,69 @@ echo "action=ipmanager&type=api&method=POST&command=CMD_API_IP_MANAGER&action=ad
   >> /usr/local/directadmin/data/task.queue
 
 # 2) Link arrival IP to EIP; apply to existing domains; keep private IP out of DNS
+#    (task.queue linked_ips *add* works on this DA build)
 echo "action=linked_ips&ip_action=add&ip=44.214.133.234&ip_to_link=172.30.0.71&apache=yes&dns=no&apply=yes" \
   >> /usr/local/directadmin/data/task.queue
 
-# 3) Drop stale .87 link
-echo "action=linked_ips&ip_action=delete&ip=44.214.133.234&ip_to_link=172.30.0.87&apache=yes&dns=no&apply=yes" \
-  >> /usr/local/directadmin/data/task.queue
-
-# 4) lan_ip
+# 3) lan_ip
 sed -i 's/^lan_ip=.*/lan_ip=172.30.0.71/' /usr/local/directadmin/conf/directadmin.conf
 
-# 5) Drain queue + synchronous rewrite
+# 4) Drain queue + synchronous rewrite
 /usr/local/directadmin/directadmin taskq --run-all
 /usr/local/directadmin/directadmin taskq --run 'action=rewrite&value=httpd'
 
-# 6) Gate
+# 5) Gate
+nginx -t && systemctl reload nginx
+```
+
+### Unlink a stale Linked IP (do **not** use task.queue delete)
+
+On this DA build, `action=linked_ips&ip_action=delete&...` in `task.queue` is a no-op
+(`dataskq: unknown taskq action`). Prefer Admin UI (**IP Management** → EIP → Linked IPs →
+remove), **or** the file edit below. Do not proceed to `ip addr del` / reload until the
+stale address is gone from `linked_ips` and from `nginx -T`.
+
+```bash
+EIP=44.214.133.234
+STALE=172.30.0.87   # example: forgotten cutover private IP
+KEEP=172.30.0.71    # must remain linked
+EIP_FILE=/usr/local/directadmin/data/admin/ips/$EIP
+
+cp -a "$EIP_FILE" "${EIP_FILE}.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+
+# Rewrite linked_ips to KEEP only (DA stores IP percent-encoded; '=' before flags stays).
+python3 - <<PY
+import pathlib, urllib.parse
+path = pathlib.Path("$EIP_FILE")
+keep, stale = "$KEEP", "$STALE"
+text = path.read_text().splitlines()
+enc = urllib.parse.quote(keep, safe="") + "=" + urllib.parse.quote("apache=yes&dns=no", safe="")
+out = []
+for line in text:
+    if line.startswith("linked_ips="):
+        out.append("linked_ips=" + enc)
+    else:
+        out.append(line)
+path.write_text("\\n".join(out) + "\\n")
+raw = urllib.parse.unquote(enc)
+assert keep in raw and stale not in raw, raw
+print("linked_ips now:", raw)
+PY
+chown diradmin:diradmin "$EIP_FILE"
+chmod 600 "$EIP_FILE"
+
+/usr/local/directadmin/directadmin taskq --run 'action=rewrite&value=httpd'
+
+# Gate: configs must no longer listen on STALE before touching the NIC / reload.
+count=$(nginx -T 2>/dev/null | grep -c "listen ${STALE}" || true)
+if [ "$count" -ne 0 ]; then
+  echo "ERROR: still $count listen lines for $STALE — aborting (restore $EIP_FILE.bak-*)" >&2
+  exit 1
+fi
+
+ip addr del "${STALE}/24" dev eth0 2>/dev/null || true
+# If the stale IP is status=free and not in ip.list:
+#   mv /usr/local/directadmin/data/admin/ips/$STALE /var/backups/da-vhost-listen/
 nginx -t && systemctl reload nginx
 ```
 
@@ -119,7 +185,8 @@ renewal required once vhost matching is restored.
 
 ```bash
 # restore backups from /var/backups/da-vhost-listen/<stamp>
-# unlink .71 / re-link .87 as needed, restore lan_ip, rewrite, nginx -t, reload
+# (for the .87 unlink specifically: unlink87-20260727T004556Z)
+# restore EIP linked_ips / lan_ip / ips/* as needed, rewrite, nginx -t, reload
 /usr/local/directadmin/directadmin taskq --run 'action=rewrite&value=httpd'
 nginx -t && systemctl reload nginx
 ```

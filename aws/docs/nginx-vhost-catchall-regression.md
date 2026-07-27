@@ -114,6 +114,11 @@ procedure (backups, hand-patch cron disable ordering, `nginx -t` gate, rollback)
 
 → [`da-vhost-listen-change-window.md`](da-vhost-listen-change-window.md)
 
+**Applied 2026-07-26:** Linked IP / `lan_ip` set to `172.30.0.71`. Stale cutover private IP
+`172.30.0.87` (old primary before the shrink volume cutover) was later unlinked and removed
+from eth0 so primary matches server2: one EIP ↔ one real private IP only. See the change
+window **Status** section; do not use `task.queue` `linked_ips` delete on this DA build.
+
 Known-bad `nginx -T` captured before the fix (offline detector fixture):
 
 → [`fixtures/nginx-catchall-broken-2026-07-26/`](fixtures/nginx-catchall-broken-2026-07-26/)
