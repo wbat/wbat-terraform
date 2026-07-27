@@ -108,8 +108,9 @@ nginx -t && systemctl reload nginx
 
 On this DA build, `action=linked_ips&ip_action=delete&...` in `task.queue` is a no-op
 (`dataskq: unknown taskq action`). Prefer Admin UI (**IP Management** → EIP → Linked IPs →
-remove), **or** the file edit below. Do not proceed to `ip addr del` / reload until the
-stale address is gone from `linked_ips` and from `nginx -T`.
+remove), **`da-vhost-listen-reconcile.sh --enforce`** (rewrites `linked_ips` to the arrival
+IP only and strips OS secondaries), **or** the file edit below. Do not proceed to
+`ip addr del` / reload until the stale address is gone from `linked_ips` and from `nginx -T`.
 
 ```bash
 EIP=44.214.133.234

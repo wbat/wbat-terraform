@@ -179,6 +179,16 @@ arrival_linked() {
   return 1
 }
 
+# Print Linked IPs on $public_ip that are not the arrival address (stale cutover IPs, etc.).
+stale_linked_ips() {
+  local public_ip="$1" arrival="$2"
+  local ip
+  while IFS=$'\t' read -r ip _flags; do
+    [[ -z "$ip" || "$ip" == "$arrival" ]] && continue
+    printf '%s\n' "$ip"
+  done < <(linked_ips_for "$public_ip")
+}
+
 INVARIANT_BIN="${DA_VHOST_INVARIANT:-/usr/local/sbin/nginx-vhost-listen-invariant.sh}"
 if [[ ! -x "$INVARIANT_BIN" ]]; then
   # Repo filename (underscore) if installed alongside the reconciler.
@@ -299,6 +309,8 @@ queue_linked_ip() {
   local public_ip="$1" arrival="$2"
   # Register private IP without touching the NIC (DA API via task.queue style).
   # Prefer task.queue linked_ips add with apply=yes.
+  # Note: linked_ips *delete* via task.queue is a no-op on current DA ("unknown
+  # taskq action"); use set_linked_ips_keep_only instead.
   printf 'action=linked_ips&ip_action=add&ip=%s&ip_to_link=%s&apache=yes&dns=no&apply=yes\n' \
     "$public_ip" "$arrival" >>"$TASK_QUEUE"
 }
@@ -310,10 +322,51 @@ queue_register_ip() {
     "$arrival" "$mask" >>"$TASK_QUEUE"
 }
 
-unlink_stale() {
-  local public_ip="$1" stale="$2"
-  printf 'action=linked_ips&ip_action=delete&ip=%s&ip_to_link=%s&apache=yes&dns=no&apply=yes\n' \
-    "$public_ip" "$stale" >>"$TASK_QUEUE"
+# Set EIP linked_ips to a single private IP (apache=yes, dns=no). Used to drop
+# stale cutover Linked IPs — task.queue linked_ips delete does not work here.
+set_linked_ips_keep_only() {
+  local public_ip="$1" keep="$2"
+  local f="${IPS_DIR}/${public_ip}"
+  [[ -f "$f" ]] || {
+    log "ERROR missing IP file $f"
+    return 1
+  }
+  python3 - "$f" "$keep" <<'PY'
+import pathlib, sys, urllib.parse
+path = pathlib.Path(sys.argv[1])
+keep = sys.argv[2]
+enc = urllib.parse.quote(keep, safe="") + "=" + urllib.parse.quote("apache=yes&dns=no", safe="")
+out = []
+for line in path.read_text().splitlines():
+    if line.startswith("linked_ips="):
+        out.append("linked_ips=" + enc)
+    else:
+        out.append(line)
+if not any(l.startswith("linked_ips=") for l in out):
+    out.append("linked_ips=" + enc)
+path.write_text("\n".join(out) + "\n")
+raw = urllib.parse.unquote(enc)
+assert keep in raw, raw
+print(raw)
+PY
+  chown diradmin:diradmin "$f" 2>/dev/null || true
+  chmod 600 "$f" 2>/dev/null || true
+}
+
+# Drop a leftover secondary from the NIC (best-effort; AWS may not own it).
+remove_ip_from_device() {
+  local ip="$1"
+  local eth
+  eth="$(ip -4 -o addr show to "${ip}/32" 2>/dev/null | awk '{print $2; exit}')"
+  [[ -n "$eth" ]] || return 0
+  if [[ -x /usr/local/directadmin/scripts/removeip ]]; then
+    /usr/local/directadmin/scripts/removeip "$ip" >/dev/null 2>&1 || true
+  fi
+  if ip -4 addr show dev "$eth" 2>/dev/null | grep -q "inet ${ip}/"; then
+    ip addr del "${ip}/24" dev "$eth" 2>/dev/null \
+      || ip addr del "${ip}/32" dev "$eth" 2>/dev/null \
+      || true
+  fi
 }
 
 sync_rewrite() {
@@ -405,11 +458,19 @@ main() {
     else
       log "OK linked_ip present: ${arrival} -> ${public_ip}"
     fi
+    local stale
+    while IFS= read -r stale; do
+      [[ -z "$stale" ]] && continue
+      log "ERROR stale linked_ip: ${stale} still linked to ${public_ip} (want only ${arrival})"
+      drift=1
+    done < <(stale_linked_ips "$public_ip" "$arrival")
   fi
 
+  local invariant_failed=0
   if ! invariant_check "$arrival"; then
     log "ERROR nginx invariant: one or more server_names lack listen on ${arrival}"
     drift=1
+    invariant_failed=1
   else
     log "OK nginx invariant: all server_names listen on ${arrival} :80 and :443"
   fi
@@ -426,16 +487,24 @@ main() {
   fi
 
   if [[ "$MODE" == "dry-run" ]]; then
-    log "DRY-RUN would: register ${arrival} if needed, link to ${public_ip}, set lan_ip, rewrite, nginx -t, reload"
+    log "DRY-RUN would: register ${arrival} if needed, link to ${public_ip}, drop stale Linked IPs, set lan_ip, rewrite, remove stale secondaries from NIC, nginx -t, reload"
     exit 1
   fi
 
   # --enforce
   local stamp backup mask
+  local -a stales_to_drop=()
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   backup="$(backup_state "$stamp")"
   log "OK backup at $backup"
   mask="$(netmask_for_arrival "$arrival")"
+
+  if [[ -n "$public_ip" ]]; then
+    while IFS= read -r stale; do
+      [[ -z "$stale" ]] && continue
+      stales_to_drop+=("$stale")
+    done < <(stale_linked_ips "$public_ip" "$arrival")
+  fi
 
   if [[ -n "$public_ip" ]] && ! ip_registered "$arrival"; then
     log "FIXED queue register IP ${arrival} netmask=${mask} add_to_device=no"
@@ -444,23 +513,15 @@ main() {
     log "SKIP register IP (already in ip.list or no public IP)"
   fi
 
+  local need_link_queue=0
   if [[ -n "$public_ip" ]] && ! arrival_linked "$public_ip" "$arrival"; then
     log "FIXED queue linked_ips add ${arrival} -> ${public_ip} apply=yes"
     queue_linked_ip "$public_ip" "$arrival"
-  elif [[ -n "$public_ip" ]]; then
-    # Already linked but invariant failed — re-apply to existing domains.
+    need_link_queue=1
+  elif [[ -n "$public_ip" && "$invariant_failed" -eq 1 ]]; then
     log "FIXED queue linked_ips re-apply ${arrival} -> ${public_ip}"
     queue_linked_ip "$public_ip" "$arrival"
-  fi
-
-  # Drop other linked privates that are not the arrival IP (e.g. stale cutover IP).
-  if [[ -n "$public_ip" ]]; then
-    local ip
-    while IFS=$'\t' read -r ip _flags; do
-      [[ -z "$ip" || "$ip" == "$arrival" ]] && continue
-      log "FIXED queue unlink stale linked_ip ${ip} from ${public_ip}"
-      unlink_stale "$public_ip" "$ip"
-    done < <(linked_ips_for "$public_ip")
+    need_link_queue=1
   fi
 
   set_lan_ip "$arrival"
@@ -469,15 +530,29 @@ main() {
   # Release flock before rewrite so user_httpd_write_post --check hooks do not deadlock.
   release_lock
 
-  # Drain queued linked_ip / ipmanager actions, then rewrite.
+  # Drain queued ipmanager / linked_ips *add* actions, then normalize linked_ips.
   if [[ -x "$DA_BIN" ]]; then
-    # Prefer a bounded drain: run queued items once; avoid hung --run-all.
     timeout 120 "$DA_BIN" taskq --run 'action=nothing' >/dev/null 2>&1 || true
-    # Give dataskq a brief window if tasks remain, then force rewrite.
     if [[ -s "$TASK_QUEUE" ]]; then
       log "OK waiting briefly for task.queue drain"
       sleep 15
     fi
+  fi
+
+  if [[ -n "$public_ip" ]]; then
+    # Keep-only strips stales (task.queue delete is a no-op on this DA build).
+    if [[ "$need_link_queue" -eq 1 || "${#stales_to_drop[@]}" -gt 0 ]]; then
+      log "FIXED set linked_ips keep-only ${arrival} on ${public_ip}"
+      set_linked_ips_keep_only "$public_ip" "$arrival" || {
+        log "ERROR failed to rewrite linked_ips on ${public_ip}"
+        restore_state "$backup"
+        rate_limited_alert "da-vhost-listen enforce FAILED on $(hostname -f)" "linked_ips file update failed"
+        exit 1
+      }
+    fi
+  fi
+
+  if [[ -x "$DA_BIN" ]]; then
     timeout 300 "$DA_BIN" taskq --run 'action=rewrite&value=httpd' \
       || sync_rewrite
     log "OK rewrite httpd"
@@ -497,6 +572,15 @@ main() {
     exit 1
   fi
 
+  # After configs no longer listen on stales, drop OS secondaries.
+  if ((${#stales_to_drop[@]} > 0)); then
+    local stale
+    for stale in "${stales_to_drop[@]}"; do
+      log "FIXED remove stale ${stale} from device (best-effort)"
+      remove_ip_from_device "$stale"
+    done
+  fi
+
   nginx_reload
   log "FIXED nginx reloaded"
 
@@ -508,6 +592,20 @@ main() {
     rate_limited_alert "da-vhost-listen enforce REVERTED (invariant) on $(hostname -f)" \
       "invariant failed after reload; restored ${backup}"
     exit 1
+  fi
+
+  if [[ -n "$public_ip" ]]; then
+    local leftover
+    leftover="$(stale_linked_ips "$public_ip" "$arrival" | tr '\n' ' ')"
+    if [[ -n "${leftover// }" ]]; then
+      log "ERROR stale linked_ip still present after enforce: ${leftover}"
+      restore_state "$backup"
+      sync_rewrite || true
+      nginx_test && nginx_reload || true
+      rate_limited_alert "da-vhost-listen enforce REVERTED (stale linked_ip) on $(hostname -f)" \
+        "stale still linked: ${leftover}; restored ${backup}"
+      exit 1
+    fi
   fi
 
   log "OK enforce complete"
