@@ -6,11 +6,21 @@
 # fbclid, …) must not fragment the cache or a scrape of unique ?x= values will miss-cache
 # every request and burn PHP-FPM. Origin request policy still forwards all query strings
 # on a miss so WordPress can see them when needed.
+#
+# default_ttl is deliberately short. It applies only to responses the origin sends
+# with no cache-control, and every healthy page here sets its own (max-age=300 on the
+# homepage and the two news hubs, 86400 on the rest), so it governs exactly one thing:
+# how long a response that arrives without the header stays cached. The empty-gzip
+# fault produces precisely that -- a 20-byte gzip body carrying no cache-control -- so
+# at the previous 2 hours a single poisoned object served a blank homepage to every
+# gzip-speaking browser, while the healthy variant beside it expired every 5 minutes.
+# One minute bounds the episode without changing the lifetime of any healthy response.
+# See docs/empty-gzip-page-cache.md in the tellerstech-website repo.
 resource "aws_cloudfront_cache_policy" "wordpress" {
   name        = "WordPress-CachePolicy"
   comment     = "WordPress pages: session cookies + functional query strings only in cache key"
   min_ttl     = 0
-  default_ttl = 7200  # 2 hours
+  default_ttl = 60    # only applies with no origin cache-control -- see above
   max_ttl     = 86400 # 1 day
 
   parameters_in_cache_key_and_forwarded_to_origin {
@@ -73,11 +83,15 @@ resource "aws_cloudfront_cache_policy" "wordpress" {
 # media kit) - same as WordPress policy but capped at 12 hours so these pages
 # refresh at least twice a day. Individual episodes are NOT included here and
 # keep the default 1 day ceiling.
+#
+# default_ttl matches the WordPress policy's one-minute bound, for the same reason:
+# these pages come from the same origin and can be poisoned the same way. Every
+# occurrence so far has been the homepage, but nothing about the fault is path-specific.
 resource "aws_cloudfront_cache_policy" "podcast" {
   name        = "Podcast-CachePolicy"
   comment     = "SIW landing pages: 12h max TTL; functional query strings only in cache key"
   min_ttl     = 0
-  default_ttl = 7200  # 2 hours
+  default_ttl = 60    # same bound as the WordPress policy -- see above
   max_ttl     = 43200 # 12 hours
 
   parameters_in_cache_key_and_forwarded_to_origin {
