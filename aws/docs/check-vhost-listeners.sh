@@ -189,8 +189,9 @@ check_one() {
   local d="$1" port="$2"
   local cert_cn="-" code body verdict catchall_hdr url resolve
   local tmp pem cert_ok=0
-  # Snapshot so we can tell whether *this* check failed, not an earlier domain.
-  local failed_before="$failed"
+  # Per-probe verdict flag, aggregated into the global `failed` at the end. Using a local
+  # keeps each probe's classification independent of whether an earlier domain failed.
+  local probe_failed=0
   tmp="$(mktemp)"
 
   if [ "$port" = "443" ]; then
@@ -234,20 +235,25 @@ check_one() {
     verdict="ok (allowlisted)"
   elif [ -n "$catchall_hdr" ]; then
     verdict="CATCH-ALL (X-DA-Catchall=${catchall_hdr})"
-    failed=1
+    probe_failed=1
   elif [[ "$body" == *"$CATCHALL_BODY"* ]]; then
     # Catch-all body is a failure on its own (any port), even if the cert CN changed.
     verdict="CATCH-ALL (default page body)"
-    failed=1
+    probe_failed=1
   elif [ "$port" = "443" ] && [ "$cert_cn" = "$CATCHALL_CERT_CN" ]; then
     verdict="WRONG CERT (default vhost cert)"
-    failed=1
+    probe_failed=1
   elif [ "$port" = "443" ] && [ "$cert_cn" = "(tls failed)" ]; then
     verdict="TLS HANDSHAKE FAILED"
-    failed=1
+    probe_failed=1
   elif [ "$port" = "443" ] && [ "$cert_ok" -ne 1 ]; then
     verdict="WRONG CERT (does not cover ${d})"
-    failed=1
+    probe_failed=1
+  elif [ "$code" = "000" ]; then
+    # Checked after the TLS-specific cases so a handshake failure keeps its own verdict.
+    # Never report a dead probe as ok: it proves nothing about vhost binding.
+    verdict="NO HTTP RESPONSE (connect/timeout)"
+    probe_failed=1
   else
     verdict="ok"
   fi
@@ -255,16 +261,25 @@ check_one() {
   # Downgrade a TLS-only miss to a warning when plain HTTP already proved this domain's
   # vhost is bound to the arrival address. The regression breaks :80 too, so :80 passing
   # means the listen config is right and only a cert/HTTPS vhost is absent.
-  if [ "$port" = "443" ] && [ "$failed_before" -eq 0 ] && [ "$failed" -eq 1 ] \
+  # Keyed on this probe's own result, not the global aggregate, so an earlier domain's
+  # failure cannot change how later domains are classified.
+  if [ "$port" = "443" ] && [ "$probe_failed" -eq 1 ] \
     && [ "$STRICT_TLS" -eq 0 ] && [ "$CHECKS_PORT_80" -eq 1 ] && [ "$port80_ok" -eq 1 ]; then
     verdict="NO-TLS (no HTTPS vhost for this domain; :80 ok)"
-    failed="$failed_before"
+    probe_failed=0
     warned=$((warned + 1))
   fi
 
-  # Remember the plain-HTTP outcome for the :443 judgement on this same domain.
+  # Remember the plain-HTTP outcome for the :443 judgement on this same domain. Require a
+  # real HTTP status as well as an ok verdict: a timed-out or refused :80 probe is not
+  # evidence that the domain reached its own vhost. "ok (allowlisted)" is excluded too,
+  # since an allowlisted host is expected to land on the catch-all.
   if [ "$port" = "80" ]; then
-    if [ "$verdict" = "ok" ]; then port80_ok=1; else port80_ok=0; fi
+    if [ "$verdict" = "ok" ] && [[ "$code" =~ ^[1-5][0-9][0-9]$ ]]; then
+      port80_ok=1
+    else
+      port80_ok=0
+    fi
   fi
 
   if [ "$CHECK_ACME" -eq 1 ]; then
@@ -278,18 +293,22 @@ check_one() {
       --resolve "${d}:80:${SERVER_IP}" 2>/dev/null | head -c 200 || true)
     if [[ "$acme_body" == *"$CATCHALL_BODY"* ]]; then
       verdict="${verdict}; ACME->CATCH-ALL"
-      failed=1
+      probe_failed=1
     else
       verdict="${verdict}; ACME_HTTP=${acme_code}"
     fi
   fi
 
+  # Fold this probe's outcome into the run-wide exit status.
+  [ "$probe_failed" -eq 1 ] && failed=1
+
   if [ "$JSON" -eq 1 ]; then
-    json_items+=("$(printf '{"port":%s,"host":"%s","cert_cn":"%s","http":"%s","verdict":"%s","catchall_header":"%s"}' \
-      "$port" "$d" "$cert_cn" "$code" "$verdict" "$catchall_hdr")")
+    json_items+=("$(printf '{"port":%s,"host":"%s","cert_cn":"%s","http":"%s","verdict":"%s","catchall_header":"%s","failed":%s}' \
+      "$port" "$d" "$cert_cn" "$code" "$verdict" "$catchall_hdr" "$probe_failed")")
   else
     printf '%-8s %-32s %-30s %-8s %s\n' "$port" "$d" "$cert_cn" "$code" "$verdict"
   fi
+  return 0
 }
 
 for d in "${DOMAINS[@]}"; do
