@@ -58,10 +58,19 @@ resource "aws_cloudfront_cache_policy" "wordpress" {
           "preview",
           "preview_id",
           "preview_nonce",
-          # order / orderby deliberately omitted: the archives ignore WordPress's
-          # orderby (they render off siw_paged / ocb_paged), and the front page --
-          # the one place they changed output -- is pinned at the origin by
-          # tt_landing_pin_front_page().
+          # WP public query vars that reorder SEARCH results. They do NOT affect
+          # the archives (those render off siw_paged / ocb_paged) and no longer
+          # affect the front page (pinned at the origin by
+          # tt_landing_pin_front_page), but /?s=<term> still honours both --
+          # verified 2026-08-22 that ?s=ship&orderby=title, ?s=ship&order=asc and
+          # ?s=ship&orderby=title&order=desc each return a different result
+          # order. `s` is keyed and the origin request policy forwards every
+          # query string, so dropping these would collapse /?s=ship&orderby=title
+          # onto the same object as /?s=ship and let whichever missed first serve
+          # its ordering to the other. Reclaiming these two slots requires the
+          # origin to normalise order/orderby for search as well.
+          "order",
+          "orderby",
           # Ship It Weekly episode-category facets, rendered server-side. Needed
           # on this policy too (not just Podcast-CachePolicy): the podcast
           # behaviors match the exact paths /ship-it-weekly-podcast/[host|media-kit]/,
@@ -127,7 +136,10 @@ resource "aws_cloudfront_cache_policy" "podcast" {
           "preview",
           "preview_id",
           "preview_nonce",
-          # order / orderby dropped -- see WordPress-CachePolicy above.
+          # See WordPress-CachePolicy: kept because they reorder search results
+          # and the origin forwards them.
+          "order",
+          "orderby",
           # Episode-category facets on the SIW hub. Without this in the cache
           # key the page cache is effectively keyed on path alone, so every
           # ?category= URL serves one cached copy of the unfiltered episode list.
