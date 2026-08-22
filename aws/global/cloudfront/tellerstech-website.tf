@@ -58,10 +58,17 @@ resource "aws_cloudfront_cache_policy" "wordpress" {
           "preview",
           "preview_id",
           "preview_nonce",
-          # WP public query vars that reorder archive/search listings. Kept even
-          # though this site rarely links them: origin still forwards them, so
-          # omitting them from the cache key would let ?orderby=title&order=asc
-          # poison the clean archive entry.
+          # WP public query vars that reorder SEARCH results. They do NOT affect
+          # the archives (those render off siw_paged / ocb_paged) and no longer
+          # affect the front page (pinned at the origin by
+          # tt_landing_pin_front_page), but /?s=<term> still honours both --
+          # verified 2026-08-22 that ?s=ship&orderby=title, ?s=ship&order=asc and
+          # ?s=ship&orderby=title&order=desc each return a different result
+          # order. `s` is keyed and the origin request policy forwards every
+          # query string, so dropping these would collapse /?s=ship&orderby=title
+          # onto the same object as /?s=ship and let whichever missed first serve
+          # its ordering to the other. Reclaiming these two slots requires the
+          # origin to normalise order/orderby for search as well.
           "order",
           "orderby",
           # Ship It Weekly episode-category facets, rendered server-side. Needed
@@ -129,7 +136,8 @@ resource "aws_cloudfront_cache_policy" "podcast" {
           "preview",
           "preview_id",
           "preview_nonce",
-          # See WordPress-CachePolicy: kept because origin forwards them.
+          # See WordPress-CachePolicy: kept because they reorder search results
+          # and the origin forwards them.
           "order",
           "orderby",
           # Episode-category facets on the SIW hub. Without this in the cache
@@ -320,6 +328,129 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     viewer_protocol_policy = "redirect-to-https"
     compress               = true
     cache_policy_id        = "658327ea-f89d-4fab-a63d-7e88639e58f6" # AWS Managed CachingOptimized
+  }
+
+  # Newsletter tracking hops - never cacheable. These are per-recipient endpoints
+  # whose distinguishing params (w, u, sig, token) are NOT in the cache key, so a
+  # cacheable response on one of these paths gets replayed for every other link
+  # the same subscriber clicks. That happened in production: one cached 302 sent
+  # every link in an email to the same wrong page, and none of those clicks
+  # reached origin to be logged. The origin already sends "private, no-store"
+  # (tt_sub_send_no_store_headers), so pinning CachingDisabled here is
+  # defence-in-depth — it stops one PHP branch forgetting the header from
+  # becoming a cache-poisoning bug again.
+  #
+  # An ordered_cache_behavior inherits NOTHING from default_cache_behavior, so
+  # all five below must carry three things that are easy to leave off:
+  #
+  #   1. origin_request_policy_id. The click/open analytics read User-Agent and
+  #      CloudFront-Viewer-Country / -Region / -City off the origin request.
+  #      Without it every click logs as "Desktop / Other / Other" with no geo.
+  #
+  #   2. The viewer-response rewrite_origin_location association. All five paths
+  #      emit a Location header, and they only get the origin-host rewrite today
+  #      by falling through to the default behavior. Without it an nginx-level
+  #      absolute redirect hands subscribers an origin.tellerstech.com URL, which
+  #      fails the CloudFront origin gate. The viewer-REQUEST function is
+  #      deliberately not carried over: it only handles /xmlrpc.php and
+  #      /wp-admin, neither of which can match these patterns.
+  #
+  #   3. The trailing slash in each pattern. "*" matches "/" in CloudFront path
+  #      patterns, so "/*-open*" would also match episode slugs like
+  #      /ship-it-weekly-podcast/...-openai-... and silently drop them out of the
+  #      page cache.
+  #
+  # Wildcard collision re-checked against the live sitemap on 2026-08-22: 195
+  # indexed URLs, none ending in -click, -open, -confirm or -unsubscribe. If one
+  # ever appears, swap that single pattern for the three explicit list paths
+  # (/ocb-click/, /siw-click/, /cd-click/) — the behavior quota has room for one
+  # such expansion, not four.
+
+  # Click tracking. Full method list for symmetry with the other form-capable
+  # WordPress behaviors.
+  ordered_cache_behavior {
+    path_pattern             = "/*-click/"
+    allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods           = ["GET", "HEAD"]
+    target_origin_id         = "wordpress-origin"
+    viewer_protocol_policy   = "redirect-to-https"
+    compress                 = true
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+
+    function_association {
+      event_type   = "viewer-response"
+      function_arn = aws_cloudfront_function.rewrite_origin_location.arn
+    }
+  }
+
+  # Open tracking (pixel) - only ever fetched by a mail client.
+  ordered_cache_behavior {
+    path_pattern             = "/*-open/"
+    allowed_methods          = ["GET", "HEAD"]
+    cached_methods           = ["GET", "HEAD"]
+    target_origin_id         = "wordpress-origin"
+    viewer_protocol_policy   = "redirect-to-https"
+    compress                 = true
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+
+    function_association {
+      event_type   = "viewer-response"
+      function_arn = aws_cloudfront_function.rewrite_origin_location.arn
+    }
+  }
+
+  # Double opt-in confirmation. Full method list, as for /*-click/.
+  ordered_cache_behavior {
+    path_pattern             = "/*-confirm/"
+    allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods           = ["GET", "HEAD"]
+    target_origin_id         = "wordpress-origin"
+    viewer_protocol_policy   = "redirect-to-https"
+    compress                 = true
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+
+    function_association {
+      event_type   = "viewer-response"
+      function_arn = aws_cloudfront_function.rewrite_origin_location.arn
+    }
+  }
+
+  # Unsubscribe. The full method list is required here, not cosmetic: RFC 8058
+  # one-click unsubscribe POSTs to this path.
+  ordered_cache_behavior {
+    path_pattern             = "/*-unsubscribe/"
+    allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods           = ["GET", "HEAD"]
+    target_origin_id         = "wordpress-origin"
+    viewer_protocol_policy   = "redirect-to-https"
+    compress                 = true
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+
+    function_association {
+      event_type   = "viewer-response"
+      function_arn = aws_cloudfront_function.rewrite_origin_location.arn
+    }
+  }
+
+  # Outbound link shortener - same per-recipient replay problem.
+  ordered_cache_behavior {
+    path_pattern             = "/go/*"
+    allowed_methods          = ["GET", "HEAD"]
+    cached_methods           = ["GET", "HEAD"]
+    target_origin_id         = "wordpress-origin"
+    viewer_protocol_policy   = "redirect-to-https"
+    compress                 = true
+    cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+
+    function_association {
+      event_type   = "viewer-response"
+      function_arn = aws_cloudfront_function.rewrite_origin_location.arn
+    }
   }
 
   # Ship It Weekly hub page - capped at 12 hours (Podcast-CachePolicy) so the
