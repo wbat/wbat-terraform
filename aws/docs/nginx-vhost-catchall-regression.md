@@ -141,10 +141,28 @@ The per-domain `fix-nginx-loopback-listeners.sh` path is **retired** (cron disab
 ## Verification
 
 Use [`check-vhost-listeners.sh`](check-vhost-listeners.sh) to confirm every hosted domain is
-matched to its own vhost, from outside the VPC:
+matched to its own vhost, from outside the VPC. Always pass **both ports** — the regression
+breaks plain HTTP as well as TLS, and `:80` is what makes the result unambiguous:
 
 ```bash
-./check-vhost-listeners.sh tellerstech.com iots.com lmgt.com wbat.net
+./check-vhost-listeners.sh --ip <eip> --ports 80,443 \
+  tellerstech.com iots.com lmgt.com wbat.net
 ```
 
-Any domain reported as `CATCH-ALL` is unreachable on its own vhost and has no valid SSL.
+On-box, run it with no domains to sweep the real inventory from `/etc/virtual/domainowners`.
+
+Reading the verdicts:
+
+- **`CATCH-ALL` on `:80`** — the real regression. That domain's vhost is not bound to the
+  arrival address. Fix the Linked IP server-wide; never patch the single domain.
+- **`NO-TLS` on `:443` while `:80` is `ok`** — not the regression. The vhost is bound
+  correctly and the domain simply has no HTTPS vhost or certificate, which is the normal
+  state for parked domains. This is a warning and does not fail the run.
+- **`WRONG CERT` / `TLS HANDSHAKE FAILED`** on a domain that is supposed to serve HTTPS —
+  a certificate problem to chase separately from vhost binding.
+
+This split matters: roughly 40 of the ~91 domains on this host have no TLS configured, so
+failing on those would make the check exit non-zero permanently and hide a genuine
+recurrence. Pass `--strict-tls` when you deliberately want every domain to serve HTTPS, and
+note that checking `:443` alone stays strict because there is no `:80` evidence to reason
+from.

@@ -164,7 +164,15 @@ nginx -t && systemctl reload nginx
 /usr/local/sbin/nginx-vhost-listen-invariant.sh --arrival 172.30.0.71
 ./aws/docs/check-vhost-listeners.sh --ports 80,443 --acme \
   tellerstech.com origin.tellerstech.com iots.com lmgt.com
+
+# Full inventory sweep (on-box enumerates /etc/virtual/domainowners):
+./aws/docs/check-vhost-listeners.sh --ports 80,443
 ```
+
+Expect **exit 0**. `NO-TLS` lines are warnings, not failures: those domains are bound to the
+arrival address (proved on `:80`) and merely have no HTTPS vhost or certificate, which is
+normal for parked domains. A `CATCH-ALL` on `:80` is the real regression and fails the run.
+Do not "fix" the run by allowlisting domains until you have confirmed `:80` passes for them.
 
 Confirm `www.tellerstech.com` still 200 through CloudFront and
 `origin.tellerstech.com` still 403 without the secret header.

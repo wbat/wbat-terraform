@@ -12,6 +12,15 @@
 #        ./check-vhost-listeners.sh --ip 44.214.133.234 iots.com lmgt.com
 #        ./check-vhost-listeners.sh --json --ports 80,443 tellerstech.com iots.com
 #        ./check-vhost-listeners.sh --acme iots.com
+#        ./check-vhost-listeners.sh --strict-tls --ports 80,443 iots.com
+#
+# Port 80 is the authoritative regression signal: the catch-all regression breaks plain
+# HTTP as well as TLS, so a domain whose :80 vhost answers correctly is bound to the
+# arrival address. A :443 catch-all on such a domain means only that no HTTPS vhost or
+# certificate exists for it, which is a normal state for parked domains. That is reported
+# as NO-TLS (a warning) rather than a failure, so this exits 0 on a healthy host instead of
+# crying wolf and masking a real recurrence. Pass --strict-tls to fail on those too, and
+# note the inference needs both ports (--ports 80,443); checking :443 alone stays strict.
 #
 # Exit status: 0 = every domain matched its own vhost, 1 = at least one hit the catch-all.
 
@@ -27,12 +36,13 @@ PORTS=(443)
 JSON=0
 CHECK_ACME=0
 ALLOWLIST=""
+STRICT_TLS=0
 
 need_arg() {
   local opt="$1"
   if [ $# -lt 2 ] || [ -z "${2}" ] || [[ "${2}" == -* ]]; then
     echo "ERROR: ${opt} requires a value" >&2
-    sed -n '2,16p' "$0" >&2
+    sed -n '2,25p' "$0" >&2
     exit 2
   fi
 }
@@ -62,8 +72,12 @@ while [ $# -gt 0 ]; do
       ALLOWLIST="$2"
       shift 2
       ;;
+    --strict-tls)
+      STRICT_TLS=1
+      shift
+      ;;
     -h | --help)
-      sed -n '2,16p' "$0"
+      sed -n '2,25p' "$0"
       exit 0
       ;;
     *)
@@ -111,7 +125,24 @@ if [ "$JSON" -eq 0 ]; then
 fi
 
 failed=0
+warned=0
 json_items=()
+
+# Evaluate :80 before :443 so a domain's plain-HTTP result is known when judging TLS.
+CHECKS_PORT_80=0
+for _p in "${PORTS[@]}"; do
+  [ "$_p" = "80" ] && CHECKS_PORT_80=1
+done
+if [ "$CHECKS_PORT_80" -eq 1 ]; then
+  ordered=(80)
+  for _p in "${PORTS[@]}"; do
+    [ "$_p" != "80" ] && ordered+=("$_p")
+  done
+  PORTS=("${ordered[@]}")
+fi
+
+# Set per domain by check_one when :80 matched the domain's own vhost.
+port80_ok=0
 
 is_allowlisted() {
   local d="$1" a
@@ -158,6 +189,8 @@ check_one() {
   local d="$1" port="$2"
   local cert_cn="-" code body verdict catchall_hdr url resolve
   local tmp pem cert_ok=0
+  # Snapshot so we can tell whether *this* check failed, not an earlier domain.
+  local failed_before="$failed"
   tmp="$(mktemp)"
 
   if [ "$port" = "443" ]; then
@@ -219,6 +252,21 @@ check_one() {
     verdict="ok"
   fi
 
+  # Downgrade a TLS-only miss to a warning when plain HTTP already proved this domain's
+  # vhost is bound to the arrival address. The regression breaks :80 too, so :80 passing
+  # means the listen config is right and only a cert/HTTPS vhost is absent.
+  if [ "$port" = "443" ] && [ "$failed_before" -eq 0 ] && [ "$failed" -eq 1 ] \
+    && [ "$STRICT_TLS" -eq 0 ] && [ "$CHECKS_PORT_80" -eq 1 ] && [ "$port80_ok" -eq 1 ]; then
+    verdict="NO-TLS (no HTTPS vhost for this domain; :80 ok)"
+    failed="$failed_before"
+    warned=$((warned + 1))
+  fi
+
+  # Remember the plain-HTTP outcome for the :443 judgement on this same domain.
+  if [ "$port" = "80" ]; then
+    if [ "$verdict" = "ok" ]; then port80_ok=1; else port80_ok=0; fi
+  fi
+
   if [ "$CHECK_ACME" -eq 1 ]; then
     local acme_code acme_body
     acme_code=$(curl -sk --max-time 15 -o /dev/null -w '%{http_code}' \
@@ -245,13 +293,14 @@ check_one() {
 }
 
 for d in "${DOMAINS[@]}"; do
+  port80_ok=0
   for port in "${PORTS[@]}"; do
     check_one "$d" "$port"
   done
 done
 
 if [ "$JSON" -eq 1 ]; then
-  printf '{"origin_ip":"%s","failed":%s,"results":[' "$SERVER_IP" "$failed"
+  printf '{"origin_ip":"%s","failed":%s,"warnings":%s,"results":[' "$SERVER_IP" "$failed" "$warned"
   i=0
   for item in "${json_items[@]}"; do
     [ "$i" -gt 0 ] && printf ','
@@ -277,6 +326,13 @@ EOF
 fi
 
 if [ "$JSON" -eq 0 ]; then
-  echo "PASS: every domain matched its own vhost with a domain-appropriate certificate."
+  if [ "$warned" -gt 0 ]; then
+    echo "PASS: every domain is bound to the arrival address (:80 verified)."
+    echo "NOTE: ${warned} domain(s) have no HTTPS vhost or certificate (NO-TLS above)."
+    echo "      That is expected for parked domains and is not the catch-all regression."
+    echo "      Use --strict-tls to treat those as failures instead."
+  else
+    echo "PASS: every domain matched its own vhost with a domain-appropriate certificate."
+  fi
 fi
 exit 0
