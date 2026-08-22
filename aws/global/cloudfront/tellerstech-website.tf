@@ -58,12 +58,10 @@ resource "aws_cloudfront_cache_policy" "wordpress" {
           "preview",
           "preview_id",
           "preview_nonce",
-          # WP public query vars that reorder archive/search listings. Kept even
-          # though this site rarely links them: origin still forwards them, so
-          # omitting them from the cache key would let ?orderby=title&order=asc
-          # poison the clean archive entry.
-          "order",
-          "orderby",
+          # order / orderby deliberately omitted: the archives ignore WordPress's
+          # orderby (they render off siw_paged / ocb_paged), and the front page --
+          # the one place they changed output -- is pinned at the origin by
+          # tt_landing_pin_front_page().
           # Ship It Weekly episode-category facets, rendered server-side. Needed
           # on this policy too (not just Podcast-CachePolicy): the podcast
           # behaviors match the exact paths /ship-it-weekly-podcast/[host|media-kit]/,
@@ -129,9 +127,7 @@ resource "aws_cloudfront_cache_policy" "podcast" {
           "preview",
           "preview_id",
           "preview_nonce",
-          # See WordPress-CachePolicy: kept because origin forwards them.
-          "order",
-          "orderby",
+          # order / orderby dropped -- see WordPress-CachePolicy above.
           # Episode-category facets on the SIW hub. Without this in the cache
           # key the page cache is effectively keyed on path alone, so every
           # ?category= URL serves one cached copy of the unfiltered episode list.
