@@ -113,8 +113,8 @@ Ops docs and scripts for the WordPress origin gate live in **TellersTechOrg/tell
 | Origin HTTPS      | Terraform: `origin_protocol_policy = "https-only"`           |
 | Secret header     | TFC `cloudfront_origin_secret` = CF header = wp-config = cust_nginx → mismatch is **403**, not 502 |
 | DNS for origin    | BIND / external DNS → must point to origin server             |
-| SSL for origin    | Server: name/SAN covering `origin.tellerstech.com`; loopback listens required (**502** if wrong) |
-| Nginx vhost       | DA + `fix-nginx-loopback-listeners.sh`; parent cust_nginx gate |
+| SSL for origin    | Server: name/SAN covering `origin.tellerstech.com`; arrival-address listens required (**502** if wrong) |
+| Nginx vhost       | DA **Linked IP** (arrival private IP, Apache only, applied to all domains) + parent cust_nginx gate. **Never** per-domain `listen` injection — see [nginx-vhost-catchall-regression.md](nginx-vhost-catchall-regression.md) |
 | Error HTML (www)  | Terraform: S3 + OAC; `custom_error_response` for **5xx only** → `/errors/503.html` |
 
 For **502**, fix the first failing DNS/TLS/reachability check. For **403**, align the secret gate.
