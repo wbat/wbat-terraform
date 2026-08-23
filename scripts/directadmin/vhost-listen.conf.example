@@ -4,6 +4,10 @@
 # Placeholders only in git — fill real values on the box.
 
 # Optional local-MTA alert destination (rate-limited by the reconciler).
+# Must be a real deliverable address. RFC 2606 reserved names (anything at
+# example.com/.net/.org, or ending in .example/.invalid/.test/.localhost) are
+# rejected and logged as ERROR, so a copy-pasted placeholder cannot masquerade
+# as working alerting. Leave empty only if you accept drift going unnoticed.
 HEALTH_ALERT_TO=""
 
 # Expected public EIP for this host (IMDS ENI selection + sanity checks).
