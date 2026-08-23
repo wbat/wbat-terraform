@@ -157,7 +157,12 @@ Reading the verdicts:
   arrival address. Fix the Linked IP server-wide; never patch the single domain.
 - **`NO-TLS` on `:443` while `:80` is `ok`** — not the regression. The vhost is bound
   correctly and the domain simply has no HTTPS vhost or certificate, which is the normal
-  state for parked domains. This is a warning and does not fail the run.
+  state for parked domains. This is a warning and does not fail the run. **But** a domain
+  that previously served HTTPS appearing in this list means its HTTPS block or certificate
+  was dropped. The on-box invariant will not flag that, because it only requires the arrival
+  IP on the ports each block actually *declares* — a block that no longer exists declares
+  nothing. Scan the `NO-TLS` list for domains that are supposed to serve TLS; that is the
+  one failure mode the reconciler cannot see.
 - **`WRONG CERT` / `TLS HANDSHAKE FAILED`** on a domain that is supposed to serve HTTPS —
   a certificate problem to chase separately from vhost binding.
 
