@@ -230,6 +230,28 @@ invariant_check() {
 rate_limited_alert() {
   local subject="$1"
   local body="$2"
+  local dest="${HEALTH_ALERT_TO}"
+  local dest_lc="${dest,,}"
+
+  # Validate the destination *before* touching the cooldown stamp. A host that cannot
+  # alert should say so on every run instead of logging once and going quiet for an
+  # hour, and it must not consume the stamp that would suppress the next real alert.
+  if [[ -z "$dest" ]]; then
+    log "ERROR alert not sent (HEALTH_ALERT_TO unset in ${CONFIG}): $subject"
+    return 0
+  fi
+  # RFC 2606 reserves these names, so they can never receive mail. Without this check a
+  # leftover install placeholder logs "OK alert mailed" while nobody is ever paged --
+  # a silent blackhole that looks healthier in the log than having no address at all.
+  if [[ "$dest_lc" =~ @([a-z0-9-]+\.)*(example\.(com|net|org)|example|invalid|test|localhost)$ ]]; then
+    log "ERROR alert not sent (HEALTH_ALERT_TO=${dest} is a reserved placeholder; set a real address in ${CONFIG}): $subject"
+    return 0
+  fi
+  if ! command -v mail >/dev/null 2>&1; then
+    log "ERROR alert not sent (no mail binary; install s-nail or mailx): $subject"
+    return 0
+  fi
+
   mkdir -p "$STATE_DIR"
   local now last
   now="$(date +%s)"
@@ -240,12 +262,8 @@ rate_limited_alert() {
     return 0
   fi
   echo "$now" >"$ALERT_STAMP"
-  if [[ -n "${HEALTH_ALERT_TO}" ]] && command -v mail >/dev/null 2>&1; then
-    printf '%s\n' "$body" | mail -s "$subject" "$HEALTH_ALERT_TO" || true
-    log "OK alert mailed to $HEALTH_ALERT_TO"
-  else
-    log "ERROR alert (no HEALTH_ALERT_TO or mail): $subject"
-  fi
+  printf '%s\n' "$body" | mail -s "$subject" "$dest" || true
+  log "OK alert mailed to $dest"
 }
 
 netmask_for_arrival() {
