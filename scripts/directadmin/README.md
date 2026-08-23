@@ -75,6 +75,7 @@ Known-bad fixture: [`aws/docs/fixtures/nginx-catchall-broken-2026-07-26/`](../..
 | `da-vhost-listen-boot.service` | `/etc/systemd/system/da-vhost-listen-boot.service` |
 | `user_httpd_write_post-da-vhost-listen-check.sh` | `/usr/local/directadmin/scripts/custom/user_httpd_write_post/da-vhost-listen-check.sh` (mode 700, `diradmin:diradmin`) |
 | `update_post-da-vhost-listen.sh` | append/call from `/usr/local/directadmin/scripts/custom/update_post.sh` |
+| `install_da_vhost_listen.sh` | not installed; run from the checkout to install the rows above or check them for drift |
 
 ### Install / update (from a repo checkout on the box)
 
@@ -122,6 +123,33 @@ install -m 755 scripts/directadmin/nginx_vhost_listen_invariant.sh \
   /usr/local/sbin/nginx-vhost-listen-invariant.sh
 /usr/local/sbin/da-vhost-listen-reconcile.sh --check
 ```
+
+### One-command install / drift check (preferred)
+
+**There is no deploy pipeline in this repo.** Merging a reconciler PR does not change
+what the host executes — the running copy only changes when someone re-runs `install`.
+That has already bitten: two merged PRs altered reconciler behaviour while the host kept
+executing the previous version. [`install_da_vhost_listen.sh`](install_da_vhost_listen.sh)
+makes both halves one command each:
+
+```bash
+cd /root/wbat-terraform && git pull
+
+# Report whether the installed copies match this checkout (safe, read-only).
+./scripts/directadmin/install_da_vhost_listen.sh --verify
+
+# Install or update everything, enable the boot unit, then re-verify.
+sudo ./scripts/directadmin/install_da_vhost_listen.sh --install
+```
+
+`--verify` compares each installed file against the repo by SHA-256 and reports `ok`,
+`STALE`, or `MISSING`, exiting non-zero on any drift — so "did this merge actually reach
+production?" has a definite answer. `--install` is idempotent and **never overwrites**
+`/etc/da-vhost-listen/vhost-listen.conf`, because that file holds host-specific values
+(`EXPECTED_PUBLIC_IP`, `HEALTH_ALERT_TO`); it is only created from the example when
+absent. The runtime conf is therefore presence-checked, not content-compared.
+
+Run `--verify` after any merge that touches `scripts/directadmin/`, and on both hosts.
 
 ### Per-host `vhost-listen.conf`
 
