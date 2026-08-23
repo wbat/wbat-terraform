@@ -485,7 +485,11 @@ main() {
     drift=1
     invariant_failed=1
   else
-    log "OK nginx invariant: all server_names listen on ${arrival} :80 and :443"
+    # Scoped wording on purpose: the invariant only requires the arrival IP on the
+    # ports each server block actually declares. Domains with no HTTPS block (parked
+    # domains, ~40 here) are checked on :80 only, so claiming ":80 and :443" would
+    # overstate TLS coverage and contradict check-vhost-listeners.sh NO-TLS warnings.
+    log "OK nginx invariant: every server_name listens on ${arrival} for the ports it declares"
   fi
 
   if [[ "$drift" -eq 0 ]]; then
