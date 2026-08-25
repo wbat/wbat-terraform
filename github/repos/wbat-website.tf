@@ -1,7 +1,6 @@
 # wbat/wbat-website — marketing site for wbat.net (imported; pre-existing repo).
-# Branch protection is managed below. Private repos need GitHub Team (or public
-# visibility) for the protection API; free-plan orgs return 403 until upgraded.
-# One-time imports removed after apply.
+# Branch protection is not managed here: private repos on the free GitHub plan
+# return 403 from the protection / rulesets API (needs Team or a public repo).
 
 resource "github_repository" "wbat-website" {
   name         = "wbat-website"
@@ -26,22 +25,4 @@ resource "github_repository" "wbat-website" {
 resource "github_branch_default" "wbat-website-main" {
   repository = github_repository.wbat-website.name
   branch     = "main"
-}
-
-resource "github_branch_protection" "wbat-website-main" {
-  repository_id  = github_repository.wbat-website.node_id
-  pattern        = "main"
-  enforce_admins = false
-
-  require_conversation_resolution = true
-
-  required_pull_request_reviews {
-    dismiss_stale_reviews           = true
-    required_approving_review_count = 0
-  }
-
-  required_status_checks {
-    contexts = ["PHP lint & smoke"]
-    strict   = true
-  }
 }
