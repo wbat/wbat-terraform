@@ -46,9 +46,11 @@ variable "has_projects" {
 }
 
 variable "has_downloads" {
-  description = "Enable repository downloads."
+  # GitHub deprecated Downloads; the API commonly reports false even when TF
+  # requests true, which produces perpetual no-op/drift updates on apply.
+  description = "Enable repository downloads (deprecated on GitHub; prefer false)."
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "vulnerability_alerts" {
