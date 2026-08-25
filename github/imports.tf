@@ -73,3 +73,32 @@ import {
   to = module.repos.module.terraform_module_example.github_branch_default.this
   id = "terraform_module_example"
 }
+
+# --- Website / shortener repos (direct resources in repos/*.tf) ---
+
+import {
+  to = module.repos.github_repository.wbat-website
+  id = "wbat-website"
+}
+import {
+  to = module.repos.github_branch_default.wbat-website-main
+  id = "wbat-website"
+}
+
+import {
+  to = module.repos.github_repository.lmgt-website
+  id = "lmgt-website"
+}
+import {
+  to = module.repos.github_branch_default.lmgt-website-main
+  id = "lmgt-website"
+}
+
+import {
+  to = module.repos.github_repository.ysn-tsn-website
+  id = "ysn-tsn-website"
+}
+import {
+  to = module.repos.github_branch_default.ysn-tsn-website-main
+  id = "ysn-tsn-website"
+}
