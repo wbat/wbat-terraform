@@ -9,6 +9,12 @@ Private repositories on GitHub Free/Pro **cannot** use organization-level branch
 Until the org upgrades to **GitHub Team** (or repos are public):
 
 - Enforce `main` protection manually in the GitHub UI for critical repos, or
-- Re-introduce `github_branch_protection` resources in `repos/modules/repository/` once the plan supports it.
+- Re-introduce `github_branch_protection` on **each standalone website resource** once the plan supports it:
+  - `repos/wbat-website.tf`
+  - `repos/lmgt-website.tf`
+  - `repos/ysn-tsn-website.tf`
+  - `repos/tellerstech-website.tf`
+
+`repos/modules/repository/main.tf` already defines `github_branch_protection.this` for repos created through that module (for example `wbat-terraform`, `iTerm2-Git-Status-Bar`). The four imported website repos are **not** module instances — restoring their protection means adding `github_branch_protection` resources to those individual files (or migrating the repos into the module first). Following the module path alone would leave the website repos unprotected.
 
 Imported website repos (`wbat-website`, `lmgt-website`, `ysn-tsn-website`, `tellerstech-website`) still receive `delete_branch_on_merge`, `allow_update_branch`, and homepage URLs from Terraform.
