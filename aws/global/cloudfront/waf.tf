@@ -19,8 +19,8 @@ resource "aws_wafv2_web_acl" "tellerstech" {
     name     = "RateLimitWPLogin"
     priority = 1
 
-    override_action {
-      none {}
+    action {
+      block {}
     }
 
     statement {
@@ -56,8 +56,8 @@ resource "aws_wafv2_web_acl" "tellerstech" {
     name     = "RateLimitWPAdmin"
     priority = 2
 
-    override_action {
-      none {}
+    action {
+      block {}
     }
 
     statement {
@@ -93,8 +93,8 @@ resource "aws_wafv2_web_acl" "tellerstech" {
     name     = "RateLimitWPAPI"
     priority = 3
 
-    override_action {
-      none {}
+    action {
+      block {}
     }
 
     statement {
@@ -130,8 +130,8 @@ resource "aws_wafv2_web_acl" "tellerstech" {
     name     = "RateLimitRSSFeeds"
     priority = 4
 
-    override_action {
-      none {}
+    action {
+      block {}
     }
 
     statement {
