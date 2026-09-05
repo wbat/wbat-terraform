@@ -2,17 +2,24 @@
 # Weekly deploy-drift check for the da-vhost-listen tooling.
 #
 # install_da_vhost_listen.sh --verify answers "does the installed copy match this
-# checkout?", but only when a human remembers to run it. This wrapper is what cron
-# calls, and it widens the question to both halves of the drift that can hide a merged
-# fix from production:
+# checkout?", but only when a human remembers to run it, and only relative to whatever
+# that checkout happens to contain. This wrapper is what cron calls, and it covers every
+# link in the chain from main to the running file:
 #
-#   1. checkout vs origin  -- the box is sitting on an old commit, so --verify passes
-#                             while still being wrong relative to main.
-#   2. installed vs checkout -- someone pulled but never re-ran --install.
+#   1. checkout vs origin    -- the box is on an old commit, so --verify passes while
+#                               still being wrong relative to main. Only counts as drift
+#                               when the pending commits touch scripts/directadmin/;
+#                               main advances constantly for Terraform and docs, and
+#                               alerting on that would be a guaranteed weekly false
+#                               alarm that teaches everyone to ignore the mail.
+#   2. checkout tree vs its own commits -- a hand-edited file makes 1 and 3 agree while
+#                               what runs matches no commit at all.
+#   3. installed vs checkout -- someone pulled but never re-ran --install.
 #
-# Either one means a merged reconciler change is not what the host executes. Both have
-# happened here. On drift this mails HEALTH_ALERT_TO from the same config the reconciler
-# uses and exits non-zero; on a clean run it logs and exits 0.
+# Any of these means a merged reconciler change is not what the host executes. On drift
+# this mails HEALTH_ALERT_TO from the same config the reconciler uses and exits non-zero;
+# on a clean run it logs and exits 0. Findings that are informational rather than drift
+# are logged as NOTE and do not affect the exit status.
 #
 # Install:
 #   install -m 755 da_vhost_listen_verify_deploy.sh \
@@ -65,8 +72,17 @@ alert() {
     return 0
   fi
 
-  printf '%s\n' "$body" | mail -s "$subject" "$dest" || true
-  log "OK alert mailed to ${dest}"
+  # Branch on the submission status rather than swallowing it with `|| true`. A local MTA
+  # that rejects the message would otherwise be logged as "OK alert mailed", and since
+  # cron discards stdout and mail is the only notification path, that false OK would hide
+  # real deploy drift. stderr is captured because that is where an MTA explains itself.
+  local mail_out mail_rc=0
+  mail_out="$(printf '%s\n' "$body" | mail -s "$subject" "$dest" 2>&1)" || mail_rc=$?
+  if (( mail_rc == 0 )); then
+    log "OK alert mailed to ${dest}"
+  else
+    log "ERROR alert submission FAILED (mail rc=${mail_rc}) to ${dest}: ${mail_out:-no output}"
+  fi
 }
 
 host="$(hostname -f 2>/dev/null || hostname)"
@@ -93,18 +109,19 @@ if git -C "$REPO" fetch --quiet origin 2>/dev/null; then
     if [[ "$local_head" != "$remote_head" ]]; then
       behind="$(git -C "$REPO" rev-list --count "HEAD..${REMOTE_REF}" 2>/dev/null || echo '?')"
       if [[ "$behind" != "0" ]]; then
-        add "STALE CHECKOUT: ${REPO} is at ${local_head}, ${behind} commit(s) behind ${REMOTE_REF} (${remote_head})."
-        # Distinguish "behind, and the tooling changed" from "behind, but not in a way
-        # that affects this host". An empty list here is the reassuring case, so say so
-        # rather than printing a blank section the reader has to interpret.
+        # Being behind only counts as deploy drift when the pending commits actually
+        # change the tooling. main advances constantly for Terraform and docs, and
+        # alerting on that would mean a guaranteed weekly false alarm -- which trains
+        # everyone to ignore the one mail that matters. So: tooling commits pending is a
+        # failure, an unrelated lag is a logged note.
         tooling_log="$(git -C "$REPO" log --oneline "HEAD..${REMOTE_REF}" -- scripts/directadmin/ 2>/dev/null | sed 's/^/    /' || true)"
         if [[ -n "$tooling_log" ]]; then
-          add "  Unmerged-here commits touching scripts/directadmin/:"
+          add "STALE TOOLING: ${REPO} is at ${local_head}, ${behind} commit(s) behind ${REMOTE_REF} (${remote_head}), including changes to scripts/directadmin/:"
           add "$tooling_log"
+          drift=1
         else
-          add "  None of those commits touch scripts/directadmin/, so the tooling itself is unchanged."
+          add "NOTE checkout is ${behind} commit(s) behind ${REMOTE_REF} (${local_head} vs ${remote_head}), but none of them touch scripts/directadmin/, so the installed tooling is still current. Not treated as drift."
         fi
-        drift=1
       else
         log "OK checkout at ${local_head} is not behind ${REMOTE_REF}"
       fi
@@ -119,7 +136,27 @@ else
 fi
 
 ######################################################
-# 2. installed vs checkout
+# 2. checkout working tree vs its own commits
+######################################################
+# Step 3 compares installed files against the checkout's *working tree*, so a hand-edited
+# file in the checkout makes both halves agree while what runs matches no commit at all.
+# That is the quiet version of the same problem: "installed == checkout" stops being
+# evidence about main. Untracked files are reported separately and are not drift, since
+# the installer only ever copies the explicit MANAGED list.
+dirty="$(git -C "$REPO" status --porcelain -- scripts/directadmin/ 2>/dev/null | grep -v '^??' || true)"
+untracked="$(git -C "$REPO" status --porcelain -- scripts/directadmin/ 2>/dev/null | grep '^??' || true)"
+if [[ -n "$dirty" ]]; then
+  add "UNCOMMITTED TOOLING EDITS in ${REPO} -- installed files may match this checkout while matching no commit:"
+  add "$(printf '%s\n' "$dirty" | sed 's/^/    /')"
+  drift=1
+fi
+if [[ -n "$untracked" ]]; then
+  add "NOTE untracked files under ${REPO}/scripts/directadmin/ (not installed, not drift):"
+  add "$(printf '%s\n' "$untracked" | sed 's/^/    /')"
+fi
+
+######################################################
+# 3. installed vs checkout
 ######################################################
 installer="${REPO}/scripts/directadmin/install_da_vhost_listen.sh"
 if [[ ! -x "$installer" ]]; then
@@ -135,24 +172,29 @@ else
   fi
 fi
 
+log_report() {
+  while IFS= read -r line; do
+    if [[ -n "$line" ]]; then
+      log "  $line"
+    fi
+  done <<<"$report"
+}
+
 if [[ "$drift" -eq 0 ]]; then
   log "OK no deploy drift"
-  # Still surface any WARN lines (e.g. a failed fetch) so a partial check is not
-  # mistaken for a full clean bill of health. Written as an if, not `[[ ... ]] &&`,
-  # because under `set -e` the latter would abort the script on the empty-report path.
+  # Still surface NOTE/WARN lines -- an unrelated lag, or a fetch that failed -- so a
+  # partial or qualified pass is not mistaken for a full clean bill of health.
   if [[ -n "$report" ]]; then
-    log "$(printf '%s' "$report" | tr '\n' ' ')"
+    log_report
   fi
   exit 0
 fi
 
 log "ERROR deploy drift detected"
 # Log the detail as well as mailing it. Alerting can itself be broken (unset or
-# placeholder HEALTH_ALERT_TO, no MTA), and in that case the log is the only place an
-# operator can find out *what* drifted.
-while IFS= read -r line; do
-  [[ -n "$line" ]] && log "  $line"
-done <<<"$report"
+# placeholder HEALTH_ALERT_TO, no MTA, an MTA that rejects the message), and in that case
+# the log is the only place an operator can find out *what* drifted.
+log_report
 
 alert "da-vhost-listen: deploy drift on ${host}" \
   "The vhost-listen tooling running on ${host} is not what the repo says it should be.
