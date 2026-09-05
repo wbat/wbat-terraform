@@ -61,6 +61,7 @@ fi
 MANAGED=(
   "da_vhost_listen_reconcile.sh|${SBIN_DIR}/da-vhost-listen-reconcile.sh|755"
   "nginx_vhost_listen_invariant.sh|${SBIN_DIR}/nginx-vhost-listen-invariant.sh|755"
+  "da_vhost_listen_verify_deploy.sh|${SBIN_DIR}/da-vhost-listen-verify-deploy.sh|755"
   "cron.d-da-vhost-listen|${CRON_DIR}/da-vhost-listen|644"
   "da-vhost-listen-boot.service|${UNIT_DIR}/da-vhost-listen-boot.service|644"
   "user_httpd_write_post-da-vhost-listen-check.sh|${DA_CUSTOM_DIR}/user_httpd_write_post/da-vhost-listen-check.sh|700"

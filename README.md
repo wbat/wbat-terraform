@@ -48,7 +48,7 @@ flowchart LR
 
 - [Terraform](https://developer.hashicorp.com/terraform/install) **≥ 1.15.0** (CI uses **~1.15**; HCP workspaces use **~> 1.15.0**)
 - Access to the **HCP Terraform** organization for plan/apply
-- AWS credentials via HCP Terraform role assumption — **no long-lived access keys in this repository**
+- AWS credentials come from HCP Terraform — **no credentials of any kind in this repository**. HCP holds a long-lived access key for the `TerraformCloud` IAM user in the `AWS Access` variable set, and the provider uses it only to `sts:AssumeRole` into the `TerraformCloud` role (see `aws/main.tf`). So the key is long-lived but lives in HCP, never in git; rotating it means replacing the variable-set value, not editing this repo.
 
 ## Local development
 

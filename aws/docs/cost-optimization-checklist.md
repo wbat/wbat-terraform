@@ -1,11 +1,15 @@
 # Cost Optimization Checklist
 
-> **Note:** Historical snapshot from January 2026. Verify live resource IDs and instance types before acting on any recommendation.
+> **Note:** Historical snapshot from January 2026. Verify live resource IDs and instance
+> types before acting on any recommendation. The instance ID recorded in the findings
+> below is the pre-shrink primary and has since been replaced; `terraform output
+> primary_instance_id` on the `wbat-terraform-aws` workspace gives the current one.
 
 ## Current Findings (2026-01-06)
 
 ### CPU Analysis ✅
-**Instance**: WBAT Primary Server (`i-0572702f0a58f6dcd`)
+**Instance**: WBAT Primary Server (`i-0572702f0a58f6dcd` — retired; kept so these
+measurements stay attributable to the host they were taken on)
 **Actual type**: `t3a.large` (8GB RAM) - **Note: Terraform says t3a.medium**
 
 | Metric | Value | Assessment |
@@ -47,11 +51,22 @@ This is either manual drift or state mismatch. **Potential savings: ~$27/month**
 | t3a.large | 30% | 864 |
 
 ### To check CPU credit balance:
+
+Resolve the instance ID rather than pasting one. `i-0572702f0a58f6dcd` above is the
+pre-shrink instance and no longer exists, and CloudWatch answers a query for a
+terminated instance with an empty `Datapoints` list and exit status 0 — so a stale ID
+reads as "no burst usage" instead of as an error.
+
 ```bash
+PRIMARY_ID=$(aws ec2 describe-instances --profile wbat \
+  --filters "Name=tag:Name,Values=WBAT Primary Server" \
+            "Name=instance-state-name,Values=running" \
+  --query 'Reservations[0].Instances[0].InstanceId' --output text)
+
 aws cloudwatch get-metric-statistics --profile wbat \
   --namespace AWS/EC2 \
   --metric-name CPUCreditBalance \
-  --dimensions Name=InstanceId,Value=i-0572702f0a58f6dcd \
+  --dimensions Name=InstanceId,Value="$PRIMARY_ID" \
   --start-time $(date -u -v-24H +%Y-%m-%dT%H:%M:%SZ) \
   --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ) \
   --period 3600 \
@@ -138,11 +153,16 @@ aws ec2 describe-instances --profile wbat \
   --filters "Name=tag:Name,Values=WBAT Primary Server" \
   --query 'Reservations[0].Instances[0].InstanceType'
 
-# Get last 7 days CPU average
+# Get last 7 days CPU average (resolve the ID; see note under "Review CPU Utilization")
+PRIMARY_ID=$(aws ec2 describe-instances --profile wbat \
+  --filters "Name=tag:Name,Values=WBAT Primary Server" \
+            "Name=instance-state-name,Values=running" \
+  --query 'Reservations[0].Instances[0].InstanceId' --output text)
+
 aws cloudwatch get-metric-statistics --profile wbat \
   --namespace AWS/EC2 \
   --metric-name CPUUtilization \
-  --dimensions Name=InstanceId,Value=i-0572702f0a58f6dcd \
+  --dimensions Name=InstanceId,Value="$PRIMARY_ID" \
   --start-time $(date -u -v-7d +%Y-%m-%dT%H:%M:%SZ) \
   --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ) \
   --period 86400 \

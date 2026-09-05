@@ -33,13 +33,27 @@ resource "aws_instance" "primary" {
   # Prevent accidental termination
   disable_api_termination = true
 
-  tags = {
-    "Name" = "WBAT Primary Server"
-  }
+  # The Name tag must stay exactly "WBAT Primary Server": the DLM policy selects this
+  # instance by target_tags on that value, so renaming it silently stops snapshots.
+  # core_tags is merged in for cost allocation and provenance, matching every other
+  # resource in this repo; it was the only omission, which left the account's two most
+  # expensive resources outside the Application/Environment cost split. Because
+  # copy_tags is on, new DLM snapshots inherit these tags too.
+  tags = merge(
+    var.core_tags,
+    {
+      "Name"     = "WBAT Primary Server"
+      "scm:file" = "aws/us-east-1/ec2/primary-instance.tf"
+    },
+  )
 
-  volume_tags = {
-    "Name" = "WBAT Primary Server"
-  }
+  volume_tags = merge(
+    var.core_tags,
+    {
+      "Name"     = "WBAT Primary Server"
+      "scm:file" = "aws/us-east-1/ec2/primary-instance.tf"
+    },
+  )
 
   # Safety: Prevent Terraform from destroying this instance
   lifecycle {
