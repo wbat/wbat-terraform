@@ -157,28 +157,56 @@ Run `--verify` after any merge that touches `scripts/directadmin/`, and on both 
 `--verify` only helps when a human runs it, which is the same weakness that let the
 previous drift persist. [`da_vhost_listen_verify_deploy.sh`](da_vhost_listen_verify_deploy.sh)
 is the cron-driven version, installed to `/usr/local/sbin/` and fired weekly by
-`/etc/cron.d/da-vhost-listen` (Mondays 06:17). It checks **both** ways a merged fix can
-fail to reach the host:
+`/etc/cron.d/da-vhost-listen` (Mondays 06:17). It checks every link in the chain from
+`main` to the file that actually runs:
 
 1. **checkout vs `origin/main`** — the box is sitting on an old commit, so `--verify`
-   passes while still being wrong relative to `main`. When the checkout is behind, the
-   report lists the unmerged-here commits that touch `scripts/directadmin/`, or states
-   plainly that none do so a harmless lag is not mistaken for a tooling problem.
-2. **installed vs checkout** — somebody pulled but never re-ran `--install`. This is
+   passes while still being wrong relative to `main`. This counts as drift **only when
+   the pending commits touch `scripts/directadmin/`**. `main` advances constantly for
+   Terraform and docs, and alerting on that would be a guaranteed weekly false alarm
+   that teaches everyone to ignore the mail; an unrelated lag is logged as a `NOTE` and
+   does not affect the exit status.
+2. **checkout working tree vs its own commits** — a hand-edited file in the checkout
+   makes checks 1 and 3 agree with each other while what runs matches no commit at all,
+   so "installed == checkout" stops being evidence about `main`. Modified tracked files
+   are drift; untracked files are a `NOTE`, since the installer only ever copies the
+   explicit `MANAGED` list.
+3. **installed vs checkout** — somebody pulled but never re-ran `--install`. This is
    `install_da_vhost_listen.sh --verify`, invoked from the checkout.
 
 On drift it writes the full report to `/var/log/da-vhost-listen.log` **and** mails
 `HEALTH_ALERT_TO` from the same `/etc/da-vhost-listen/vhost-listen.conf` the reconciler
-uses, then exits non-zero. The report is logged as well as mailed on purpose: alerting is
-itself something that can be broken, and the same RFC 2606 placeholder guard as the
-reconciler applies here, so a leftover `you@example.com` is reported as an `ERROR`
-instead of silently swallowing the only notification.
+uses, then exits non-zero. The report is logged as well as mailed on purpose, because
+alerting is itself something that can be broken, and every way it can break is reported
+as an `ERROR` rather than swallowed:
+
+- `HEALTH_ALERT_TO` unset, or an RFC 2606 placeholder like `you@example.com`
+- no `mail` binary
+- **`mail` present but the local MTA rejects the submission** — the log records
+  `ERROR alert submission FAILED (mail rc=N)` with the MTA's own message. A bare
+  `|| true` here would log `OK alert mailed` for a message that never left the host,
+  which is the worst possible failure for the one notification path cron doesn't
+  duplicate. The reconciler shares this behaviour, and additionally releases its
+  cooldown stamp on a failed send so the next run retries instead of buying an hour of
+  silence for an alert nobody received.
 
 There is deliberately **no alert cooldown** — it runs weekly, and drift that persists
 deserves one mail a week until someone runs `--install`. A failed `git fetch` degrades to
 a `WARN` rather than a failure, so a network blip does not mask the offline half of the
-check, and that `WARN` is still logged on otherwise-clean runs so a partial check is not
-read as a clean bill of health.
+check, and `NOTE`/`WARN` lines are still logged on otherwise-clean runs so a qualified
+pass is not read as a clean bill of health.
+
+Because cron has no `SSH_AUTH_SOCK`, check 1 needs root to reach GitHub without an agent.
+Confirm it under a cron-like environment rather than interactively:
+
+```bash
+env -i HOME=/root SHELL=/bin/bash \
+  PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin \
+  /usr/local/sbin/da-vhost-listen-verify-deploy.sh; echo "exit=$?"
+```
+
+`WARN git fetch failed` there means root's GitHub auth depends on an agent, and check 1
+is silently inert under cron until a passphrase-less read-only deploy key is in place.
 
 Override paths for testing: `DA_VHOST_LISTEN_REPO` (default `/root/wbat-terraform`),
 `DA_VHOST_LISTEN_REMOTE_REF` (default `origin/main`).
