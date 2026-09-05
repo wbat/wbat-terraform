@@ -29,13 +29,22 @@ resource "aws_instance" "secondary" {
   # Prevent accidental termination
   disable_api_termination = true
 
-  tags = {
-    "Name" = "WBAT Secondary Server"
-  }
+  # Name must stay exactly "WBAT Secondary Server" -- the DLM policy targets it by tag.
+  tags = merge(
+    var.core_tags,
+    {
+      "Name"     = "WBAT Secondary Server"
+      "scm:file" = "aws/us-east-1/ec2/secondary-instance.tf"
+    },
+  )
 
-  volume_tags = {
-    "Name" = "WBAT Secondary Server"
-  }
+  volume_tags = merge(
+    var.core_tags,
+    {
+      "Name"     = "WBAT Secondary Server"
+      "scm:file" = "aws/us-east-1/ec2/secondary-instance.tf"
+    },
+  )
 
   # Safety: Prevent Terraform from destroying this instance
   lifecycle {
