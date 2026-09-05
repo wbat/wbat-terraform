@@ -62,6 +62,11 @@ resource "aws_cloudwatch_metric_alarm" "billing_alarm_critical" {
   threshold           = var.billing_threshold_critical
   alarm_description   = "CRITICAL: AWS charges have exceeded $${var.billing_threshold_critical}"
   alarm_actions       = [aws_sns_topic.billing_alerts.arn]
+  # Match the warning alarm: without ok_actions the critical alarm announces that spend
+  # crossed the threshold but never that it came back under, so it reads as still-firing
+  # until someone opens the console. Note EstimatedCharges resets monthly, so the OK
+  # notification normally arrives at the start of the next billing period.
+  ok_actions = [aws_sns_topic.billing_alerts.arn]
 
   dimensions = {
     Currency = "USD"
