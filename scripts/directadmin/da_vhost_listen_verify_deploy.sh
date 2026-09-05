@@ -65,8 +65,17 @@ alert() {
     return 0
   fi
 
-  printf '%s\n' "$body" | mail -s "$subject" "$dest" || true
-  log "OK alert mailed to ${dest}"
+  # Branch on the submission status rather than swallowing it with `|| true`. A local MTA
+  # that rejects the message would otherwise be logged as "OK alert mailed", and since
+  # cron discards stdout and mail is the only notification path, that false OK would hide
+  # real deploy drift. stderr is captured because that is where an MTA explains itself.
+  local mail_out mail_rc=0
+  mail_out="$(printf '%s\n' "$body" | mail -s "$subject" "$dest" 2>&1)" || mail_rc=$?
+  if (( mail_rc == 0 )); then
+    log "OK alert mailed to ${dest}"
+  else
+    log "ERROR alert submission FAILED (mail rc=${mail_rc}) to ${dest}: ${mail_out:-no output}"
+  fi
 }
 
 host="$(hostname -f 2>/dev/null || hostname)"

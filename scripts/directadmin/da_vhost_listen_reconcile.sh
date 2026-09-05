@@ -262,8 +262,22 @@ rate_limited_alert() {
     return 0
   fi
   echo "$now" >"$ALERT_STAMP"
-  printf '%s\n' "$body" | mail -s "$subject" "$dest" || true
-  log "OK alert mailed to $dest"
+
+  # Branch on the submission status. `|| true` here would discard a rejection by the
+  # local MTA and still log "OK alert mailed", which is the same class of lie the
+  # placeholder-address guard above exists to prevent: cron discards stdout, so the log
+  # is the only evidence, and a false OK means drift goes unnoticed. Capture stderr too,
+  # because that is where an MTA explains itself.
+  local mail_out mail_rc=0
+  mail_out="$(printf '%s\n' "$body" | mail -s "$subject" "$dest" 2>&1)" || mail_rc=$?
+  if (( mail_rc == 0 )); then
+    log "OK alert mailed to $dest"
+  else
+    # Release the cooldown stamp: a send that never landed must not buy an hour of
+    # silence. The next run retries instead of assuming this alert was delivered.
+    rm -f "$ALERT_STAMP"
+    log "ERROR alert submission FAILED (mail rc=${mail_rc}) to ${dest}: ${mail_out:-no output}"
+  fi
 }
 
 netmask_for_arrival() {
