@@ -8,11 +8,16 @@ resource "aws_iam_user" "TerraformCloud" {
   name          = "TerraformCloud"
   force_destroy = false
 
+  # An access key ID was previously used as a tag *key* here ("AKIA...":
+  # "TerraformCloud Access"), which published it from this public repo. Removing it
+  # stops the leak spreading but does NOT undo it: the ID remains in git history and in
+  # every prior state version. The key itself still has to be rotated -- create a new
+  # one, update the "AWS Access" variable set in TFC, confirm a plan succeeds, then
+  # delete the old key. Record which key is current in TFC, not in a tag.
   tags = merge(
     var.core_tags,
     {
-      "scm:file"             = "aws/global/iam/user-TerraformCloud.tf",
-      "AKIA2JXXAQV2R2D3CCEP" = "TerraformCloud Access"
+      "scm:file" = "aws/global/iam/user-TerraformCloud.tf",
     },
   )
 }
