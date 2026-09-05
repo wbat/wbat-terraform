@@ -1,5 +1,14 @@
-# Reconcile DirectAdmin vhost listens every 10 minutes (auto-repair).
+# DirectAdmin vhost listen jobs.
 # Install: copy to /etc/cron.d/da-vhost-listen (mode 644).
 SHELL=/bin/bash
 PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin
+
+# Reconcile DirectAdmin vhost listens every 10 minutes (auto-repair).
 */10 * * * * root /usr/local/sbin/da-vhost-listen-reconcile.sh --enforce >/dev/null 2>&1
+
+# Weekly deploy-drift check: is the tooling on this box actually the tooling in the
+# repo? The reconciler above cannot answer that -- it faithfully enforces whatever
+# version happens to be installed, so a merged fix that was never installed looks
+# perfectly healthy. Output is logged and mailed to HEALTH_ALERT_TO on drift; cron mail
+# is suppressed so the script's own rate-limited alerting is the only notification path.
+17 6 * * 1 root /usr/local/sbin/da-vhost-listen-verify-deploy.sh >/dev/null 2>&1

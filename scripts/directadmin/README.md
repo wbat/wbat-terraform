@@ -70,6 +70,7 @@ Known-bad fixture: [`aws/docs/fixtures/nginx-catchall-broken-2026-07-26/`](../..
 |------|----------------|
 | `da_vhost_listen_reconcile.sh` | `/usr/local/sbin/da-vhost-listen-reconcile.sh` |
 | `nginx_vhost_listen_invariant.sh` | `/usr/local/sbin/nginx-vhost-listen-invariant.sh` |
+| `da_vhost_listen_verify_deploy.sh` | `/usr/local/sbin/da-vhost-listen-verify-deploy.sh` (weekly deploy-drift check) |
 | `vhost-listen.conf.example` | `/etc/da-vhost-listen/vhost-listen.conf` (edit; mode 600) |
 | `cron.d-da-vhost-listen` | `/etc/cron.d/da-vhost-listen` (mode 644) |
 | `da-vhost-listen-boot.service` | `/etc/systemd/system/da-vhost-listen-boot.service` |
@@ -150,6 +151,37 @@ production?" has a definite answer. `--install` is idempotent and **never overwr
 absent. The runtime conf is therefore presence-checked, not content-compared.
 
 Run `--verify` after any merge that touches `scripts/directadmin/`, and on both hosts.
+
+### Weekly deploy-drift check (so nobody has to remember)
+
+`--verify` only helps when a human runs it, which is the same weakness that let the
+previous drift persist. [`da_vhost_listen_verify_deploy.sh`](da_vhost_listen_verify_deploy.sh)
+is the cron-driven version, installed to `/usr/local/sbin/` and fired weekly by
+`/etc/cron.d/da-vhost-listen` (Mondays 06:17). It checks **both** ways a merged fix can
+fail to reach the host:
+
+1. **checkout vs `origin/main`** — the box is sitting on an old commit, so `--verify`
+   passes while still being wrong relative to `main`. When the checkout is behind, the
+   report lists the unmerged-here commits that touch `scripts/directadmin/`, or states
+   plainly that none do so a harmless lag is not mistaken for a tooling problem.
+2. **installed vs checkout** — somebody pulled but never re-ran `--install`. This is
+   `install_da_vhost_listen.sh --verify`, invoked from the checkout.
+
+On drift it writes the full report to `/var/log/da-vhost-listen.log` **and** mails
+`HEALTH_ALERT_TO` from the same `/etc/da-vhost-listen/vhost-listen.conf` the reconciler
+uses, then exits non-zero. The report is logged as well as mailed on purpose: alerting is
+itself something that can be broken, and the same RFC 2606 placeholder guard as the
+reconciler applies here, so a leftover `you@example.com` is reported as an `ERROR`
+instead of silently swallowing the only notification.
+
+There is deliberately **no alert cooldown** — it runs weekly, and drift that persists
+deserves one mail a week until someone runs `--install`. A failed `git fetch` degrades to
+a `WARN` rather than a failure, so a network blip does not mask the offline half of the
+check, and that `WARN` is still logged on otherwise-clean runs so a partial check is not
+read as a clean bill of health.
+
+Override paths for testing: `DA_VHOST_LISTEN_REPO` (default `/root/wbat-terraform`),
+`DA_VHOST_LISTEN_REMOTE_REF` (default `origin/main`).
 
 ### Per-host `vhost-listen.conf`
 
