@@ -1,0 +1,11 @@
+# Disk headroom watch for the DirectAdmin hosts.
+# Install: copy to /etc/cron.d/da-disk-guard (mode 644).
+#
+# There is no CloudWatch filesystem metric for these instances (no CloudWatch agent), so
+# this cron entry is the only thing that notices a filling root volume before it stops
+# MySQL and Exim from writing. Hourly, with the script's own 6h alert cooldown; cron mail
+# is suppressed so its rate-limited alerting is the single notification path.
+SHELL=/bin/bash
+PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin
+
+23 * * * * root /usr/local/sbin/da-disk-guard.sh >/dev/null 2>&1
