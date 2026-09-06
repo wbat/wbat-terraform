@@ -70,7 +70,7 @@ make_remote_out() {
     echo "server.wbat.net"
     echo "===SECTION df==="
     echo "Filesystem     1024-blocks      Used Available Capacity Mounted on"
-    if [[ "$disk" == "full" ]]; then
+    if [[ "$disk" == full* ]]; then
       echo "/dev/nvme0n1p1   206292968 203000000   3292968      99% /"
     else
       echo "/dev/nvme0n1p1   206292968 120000000  86292968      59% /"
@@ -96,8 +96,12 @@ make_remote_out() {
       echo "2026-09-06T05:40:11-04:00 OK backup upload and local cleanup complete"
     fi
     echo "===SECTION enospc==="
+    # The on-box script lists what it could search before listing what it found, so an
+    # empty result can be read as "nothing failed" rather than "nothing to read".
+    echo "SEARCHED /var/log/messages"
+    echo "SEARCHED /var/log/exim/mainlog"
     if [[ "$disk" == "full" ]]; then
-      echo "Sep  6 05:52:18 server mysqld[1123]: [ERROR] InnoDB: Write to file ./ibtmp1 failed: No space left on device"
+      echo "MATCH Sep  6 05:52:18 server mysqld[1123]: [ERROR] InnoDB: Write to file ./ibtmp1 failed: No space left on device"
     fi
     echo "===SECTION services==="
     if [[ "$disk" == "full" ]]; then
@@ -184,7 +188,48 @@ grep -q 'nothing has ever uploaded or cleaned up' <<<"$REPORT" \
 echo "OK a missing hook is distinguished from a stale one"
 
 ##############################################################################
-echo "== Proof 4: --analyze must re-read a capture with no aws CLI on PATH =="
+echo "== Proof 4: a 99% disk that no service failed a write against must REFUTE =="
+##############################################################################
+# The shape of the real 2026-09-06 capture, and the one this script got wrong: 99% used,
+# every log searchable, zero ENOSPC, services healthy. An earlier version called that
+# CONSISTENT purely because the number was high, which pointed the investigation at a
+# disk that had been sitting at 99% for weeks while the host actually died of memory
+# exhaustion. A near-full volume nothing ever failed a write against is not the cause.
+run_capture full-quiet small current case4
+
+grep -q 'Full disk explains the outage:      NOT SUPPORTED' <<<"$REPORT" \
+  || fail "99% used with zero ENOSPC across searchable logs must NOT be called CONSISTENT:"$'\n'"$REPORT"
+grep -q 'searched 2 log file(s)' <<<"$REPORT" \
+  || fail "the report must say how many logs were searched, or 'no ENOSPC' is unreadable"
+grep -qi 'memory' <<<"$REPORT" \
+  || fail "a refutation on this shape must name the next thing to check"
+((RC == 1)) || fail "expected exit 1 (contradicted) when the disk is ruled out, got ${RC}"
+echo "OK a high-water mark with no failed writes refutes rather than agrees"
+
+##############################################################################
+echo "== Proof 5: a capture with no SEARCHED markers must not claim to rule ENOSPC out =="
+##############################################################################
+# Older captures recorded matches only, so an empty section could equally mean "no logs".
+# That is missing evidence, not exculpatory evidence, and must stay INCONCLUSIVE.
+LEGACY="${SANDBOX}/case5"
+make_remote_out full-quiet small current "${SANDBOX}/case5-remote.txt"
+mkdir -p "$LEGACY"
+grep -v '^SEARCHED ' "${SANDBOX}/case5-remote.txt" >"${SANDBOX}/case5-legacy.txt"
+set +e
+REPORT="$(env PATH="${SANDBOX}/bin:${PATH}" \
+  STUB_REMOTE_OUT="${SANDBOX}/case5-legacy.txt" STUB_CONSOLE=/dev/null \
+  "$SCRIPT" --out "$LEGACY" 2>&1)"
+RC=$?
+set -e
+
+grep -q 'Full disk explains the outage:      CONSISTENT' <<<"$REPORT" \
+  || fail "a capture that cannot show the logs were searchable must stay CONSISTENT, not refute:"$'\n'"$REPORT"
+grep -q 'cannot tell whether the logs were searchable' <<<"$REPORT" \
+  || fail "the report must say why it cannot rule ENOSPC out"
+echo "OK absent evidence is not treated as evidence of absence"
+
+##############################################################################
+echo "== Proof 6: --analyze must re-read a capture with no aws CLI on PATH =="
 ##############################################################################
 # Collection and analysis are separate so a capture can be reviewed later, by someone
 # with no credentials at all.

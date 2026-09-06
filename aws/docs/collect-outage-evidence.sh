@@ -134,14 +134,16 @@ df -Pi /
 echo "===SECTION df_h==="
 df -h / /home 2>/dev/null
 echo "===SECTION backup_usage==="
-du -sk /home/admin_backups /home/backup 2>/dev/null
+# /backup as well as /home/backup: the primary writes system backups to the former, and
+# looking only at the latter reported "0.0 GB of backups" while 59 GB sat one path over.
+du -sk /home/admin_backups /home/backup /backup 2>/dev/null
 echo "===SECTION top_dirs==="
 du -xk --max-depth=2 / 2>/dev/null | sort -rn | head -25
 echo "===SECTION backup_listing==="
-echo "--- /home/backup ---"
-ls -la /home/backup/ 2>/dev/null
-echo "--- /home/admin_backups ---"
-ls -la /home/admin_backups/ 2>/dev/null
+for d in /home/backup /backup /home/admin_backups; do
+  echo "--- $d ---"
+  ls -la "$d/" 2>/dev/null
+done
 echo "===SECTION hook_log==="
 tail -150 /var/log/da-backup-s3.log 2>/dev/null
 echo "===SECTION log_sizes==="
@@ -155,9 +157,19 @@ done
 echo "===SECTION backup_schedule==="
 head -40 /usr/local/directadmin/data/admin/backup_crons.list 2>/dev/null
 echo "===SECTION enospc==="
+# Record which files were actually searchable. Without this, "no ENOSPC anywhere" and
+# "no logs to grep" produce an identical empty section, and they mean opposite things:
+# the first is evidence the disk did not break anything, the second is no evidence at all.
+for f in /var/log/messages /var/log/messages-* /var/log/mysqld.log \
+         /var/log/mariadb/mariadb.log /var/log/exim/mainlog /var/log/exim/mainlog-* \
+         /var/log/exim/paniclog /var/log/maillog /var/log/maillog-*; do
+  [ -f "$f" ] && echo "SEARCHED $f"
+done
 grep -ihE "no space left|ENOSPC|disk full|out of disk" \
   /var/log/messages /var/log/messages-* /var/log/mysqld.log \
-  /var/log/mariadb/mariadb.log /var/log/exim/mainlog 2>/dev/null | tail -40
+  /var/log/mariadb/mariadb.log /var/log/exim/mainlog /var/log/exim/mainlog-* \
+  /var/log/exim/paniclog /var/log/maillog /var/log/maillog-* 2>/dev/null \
+  | tail -40 | sed 's/^/MATCH /'
 echo "===SECTION journal_errors==="
 journalctl --since "-4 days" -p err --no-pager 2>/dev/null | tail -60
 echo "===SECTION services==="
@@ -353,11 +365,18 @@ analyze() {
   else
     echo "  root filesystem: NOT CAPTURED"
   fi
-  echo "  /home/admin_backups + /home/backup: ${backup_gb} GB (${share}% of everything in use)"
+  echo "  local backup dirs (/home/admin_backups, /home/backup, /backup): ${backup_gb} GB (${share}% of everything in use)"
 
   # --- did the disk actually break the services? ---
-  local enospc_lines console_enospc=0 console_enospc_label="no" svc_down=""
-  enospc_lines="$(read_section "$dir" enospc | grep -c . || true)"
+  local enospc_lines console_enospc=0 console_enospc_label="no" svc_down="" enospc_searched=0
+  enospc_searched="$(read_section "$dir" enospc | grep -c '^SEARCHED ' || true)"
+  if ((enospc_searched > 0)); then
+    enospc_lines="$(read_section "$dir" enospc | grep -c '^MATCH ' || true)"
+  else
+    # Capture predates the SEARCHED/MATCH markers: every line is a match, and there is
+    # no way to tell whether the logs existed. Treated as "cannot rule out" below.
+    enospc_lines="$(read_section "$dir" enospc | grep -c . || true)"
+  fi
   if read_section "$dir" console_output | grep -qiE "no space left|ENOSPC"; then
     console_enospc=1
     console_enospc_label="yes"
@@ -371,7 +390,11 @@ analyze() {
 
   echo
   echo "-- Did a full disk break the services? --"
-  echo "  ENOSPC / 'no space left' lines in host logs: ${enospc_lines:-0}"
+  if ((enospc_searched > 0)); then
+    echo "  ENOSPC / 'no space left' lines in host logs: ${enospc_lines:-0} (searched ${enospc_searched} log file(s))"
+  else
+    echo "  ENOSPC / 'no space left' lines in host logs: ${enospc_lines:-0} (capture does not record which logs were searchable)"
+  fi
   echo "  same in EC2 console output (survives a wedged userland): ${console_enospc_label}"
   echo "  services not active now:${svc_down:- none}"
 
@@ -385,7 +408,7 @@ analyze() {
   echo
   echo "-- Which defect fired? --"
   echo "  log lines claiming 'cleaned local system backup dirs': ${claimed_clean:-0}"
-  echo "  dated backup directories still present under /home/backup: ${stale_dirs:-0}"
+  echo "  dated backup directories still present locally: ${stale_dirs:-0}"
   echo "  ERROR / non-zero rclone lines in the hook log: ${upload_errors:-0}"
   echo "  'not verified in S3' lines (only the fixed hook emits these): ${unverified:-0}"
 
@@ -412,9 +435,17 @@ analyze() {
   if ((console_enospc == 1)) || ((${enospc_lines:-0} > 0)); then
     disk_verdict="CONFIRMED"
     notes+=("A service logged ENOSPC, which is direct evidence the volume filled and writes failed -- not an inference from disk usage.")
+  elif ((enospc_searched > 0)) && ((used_pct >= FULL_PCT)); then
+    # A high-water mark is not an outage. This branch exists because the 2026-09-06
+    # capture hit exactly this shape -- 99% used, zero ENOSPC across every log on the
+    # box -- and an earlier version of this script called it CONSISTENT, which is the
+    # diagnostic agreeing with the hypothesis it was written to test. The disk was a
+    # red herring; the host had run at 99% for weeks and died of memory exhaustion.
+    disk_verdict="NOT SUPPORTED"
+    notes+=("The volume is ${used_pct}% used, but ${enospc_searched} log file(s) were searched and not one service logged ENOSPC. A nearly-full disk that no service ever failed a write against did not cause an outage. Unless the space was reclaimed before this capture, look elsewhere -- start with memory: 'sar -r -f /var/log/sa/saDD' and 'sar -S -f ...' around the failure window.")
   elif ((used_pct >= FULL_PCT)); then
     disk_verdict="CONSISTENT"
-    notes+=("The volume is still ${used_pct}% used. That fits the hypothesis but is not proof the outage was caused by ENOSPC; the log evidence above is what would settle it.")
+    notes+=("The volume is still ${used_pct}% used, and this capture cannot tell whether the logs were searchable, so ENOSPC can be neither confirmed nor ruled out. Re-capture with a current version of this script to settle it.")
   elif ((used_pct >= 0)); then
     disk_verdict="NOT SUPPORTED"
     notes+=("The volume is only ${used_pct}% used and nothing logged ENOSPC. Either the space was already reclaimed before this capture, or the outage had a different cause.")
