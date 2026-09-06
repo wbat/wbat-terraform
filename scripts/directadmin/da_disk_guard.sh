@@ -187,6 +187,6 @@ First checks:
   tail -50 /var/log/da-backup-s3.log        # did the backup upload fail?
   /usr/local/directadmin/scripts/custom/all_backups_post.sh   # retry upload + cleanup
 
-Runbook: aws/docs/disk-full-backup-incident.md"
+Runbook: aws/docs/2026-09-06-primary-outage.md"
 
 exit 1

@@ -241,16 +241,23 @@ Install on **both** DirectAdmin servers (`server` and `server2`).
 | File | DirectAdmin event |
 |------|-------------------|
 | `all_backups_post.sh` | After **Admin Backup** (archives + staging dirs under `/home/admin_backups`) |
-| `system_backup_post.sh` | After **System Backup** (`apache/`, `bind/`, `custom/`, `mysql/` under `/home/backup/MM-DD-YY/`) |
+| `system_backup_post.sh` | After **System Backup** (`apache/`, `bind/`, `custom/`, `mysql/` under `MM-DD-YY/`) |
+
+The system backup root is **detected, not assumed**: DirectAdmin writes to `/backup` on the
+primary and `/home/backup` on other builds, and a hardcoded path is invisible when wrong —
+the hook cleans an empty directory and logs success. Override with `DA_BACKUP_SYSTEM_ROOT`
+if a host uses neither.
 
 Both upload to `s3://wbat-tellerstech-directadmin-backups-<account>/<hostname>/YYYY-MM-DD/` (e.g. `server/` or `server2/`) via rclone remote `s3backup`, then **delete the local copies that `rclone check` confirmed are in S3**.
 
 This hook is the only thing keeping backups off a 200 GB root volume, so it is written to
 fail safe in both directions: it never deletes a local copy it has not verified in S3, and
-it never leaves a verified copy on disk. On 2026-09-06 it managed to do both wrong at once
-and the primary ran out of disk — see
-[`aws/docs/disk-full-backup-incident.md`](../../aws/docs/disk-full-backup-incident.md) for
-what broke, and `prove_backup_cleanup.sh` for the six behaviours that are now pinned.
+it never leaves a verified copy on disk. Age is not treated as evidence that a backup is
+safe to delete — even the old-directory sweep checks S3 first, because on the primary the
+directories it would have swept were the only copy. See
+[`aws/docs/2026-09-06-primary-outage.md`](../../aws/docs/2026-09-06-primary-outage.md) for
+what was actually broken on that host, and `prove_backup_cleanup.sh` for the eight
+behaviours that are now pinned.
 
 Alerting: a run that ends with backups still on disk mails `HEALTH_ALERT_TO` from
 `/etc/da-vhost-listen/vhost-listen.conf` — the same address the vhost tooling uses, so
@@ -326,7 +333,10 @@ a verified upload is always followed by the matching delete.
 | Hook never runs for system backups | Missing `system_backup_post.sh` | Install both hook scripts (see above) |
 | Nothing new in S3 after schedule | `backup_crons.list` has `when=now` | Set `when=cron` to match `server` |
 | Upload works but local disk stays full | Stale hook installed | `install_da_vhost_listen.sh --verify`, then `--install` |
-| Log says `cleaned local ...` but the files are still there | Pre-2026-09-06 hook: cleanup resolved a different directory than the upload | `--install` the current hook; see [the incident doc](../../aws/docs/disk-full-backup-incident.md) |
+| Log says `cleaned local ...` but the files are still there | Pre-2026-09-06 hook: cleanup resolved a different directory than the upload, or a hardcoded `SYSTEM_ROOT` that DirectAdmin does not write to | `--install` the current hook; see [the incident doc](../../aws/docs/2026-09-06-primary-outage.md) |
+| `WARN keeping ... not present in <prefix>` | An old backup directory is **not** in S3, so the sweep kept it | Upload it, then delete by hand. Never `rm -rf` an unverified backup dir |
+| `WARN system backups found under more than one root` | Both `/backup` and `/home/backup` hold dated dirs | Only one is cleaned per run; consolidate them or pin `DA_BACKUP_SYSTEM_ROOT` |
+| Backups stop with no hook log at all | The DirectAdmin backup task itself is failing, so no post-hook fires | `grep 'dataskq.*backup' /var/log/messages`; a `Not implemented` error is a DA problem, not a hook problem |
 | `ERROR ... not verified in S3 (rclone check rc=N)` | Objects did not land, or the bucket is unreachable | Local copies were kept deliberately; fix rclone/S3 access and re-run the hook |
 | `ERROR another run held /var/log/... lock` | Admin and system backups overlapped and one waited out `DA_BACKUP_LOCK_WAIT` | `pgrep -a rclone`; clear the stuck upload, then re-run the hook |
 | Disk fills with no backups in `/home` | Not the backup hook | `da-disk-guard.sh --report` for the actual consumers |

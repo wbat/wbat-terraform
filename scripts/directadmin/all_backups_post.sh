@@ -6,7 +6,7 @@
 #
 # This hook is the only thing that stops the local backup directories growing without
 # bound on a 200 GB root volume. It had four ways to skip that cleanup while still
-# logging success (see aws/docs/disk-full-backup-incident.md):
+# logging success (see aws/docs/2026-09-06-primary-outage.md):
 #
 #   1. `set -e` aborted the run as soon as an rclone upload returned non-zero, and both
 #      cleanup steps came after both uploads. One transient S3 error left every local
@@ -420,7 +420,7 @@ $(du -sh "$ADMIN_DIR" "$SYSTEM_ROOT" 2>/dev/null | sed 's/^/  /')
 Recent log:
 $(tail -20 "$LOG" 2>/dev/null | sed 's/^/  /')
 
-Runbook: aws/docs/disk-full-backup-incident.md
+Runbook: aws/docs/2026-09-06-primary-outage.md
 Retry by hand: /usr/local/directadmin/scripts/custom/all_backups_post.sh"
   exit 1
 fi
@@ -439,7 +439,7 @@ Either upload them:
 or decide they are not worth keeping and remove them by hand.
 
 Disk: $(disk_summary "$SYSTEM_ROOT")
-Runbook: aws/docs/disk-full-backup-incident.md"
+Runbook: aws/docs/2026-09-06-primary-outage.md"
 fi
 
 if ((used_pct >= ALERT_USED_PCT)); then
@@ -453,7 +453,7 @@ Disk: $(disk_summary "$SYSTEM_ROOT")
 Largest directories under /:
 $(du -xh --max-depth=2 / 2>/dev/null | sort -rh | head -15 | sed 's/^/  /')
 
-Runbook: aws/docs/disk-full-backup-incident.md"
+Runbook: aws/docs/2026-09-06-primary-outage.md"
 fi
 
 log "OK backup upload and local cleanup complete"

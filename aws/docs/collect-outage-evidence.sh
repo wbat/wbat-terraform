@@ -1,22 +1,24 @@
 #!/bin/bash
 # Confirm (or refute) the 2026-09-06 root-disk hypothesis with evidence from the box.
 #
-# aws/docs/disk-full-backup-incident.md analyses the backup hook from the repository and
-# concludes that a full root volume explains the outage and that the hook's broken cleanup
-# is the likely cause. That analysis had no box access, so two questions were left open:
+# This answers two questions from the box rather than from the repository:
 #
 #   1. Did the disk actually fill, and did that break the services?
 #   2. Was it the backups -- and if so, which defect fired?
 #
-# This collects the evidence for both over SSM, saves it as a fixture, and prints a
-# verdict. Deliberately read-only: it changes nothing, so it is safe to run before
-# recovering the space (and running it after a cleanup will say so rather than mislead).
+# On 2026-09-06 it answered "no" to both, which is the whole reason it exists: the
+# repository-only analysis had concluded the opposite. See
+# aws/docs/2026-09-06-primary-outage.md for what the evidence actually showed.
+#
+# It collects over SSM, saves the output as a fixture, and prints a verdict.
+# Deliberately read-only: it changes nothing, so it is safe to run before recovering the
+# space (and running it after a cleanup will say so rather than mislead).
 #
 # Usage:
-#   ./disk-full-collect-evidence.sh                        # primary, collect + analyse
-#   ./disk-full-collect-evidence.sh --host secondary
-#   ./disk-full-collect-evidence.sh --profile wbat --out /tmp/capture
-#   ./disk-full-collect-evidence.sh --analyze DIR          # offline; no AWS needed
+#   ./collect-outage-evidence.sh                        # primary, collect + analyse
+#   ./collect-outage-evidence.sh --host secondary
+#   ./collect-outage-evidence.sh --profile wbat --out /tmp/capture
+#   ./collect-outage-evidence.sh --analyze DIR          # offline; no AWS needed
 #
 # Needs ssm:SendCommand + ssm:GetCommandInvocation and the SSM agent running on the
 # instance. --analyze re-reads a previous capture and needs no credentials at all, which
@@ -462,7 +464,7 @@ analyze() {
 
   echo
   echo "Capture kept at: ${dir}"
-  echo "Runbook: aws/docs/disk-full-backup-incident.md"
+  echo "Runbook: aws/docs/2026-09-06-primary-outage.md"
   return "$rc"
 }
 

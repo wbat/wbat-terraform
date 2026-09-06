@@ -43,7 +43,7 @@ jobs:
       - name: Offline backup cleanup proof
         run: ./scripts/directadmin/prove_backup_cleanup.sh
       - name: Offline disk evidence verdict proof
-        run: ./aws/docs/prove-disk-evidence-verdict.sh
+        run: ./aws/docs/prove-outage-evidence-verdict.sh
 
   validate:
     name: Validate (${{ matrix.workspaces }})

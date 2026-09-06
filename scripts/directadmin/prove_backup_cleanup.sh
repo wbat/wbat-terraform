@@ -4,10 +4,16 @@
 # mail are stubbed and every path is redirected into a temp sandbox.
 #
 # Each proof below is a failure mode that actually happened or was one transient error
-# away from happening (see aws/docs/disk-full-backup-incident.md). All six fail against
-# the pre-2026-09-06 hook, with one wrinkle worth stating: proof 1's "keep the data" half
-# passed there, but only because `set -e` aborted the run before cleanup could delete
-# anything. It failed the half that matters for an outage -- nobody was told.
+# away from happening (see aws/docs/2026-09-06-primary-outage.md). All eight fail against
+# the pre-2026-09-06 hook, with two wrinkles worth stating:
+#
+#   - Proof 1's "keep the data" half passed there, but only because `set -e` aborted the
+#     run before cleanup could delete anything. It failed the half that matters for an
+#     outage -- nobody was told.
+#   - Proof 8 fails against the *fix* as well as the original. Correcting the backup root
+#     (proof 7) is what first points a working age sweep at real data, and on the primary
+#     that data was never in S3. Both proofs have been checked against the behaviour they
+#     describe, so neither can pass vacuously.
 #
 # Usage (from repo root):
 #   ./scripts/directadmin/prove_backup_cleanup.sh

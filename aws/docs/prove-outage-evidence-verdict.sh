@@ -1,5 +1,5 @@
 #!/bin/bash
-# Offline proof for disk-full-collect-evidence.sh: the section splitter and the verdict
+# Offline proof for collect-outage-evidence.sh: the section splitter and the verdict
 # logic, exercised end to end with a stubbed aws CLI. No credentials, no server.
 #
 # This exists because the first version of that script shipped a bug only an end-to-end
@@ -12,12 +12,12 @@
 # refutes, and proof 3 asserts it distinguishes "no hook installed" from "stale hook".
 #
 # Usage (from repo root):
-#   ./aws/docs/prove-disk-evidence-verdict.sh
+#   ./aws/docs/prove-outage-evidence-verdict.sh
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-SCRIPT="${ROOT}/aws/docs/disk-full-collect-evidence.sh"
+SCRIPT="${ROOT}/aws/docs/collect-outage-evidence.sh"
 
 if [[ ! -x "$SCRIPT" ]]; then
   echo "ERROR: missing or non-executable $SCRIPT" >&2
