@@ -85,7 +85,8 @@ Then flip `http_tokens` to `"required"` in both `primary-instance.tf` and
 
 ## Re-checking the pre-flight
 
-Before enforcing on either box, confirm `MetadataNoToken` is flat at zero:
+Before enforcing on either box, confirm `MetadataNoToken` is a **complete series of zeros**.
+Not "no data" — see below, because the difference is the whole point.
 
 ```bash
 for id in $(cd aws && terraform output -raw primary_instance_id) \
@@ -97,24 +98,55 @@ for id in $(cd aws && terraform output -raw primary_instance_id) \
     --dimensions Name=InstanceId,Value="$id" \
     --start-time "$(date -u -d '14 days ago' +%Y-%m-%dT%H:%M:%SZ)" \
     --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    --period 86400 \
+    --period 3600 \
     --statistics Sum \
-    --query 'sort_by(Datapoints,&Timestamp)[].[Timestamp,Sum]' \
-    --output text
+    --query '{buckets: length(Datapoints), expected: `336`, requests: sum(Datapoints[].Sum), nonzero_buckets: length(Datapoints[?Sum > `0`])}' \
+    --output json
 done
 ```
 
 Reading the result:
 
-- **No datapoints, or every `Sum` is `0`** — nothing has used IMDSv1 in two weeks. Safe
-  to apply.
-- **Any non-zero `Sum`** — something is still on v1. Do **not** apply until it is found,
+- **`buckets` ≈ `expected` (336) and `requests` is `0`** — the instance was up for the whole
+  window and made no unauthenticated calls in it. This is the only result that clears the
+  gate.
+- **Any `nonzero_buckets`** — something is still on v1. Do **not** apply until it is found,
   or it breaks on apply.
+- **`buckets` well short of `expected`, or `0`** — **inconclusive, not safe.** Absence of
+  datapoints is absence of evidence.
 
-Two things to know about this metric. It counts *requests*, not distinct callers, so a burst
-of six is consistent with one script making six reads. And **detailed monitoring is disabled
-on both instances**, so 1-minute resolution does not exist — a `--period 60` request
-silently returns 5-minute buckets. "05:33" is really "the bucket covering 05:30–05:34".
+That last case is the trap. A stopped EC2 instance publishes no metrics at all, so a box that
+was shut down for the window returns an empty series that looks identical to a box that made
+zero v1 calls. A wrong instance ID or the wrong region does the same, and `aws` exits `0`
+either way — the same footgun already documented in
+[cost-optimization-checklist.md](cost-optimization-checklist.md), where a query against the
+retired pre-shrink instance reads as "no burst usage" rather than as an error.
+
+The distinction is usable because **EC2 publishes explicit zeros for this metric while an
+instance runs**: the 7-day measurement on the secondary returned 2,016 fully populated
+5-minute buckets, every one of them `0.0`. So a short or empty series means the instance was
+down, or you are not querying the instance you think you are. Cross-check with the launch
+time before believing it:
+
+```bash
+aws ec2 describe-instances --profile wbat --instance-ids "$id" \
+  --query 'Reservations[].Instances[].[State.Name,LaunchTime]' --output text
+```
+
+**A complete zero series still does not prove a boot-time caller is absent.** It proves
+nothing called v1 during the observed *running* time. Something that only reads metadata
+during startup is invisible unless the window contains a boot. If `LaunchTime` predates the
+window, treat first-boot-after-enforcement as the remaining risk: enforce when you can watch
+a reboot, or roll back on the spot if one misbehaves.
+
+Two more things about this metric. It counts *requests*, not distinct callers, so a burst of
+six is consistent with one script making six reads. And **detailed monitoring is disabled on
+both instances**, so 1-minute resolution does not exist — a `--period 60` request silently
+returns 5-minute buckets.
+
+To narrow non-zero traffic down to which minutes it lands in, re-run with `--period 300` over
+a **shorter** window. `get-metric-statistics` caps a response at 1,440 datapoints, so 5-minute
+buckets across 14 days (4,032) fails outright; 3 days (864) is fine.
 
 ## Identifying a v1 caller
 
