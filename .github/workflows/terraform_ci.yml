@@ -40,6 +40,8 @@ jobs:
             | xargs -0 shellcheck -S error -x -e SC1091
       - name: Offline vhost-listen detector proof
         run: ./scripts/directadmin/prove_vhost_listen_detector.sh
+      - name: Offline backup cleanup proof
+        run: ./scripts/directadmin/prove_backup_cleanup.sh
 
   validate:
     name: Validate (${{ matrix.workspaces }})

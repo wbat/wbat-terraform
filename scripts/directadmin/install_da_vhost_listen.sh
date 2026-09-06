@@ -1,11 +1,17 @@
 #!/bin/bash
-# Install or verify the da-vhost-listen tooling from a repo checkout.
+# Install or verify the DirectAdmin ops tooling from a repo checkout: the vhost-listen
+# reconciler, the S3 backup hooks, and the disk guard.
 #
-# This repo has no deploy pipeline: merging a reconciler fix does NOT update the copy
-# running on the host. That is a real failure mode -- PRs #103 and #104 both changed
-# reconciler behaviour while the host kept executing the previous version. Run
-# --install after any merge touching these files, and --verify to detect an installed
-# copy that has drifted from the repo.
+# This repo has no deploy pipeline: merging a fix does NOT update the copy running on the
+# host. That is a real failure mode -- PRs #103 and #104 both changed reconciler
+# behaviour while the host kept executing the previous version. Run --install after any
+# merge touching these files, and --verify to detect an installed copy that has drifted
+# from the repo.
+#
+# The backup hooks are covered here for the same reason. They were installed by hand from
+# a README table, so nothing could answer "is the cleanup fix from 2026-09-06 the code
+# that actually runs after tonight's backup?" -- and a stale hook there fills the root
+# volume rather than merely failing to self-heal.
 #
 # Usage:
 #   ./install_da_vhost_listen.sh --verify        # report drift; exit 1 if stale/missing
@@ -25,13 +31,14 @@ SBIN_DIR="${DA_VHOST_SBIN_DIR:-/usr/local/sbin}"
 ETC_DIR="${DA_VHOST_ETC_DIR:-/etc/da-vhost-listen}"
 CRON_DIR="${DA_VHOST_CRON_DIR:-/etc/cron.d}"
 UNIT_DIR="${DA_VHOST_UNIT_DIR:-/etc/systemd/system}"
+LOGROTATE_DIR="${DA_VHOST_LOGROTATE_DIR:-/etc/logrotate.d}"
 DA_CUSTOM_DIR="${DA_VHOST_DA_CUSTOM_DIR:-/usr/local/directadmin/scripts/custom}"
 HOOK_OWNER="${DA_VHOST_HOOK_OWNER:-diradmin:diradmin}"
 
 MODE=""
 
 usage() {
-  sed -n '2,18p' "$0"
+  sed -n '2,23p' "$0"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -65,6 +72,13 @@ MANAGED=(
   "cron.d-da-vhost-listen|${CRON_DIR}/da-vhost-listen|644"
   "da-vhost-listen-boot.service|${UNIT_DIR}/da-vhost-listen-boot.service|644"
   "user_httpd_write_post-da-vhost-listen-check.sh|${DA_CUSTOM_DIR}/user_httpd_write_post/da-vhost-listen-check.sh|700"
+  # Backup hooks and disk guard. DirectAdmin runs the hooks below as root, so they keep
+  # the default ownership rather than the diradmin ownership the vhost hook needs.
+  "all_backups_post.sh|${DA_CUSTOM_DIR}/all_backups_post.sh|700"
+  "system_backup_post.sh|${DA_CUSTOM_DIR}/system_backup_post.sh|700"
+  "da_disk_guard.sh|${SBIN_DIR}/da-disk-guard.sh|755"
+  "cron.d-da-disk-guard|${CRON_DIR}/da-disk-guard|644"
+  "logrotate.d-da-ops|${LOGROTATE_DIR}/da-ops|644"
 )
 
 hash_of() { sha256sum "$1" 2>/dev/null | awk '{print $1}'; }
@@ -116,7 +130,7 @@ verify() {
 
 do_install() {
   local entry src dst mode
-  mkdir -p "$SBIN_DIR" "$ETC_DIR" "$CRON_DIR" "$UNIT_DIR" \
+  mkdir -p "$SBIN_DIR" "$ETC_DIR" "$CRON_DIR" "$UNIT_DIR" "$LOGROTATE_DIR" \
     "${DA_CUSTOM_DIR}/user_httpd_write_post"
 
   for entry in "${MANAGED[@]}"; do
