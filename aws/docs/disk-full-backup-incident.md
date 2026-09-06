@@ -108,6 +108,29 @@ interrupted backup was never removed by anything (proof 4).
 
 ## Confirm on the box
 
+### One command
+
+[`disk-full-collect-evidence.sh`](disk-full-collect-evidence.sh) runs the read-only
+checks below over SSM, saves the output as a fixture, and prints a verdict on both open
+questions — did the disk fill and break the services, and were the backups what filled it:
+
+```bash
+./aws/docs/disk-full-collect-evidence.sh --profile wbat
+./aws/docs/disk-full-collect-evidence.sh --profile wbat --host secondary
+```
+
+It exits 0 when the hypothesis holds, **1 when the evidence contradicts it**, and 2 when
+the capture cannot settle it. It also names which committed version of the hook is
+installed, which is the difference between "the fix is merged" and "the fix is running".
+`--analyze DIR` re-reads a saved capture with no credentials, so the verdict can be
+reviewed later or by someone else.
+
+Needs `ssm:SendCommand` and `ssm:GetCommandInvocation`. Everything it runs is read-only,
+so it is safe before recovering the space — and running it *after* a cleanup will report
+`NOT SUPPORTED` rather than mislead, because the evidence will genuinely be gone.
+
+### By hand
+
 Run these before assuming the analysis above; they separate "the backup hook" from
 "something else is eating the disk". SSM session to the primary as root.
 
