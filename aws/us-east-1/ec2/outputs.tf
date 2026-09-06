@@ -80,9 +80,29 @@ output "primary_launch_template_id" {
   description = "Launch template for a primary rebuild."
 }
 
+output "primary_launch_template_default_version" {
+  value       = aws_launch_template.primary.default_version
+  description = "Default version a rebuild gets when it does not name one. update_default_version = true keeps this equal to latest_version; if they ever diverge, the version a rebuild would launch is not the one this repo describes."
+}
+
+output "primary_launch_template_latest_version" {
+  value       = aws_launch_template.primary.latest_version
+  description = "Newest version of the primary launch template."
+}
+
 output "secondary_launch_template_id" {
   value       = aws_launch_template.secondary.id
   description = "Launch template for a secondary rebuild."
+}
+
+output "secondary_launch_template_default_version" {
+  value       = aws_launch_template.secondary.default_version
+  description = "Default version a rebuild gets when it does not name one; see primary_launch_template_default_version."
+}
+
+output "secondary_launch_template_latest_version" {
+  value       = aws_launch_template.secondary.latest_version
+  description = "Newest version of the secondary launch template."
 }
 
 output "primary_dlm_policy_id" {

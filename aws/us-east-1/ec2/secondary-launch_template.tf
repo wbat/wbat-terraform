@@ -1,10 +1,15 @@
 resource "aws_launch_template" "secondary" {
   name = "WBAT_Secondary"
 
-  disable_api_stop                     = true
-  disable_api_termination              = true
-  ebs_optimized                        = "true"
-  image_id                             = aws_ami.secondary.id
+  disable_api_stop        = true
+  disable_api_termination = true
+  ebs_optimized           = "true"
+  image_id                = aws_ami.secondary.id
+
+  # See primary-launch_template.tf: without this the default version keeps pointing at the
+  # AMI that this same apply deregisters.
+  update_default_version = true
+
   instance_initiated_shutdown_behavior = "stop"
   instance_type                        = var.secondary_instance_type
   key_name                             = aws_key_pair.wbat.key_name
