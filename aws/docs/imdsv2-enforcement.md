@@ -125,10 +125,35 @@ already located with `--period 300`, and attribute the connection to a process:
 # Run a minute before a known burst; 05:33 or 23:33 UTC for the Installatron job
 timeout 300 tcpdump -nn -A -s0 'dst 169.254.169.254 and tcp port 80' > /tmp/imds.txt &
 timeout 300 bash -c 'while :; do ss -Htnp dst 169.254.169.254 >> /tmp/imds-pids.txt; sleep 0.2; done'
+```
 
-# Requests with no token header are the v1 ones
+Then pick out the tokenless requests. Do this **per request**, not per line:
+
+```bash
+awk '
+  /^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]\./ { flush(); buf = "" }
+  { buf = buf $0 "\n" }
+  END { flush() }
+  function flush() {
+    if (buf ~ /GET \/latest/ && buf !~ /[Xx]-aws-ec2-metadata-token:/)
+      printf "%s----\n", buf
+  }
+' /tmp/imds.txt
+```
+
+The obvious one-liner is wrong, and wrong in the direction that wastes a day:
+
+```bash
+# DO NOT USE -- reports IMDSv2 callers as if they were v1
 grep -B2 -A8 'GET /latest' /tmp/imds.txt | grep -v 'X-aws-ec2-metadata-token'
 ```
+
+`grep -v` drops only the token-header *line* and leaves that request's `GET` line in the
+output, so every compliant caller — the SSM agent, `nm-cloud-setup`, our own reconciler —
+appears in the results as a suspect. The `awk` version keys off whether the token header
+appears anywhere in the same packet, which is the actual question. Two caveats: a request
+split across TCP segments can still false-positive, and `tcpdump` gives you no process
+identity, which is what the `ss -Htnp` sampler alongside it is for.
 
 Note that a text search of the caller's own files may prove nothing: grepping
 `/usr/local/installatron` for `169.254.169.254` finds no match because the PHP is bytecode.
