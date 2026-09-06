@@ -39,6 +39,26 @@ data "aws_iam_role" "AWSDataLifecycleManagerDefaultRole" {
 # Assumes one EBS volume per instance, which holds today -- both declare only
 # root_block_device. Add a volume filter here if a data volume is ever attached, since
 # the DLM policies target INSTANCE and would then produce sibling snapshots.
+#
+# Accepted cost of tracking the rolling set: registering an AMI on a DLM snapshot stops DLM
+# from deleting it. DeleteSnapshot fails with InvalidSnapshot.InUse while a registered AMI
+# references the snapshot, so once the referenced one ages past retain = 3, DLM keeps
+# failing to expire it until an apply moves aws_ami onto a newer snapshot and releases it.
+#
+# Bounded, not unbounded: at most one extra snapshot per instance is held at a time, and
+# newer ones keep rotating normally. Snapshots are incremental, so the marginal storage is a
+# fraction of 200 GiB. This workspace also applies often enough that the reference usually
+# moves before it ages out at all.
+#
+# The alternative is worse for the thing that matters. Pinning a snapshot ID keeps DLM tidy
+# and is exactly how the 2023 fossil above came to be trusted as a DR artifact for three
+# years. Given a choice between a stale AMI and a slightly untidy snapshot ledger, the AMI
+# has to be current.
+#
+# If the untidiness ever needs solving properly, the AWS-native answer is a DLM policy of
+# type IMAGE_MANAGEMENT, which creates and expires AMIs itself and removes the
+# aws_ami-on-a-rotating-snapshot pattern entirely. That is a design change, not a tweak,
+# so it is deliberately not bundled here.
 data "aws_ebs_snapshot" "primary" {
   most_recent = true
   owners      = ["self"]
