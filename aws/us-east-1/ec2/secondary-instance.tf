@@ -16,6 +16,16 @@ resource "aws_instance" "secondary" {
     cpu_credits = "standard"
   }
 
+  # Force IMDSv2; see the equivalent block in primary-instance.tf for the reasoning and
+  # the MetadataNoToken pre-flight. Both boxes share the same instance profile, so the
+  # blast radius of unauthenticated metadata access is identical even though this one
+  # only serves DNS.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+  }
+
   root_block_device {
     volume_type           = "gp3"
     volume_size           = 200

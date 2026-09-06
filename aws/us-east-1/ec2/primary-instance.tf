@@ -20,6 +20,25 @@ resource "aws_instance" "primary" {
     cpu_credits = "unlimited"
   }
 
+  # Force IMDSv2. Unauthenticated IMDSv1 is the mechanism that turns a server-side
+  # request forgery in any hosted site into instance-role credentials, which matters
+  # more than usual here: this instance's profile can send SES mail and invalidate
+  # CloudFront, and ~91 WordPress sites share the box.
+  #
+  # http_tokens = "required" applies immediately via ModifyInstanceMetadataOptions with
+  # no reboot -- and it breaks any IMDSv1 consumer the moment it lands. Confirm the
+  # MetadataNoToken CloudWatch metric is flat at zero before applying (see
+  # aws/docs/imdsv2-enforcement.md). Our own tooling is already v2-native:
+  # da_vhost_listen_reconcile.sh fetches a token via PUT /latest/api/token.
+  #
+  # hop_limit stays at the AWS default of 1 so this change alters only token enforcement.
+  # It would need to be 2 if anything on the box ever reached IMDS from a container.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+  }
+
   root_block_device {
     volume_type           = "gp3"
     volume_size           = 200

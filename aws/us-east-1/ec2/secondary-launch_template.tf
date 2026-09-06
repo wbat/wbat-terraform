@@ -44,6 +44,13 @@ resource "aws_launch_template" "secondary" {
     auto_recovery = "default"
   }
 
+  # Match the instance; see primary-launch_template.tf.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+  }
+
   monitoring {
     enabled = false
   }
