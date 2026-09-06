@@ -38,16 +38,45 @@ SSM agent on a box ever stops reporting — a case `.cursor/start.sh` reports at
 `AWS-StartSSHSession` is deliberately excluded from the IAM policy: it tunnels real SSH
 over SSM and would still require a private key on the VM.
 
-## Prerequisite: allow secrets on a public repository
+## Where the secrets go
 
-`wbat/wbat-terraform` is public, and Cursor **disables secret injection for public
-repositories by default**. Adding secrets without changing that setting produces an
-agent where every variable is unset and every check in the start log reports "unset" —
-which looks like a broken setup rather than a policy decision.
+[cursor.com/dashboard/cloud-agents](https://cursor.com/dashboard/cloud-agents) → the
+**Secrets** tab. That is the only documented location; there is no equivalent in the
+desktop IDE. If the tab is not visible, it is an account-permissions matter.
 
-In the Cursor dashboard, under Cloud Agents settings, explicitly allow secrets for this
-repository before adding any of the values below. Prefer **repo-scoped** secrets over
-user- or team-wide ones so these credentials reach only agents working on this repo.
+**Scope.** There is no per-repository secret type. Secrets are user-, team-, or
+environment-scoped, and an *environment* can be scoped to a single repo — so an
+environment-scoped secret on a single-repo environment is how you get "only agents
+working on this repo." That is the right choice for these three values, since neither
+credential has any use outside this repository. Note that precedence between scopes for
+the same variable name is not documented, so avoid defining the same name twice.
+
+**Type**, which controls exposure rather than reach:
+
+| Value | Type | Why |
+| --- | --- | --- |
+| `AWS_ACCESS_KEY_ID` | Environment Variable | The non-secret half of the pair — AWS itself surfaces key IDs in CloudTrail and error messages. Leaving it visible makes a credential mix-up diagnosable instead of guesswork. |
+| `AWS_SECRET_ACCESS_KEY` | Runtime Secret | Redacted from tool results, transcripts, and commit messages. |
+| `TF_TOKEN_app_terraform_io` | Runtime Secret | Same. |
+
+Do not use **Build Secret** for any of these: that type is exposed only to the Docker
+build and not to the running agent, which is the reverse of what is needed here.
+
+**Timing.** Secrets are injected as environment variables when an agent *starts*. An
+already-running agent will never see a newly added secret, so start a fresh agent to
+test. Changing an environment's secrets also triggers a new build.
+
+`.cursor/install.sh` deliberately needs no credentials, which sidesteps a sharp edge
+here: user-scoped secrets are not available during builds (where `install` runs), only
+team- and environment-scoped ones are. Everything that reads a credential lives in
+`start.sh`, which runs per boot with all runtime secrets present.
+
+**On this repo being public:** the only documented public-repository secret restriction
+applies to per-run environment variables passed through the SDK, not to dashboard
+secrets, and there is no documented toggle to change it. So dashboard secrets are
+expected to work here. If a fresh agent's start log nevertheless reports every value
+"unset", suspect that restriction rather than a broken key, and check the scope the
+secret was created under.
 
 ## 1. AWS (metrics, logs, data, and shell)
 
