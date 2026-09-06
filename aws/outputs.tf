@@ -142,9 +142,14 @@ output "primary_ami_snapshot_volume_size" {
   description = "Volume size (GiB) of the snapshot the primary AMI is built from."
 }
 
+output "primary_ami_snapshot_start_time" {
+  value       = module.us-east-1.primary_ami_snapshot_start_time
+  description = "When the snapshot behind the primary AMI was taken. DLM runs Mon/Wed/Fri and retains 3, so anything older than about a week means the schedule has stopped."
+}
+
 output "primary_root_volume_size" {
   value       = module.us-east-1.primary_root_volume_size
-  description = "Root volume size (GiB) of the running primary. If this differs from primary_ami_snapshot_volume_size the DR AMI is stale."
+  description = "Root volume size (GiB) of the running primary. If this differs from primary_ami_snapshot_volume_size the DR AMI is built from the wrong disk."
 }
 
 output "primary_launch_template_id" {

@@ -56,6 +56,11 @@ output "primary_ami_snapshot_volume_size" {
   description = "Volume size (GiB) of the snapshot the primary AMI is built from."
 }
 
+output "primary_ami_snapshot_start_time" {
+  value       = module.ec2.primary_ami_snapshot_start_time
+  description = "When the snapshot behind the primary AMI was taken."
+}
+
 output "primary_root_volume_size" {
   value       = module.ec2.primary_root_volume_size
   description = "Root volume size (GiB) of the running primary; a mismatch with the snapshot size means the DR AMI is stale."

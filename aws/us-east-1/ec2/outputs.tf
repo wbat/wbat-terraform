@@ -56,14 +56,18 @@ output "secondary_ami_snapshot_id" {
   description = "Snapshot backing secondary_ami_id."
 }
 
-# Surfaced deliberately: the primary snapshot data source still filters on
-# volume-size 300 while the live root volume is 200 GB after the shrink cutover, so a
-# rebuild from primary_ami_id would come up with the pre-shrink disk. Printing the two
-# sizes side by side makes that mismatch visible in `terraform output` rather than only
-# discoverable by reading data_sources.tf.
+# These two were added while the snapshot source was pinned to the pre-shrink 300 GB
+# fossil, to make that mismatch visible. The source now tracks the current DLM snapshots,
+# so they should agree -- which is exactly why they are worth keeping: they turn "is the
+# DR AMI built from the right disk?" into a standing check rather than a one-time fix.
 output "primary_ami_snapshot_volume_size" {
   value       = data.aws_ebs_snapshot.primary.volume_size
   description = "Volume size (GiB) of the snapshot the primary AMI is built from."
+}
+
+output "primary_ami_snapshot_start_time" {
+  value       = data.aws_ebs_snapshot.primary.start_time
+  description = "When the snapshot behind the primary AMI was taken. DLM runs Mon/Wed/Fri 02:00 ET and retains 3, so anything older than about a week means the schedule has stopped."
 }
 
 output "primary_root_volume_size" {
