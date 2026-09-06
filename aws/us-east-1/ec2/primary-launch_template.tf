@@ -49,12 +49,14 @@ resource "aws_launch_template" "primary" {
     auto_recovery = "default"
   }
 
-  # Match the instance so a DR rebuild does not come up with IMDSv1 enabled. A launch
-  # template that omits this silently reintroduces the weakness at exactly the moment
-  # nobody is checking.
+  # Match the instance, which does not enforce IMDSv2 because Installatron's updater still
+  # uses v1 -- see primary-instance.tf. "required" here would look like a free security win
+  # and instead mean a DR rebuild silently comes up with WordPress auto-updates broken, in
+  # the one situation where nobody is watching for it. This tracks the instance: when the
+  # instance flips to "required", flip this with it.
   metadata_options {
     http_endpoint               = "enabled"
-    http_tokens                 = "required"
+    http_tokens                 = "optional"
     http_put_response_hop_limit = 1
   }
 

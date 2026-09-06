@@ -20,22 +20,35 @@ resource "aws_instance" "primary" {
     cpu_credits = "unlimited"
   }
 
-  # Force IMDSv2. Unauthenticated IMDSv1 is the mechanism that turns a server-side
-  # request forgery in any hosted site into instance-role credentials, which matters
-  # more than usual here: this instance's profile can send SES mail and invalidate
+  # IMDSv2 is NOT enforced here, and this block exists to say so deliberately rather than
+  # by omission. "optional" is the current live setting, so declaring it changes nothing;
+  # it makes enforcing a one-word diff, and it stops the next reader assuming the gap was
+  # an oversight.
+  #
+  # Enforcing would be the right thing on the merits. Unauthenticated IMDSv1 is what turns
+  # a server-side request forgery in any hosted site into instance-role credentials, and
+  # that matters more than usual here: this profile can send SES mail and invalidate
   # CloudFront, and ~91 WordPress sites share the box.
   #
-  # http_tokens = "required" applies immediately via ModifyInstanceMetadataOptions with
-  # no reboot -- and it breaks any IMDSv1 consumer the moment it lands. Confirm the
-  # MetadataNoToken CloudWatch metric is flat at zero before applying (see
-  # aws/docs/imdsv2-enforcement.md). Our own tooling is already v2-native:
-  # da_vhost_listen_reconcile.sh fetches a token via PUT /latest/api/token.
+  # It is blocked by a named live consumer. Installatron's auto-updater
+  # (/etc/cron.d/installatron -> lib/cron.updater.sh, minute 33 of local hours 1/7/13/19)
+  # makes 6 unauthenticated metadata calls per run, four times a day, 9 on the 05:33 UTC
+  # run that also walks the hosted sites. Measured over 7 days: 27 runs, 27 non-zero
+  # MetadataNoToken buckets, no other source. http_tokens = "required" applies immediately
+  # via ModifyInstanceMetadataOptions with no reboot and no grace period, so flipping this
+  # today breaks WordPress auto-updates across every hosted site at the next burst.
   #
-  # hop_limit stays at the AWS default of 1 so this change alters only token enforcement.
-  # It would need to be 2 if anything on the box ever reached IMDS from a container.
+  # Installatron is ionCube-encoded vendor code already at the latest version, so this is a
+  # vendor request rather than a local fix. Flip to "required" once it reads IMDS with a
+  # token, or once it is retired. The secondary already enforces -- it is flat zero because
+  # Installatron is not installed there. See aws/docs/imdsv2-enforcement.md.
+  #
+  # hop_limit 1 is also already live, and correct: the caller is a root cron job invoking a
+  # local binary, not a containerised process. It would need 2 only if something on the box
+  # reached IMDS from inside a container.
   metadata_options {
     http_endpoint               = "enabled"
-    http_tokens                 = "required"
+    http_tokens                 = "optional"
     http_put_response_hop_limit = 1
   }
 
