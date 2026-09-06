@@ -38,6 +38,28 @@ SSM agent on a box ever stops reporting — a case `.cursor/start.sh` reports at
 `AWS-StartSSHSession` is deliberately excluded from the IAM policy: it tunnels real SSH
 over SSM and would still require a private key on the VM.
 
+## First: the environment has to be saved, not just committed
+
+Committing `.cursor/environment.json` is **not** what creates the environment. It is the
+proposed config; the environment exists only once it is saved from the dashboard. An agent
+that starts before that runs with *no linked environment*, and then:
+
+- `install.sh` and `start.sh` never execute. Nothing writes `/tmp/cursor/start-user/`, so
+  there is no start log to read, and no `terraform`, `aws`, or `session-manager-plugin`
+  unless the base image happens to ship them.
+- **No secrets are injected at all**, whatever scope they were created under.
+
+This was observed rather than inferred: an agent on the branch that added these files
+reported all three values unset, with `/tmp/cursor` absent, while the committed
+`environment.json` sat right there in its own checkout. The tooling was present only
+because an earlier turn had run `install.sh` by hand.
+
+So if a fresh agent reports every credential unset, check this before suspecting the keys.
+The distinguishing symptom is the **absence of a start log**: a linked environment always
+produces `/tmp/cursor/start-user/start-user.log`, and `start.sh` names each missing
+credential in it. No log at all means the environment never ran, which is a different
+problem from a credential that did not arrive.
+
 ## Where the secrets go
 
 [cursor.com/dashboard/cloud-agents](https://cursor.com/dashboard/cloud-agents) → the
@@ -74,9 +96,9 @@ team- and environment-scoped ones are. Everything that reads a credential lives 
 **On this repo being public:** the only documented public-repository secret restriction
 applies to per-run environment variables passed through the SDK, not to dashboard
 secrets, and there is no documented toggle to change it. So dashboard secrets are
-expected to work here. If a fresh agent's start log nevertheless reports every value
-"unset", suspect that restriction rather than a broken key, and check the scope the
-secret was created under.
+expected to work here. If a fresh agent's *start log* reports every value "unset" —
+meaning the environment did run, so the section above is not the cause — suspect that
+restriction rather than a broken key, and check the scope the secret was created under.
 
 ## 1. AWS (metrics, logs, data, and shell)
 
