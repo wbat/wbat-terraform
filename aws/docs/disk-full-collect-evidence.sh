@@ -93,6 +93,26 @@ aws_() {
 
 section_file() { echo "${1}/section-${2}.txt"; }
 
+# macOS ships `shasum`, not `sha256sum`, and this repo's scripts are run from laptops
+# (cost-optimization-checklist.md uses BSD `date -u -v` syntax). This matters more than
+# portability tidiness: the hook-version comparison below feeds an empty hash into a
+# string equality test if the tool is missing, which reports a perfectly current hook as
+# "hand-edited on the box" -- a confidently wrong answer instead of an absent one.
+# Reads a file argument, or stdin when called with none.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$@" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$@" | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+have_sha256() {
+  command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1
+}
+
 ##############################################################################
 # Collection
 ##############################################################################
@@ -261,9 +281,14 @@ identify_installed_hook() {
   local installed_hash="$1"
   local path="scripts/directadmin/all_backups_post.sh"
 
+  if ! have_sha256; then
+    echo "unidentified (no sha256sum or shasum available here to compare against the repo)"
+    return 0
+  fi
+
   local wt_hash
-  wt_hash="$(sha256sum "${REPO_DIR}/${path}" 2>/dev/null | awk '{print $1}')"
-  if [[ "$installed_hash" == "$wt_hash" ]]; then
+  wt_hash="$(sha256_of "${REPO_DIR}/${path}" 2>/dev/null)"
+  if [[ -n "$wt_hash" && "$installed_hash" == "$wt_hash" ]]; then
     echo "current (matches this checkout)"
     return 0
   fi
@@ -272,7 +297,7 @@ identify_installed_hook() {
   while IFS= read -r commit; do
     [[ -n "$commit" ]] || continue
     local h
-    h="$(git -C "$REPO_DIR" show "${commit}:${path}" 2>/dev/null | sha256sum | awk '{print $1}')"
+    h="$(git -C "$REPO_DIR" show "${commit}:${path}" 2>/dev/null | sha256_of)"
     if [[ "$h" == "$installed_hash" ]]; then
       echo "the version from commit $(git -C "$REPO_DIR" log -1 --format='%h %s' "$commit" 2>/dev/null)"
       return 0
@@ -411,6 +436,9 @@ analyze() {
 
   if [[ "$installed_desc" == "NOT INSTALLED on this host" ]]; then
     notes+=("The backup hook is not installed here at all, so nothing has ever uploaded or cleaned up these backups. That alone fills the volume, and it needs 'install_da_vhost_listen.sh --install' regardless of what else this capture shows.")
+  elif [[ "$installed_desc" == unidentified* ]]; then
+    # Not evidence either way -- say so rather than implying the host is stale.
+    notes+=("Could not tell which version of the hook is installed (${installed_desc}). Re-run --analyze somewhere with sha256sum or shasum, or run 'install_da_vhost_listen.sh --verify' on the host.")
   elif [[ "$installed_desc" != "current (matches this checkout)" && "$installed_desc" != "not captured" ]]; then
     notes+=("The hook running on this host is ${installed_desc}. Any fix in main is not in effect until 'install_da_vhost_listen.sh --install' is run here.")
   fi

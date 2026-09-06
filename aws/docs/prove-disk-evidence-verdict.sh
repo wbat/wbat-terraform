@@ -50,6 +50,16 @@ fail() {
   exit 1
 }
 
+# Same reason as the script under test: macOS has shasum, not sha256sum, and these
+# proofs are meant to be runnable from a laptop as well as CI.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$@" | awk '{print $1}'
+  else
+    shasum -a 256 "$@" | awk '{print $1}'
+  fi
+}
+
 # A capture as the on-box script really emits it: one marker stream, not pre-split files.
 # host_full=yes|no  backups=big|small  hook=missing|old|current
 make_remote_out() {
@@ -98,7 +108,7 @@ make_remote_out() {
     echo "===SECTION installed_hashes==="
     case "$hook" in
       missing) echo "MISSING /usr/local/directadmin/scripts/custom/all_backups_post.sh" ;;
-      current) echo "$(sha256sum "${ROOT}/scripts/directadmin/all_backups_post.sh" | awk '{print $1}')  /usr/local/directadmin/scripts/custom/all_backups_post.sh" ;;
+      current) echo "$(sha256_of "${ROOT}/scripts/directadmin/all_backups_post.sh")  /usr/local/directadmin/scripts/custom/all_backups_post.sh" ;;
       *) echo "0000000000000000000000000000000000000000000000000000000000000000  /usr/local/directadmin/scripts/custom/all_backups_post.sh" ;;
     esac
     echo "===SECTION rclone_running==="
