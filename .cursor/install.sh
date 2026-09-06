@@ -16,11 +16,44 @@
 # durable filesystem state -- no daemons, no credentials. Per-boot work lives in
 # start.sh, and secrets arrive as environment variables from the Cloud Agent dashboard.
 #
-# Terraform itself is already in the base image, pinned by .terraform-version.
+# Nothing here needs a credential, which is deliberate: user-scoped secrets are not
+# available during environment builds, and this is where builds run.
 
 set -euo pipefail
 
 log() { printf '[install] %s\n' "$*"; }
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# --- Terraform ---------------------------------------------------------------------
+# Pinned to .terraform-version, and installed here rather than assumed. A fresh Cloud
+# Agent was observed booting with no terraform on PATH at all, which silently breaks the
+# documented fmt/init/validate loop -- the one thing this repo always needs and the one
+# thing that requires no credentials. Owning the install makes the version deterministic
+# instead of dependent on whatever the base image happens to ship.
+tf_want="$(tr -d '[:space:]' <"${repo_root}/.terraform-version")"
+# The `|| true` is load-bearing: under `set -e` with `pipefail`, a missing terraform
+# makes this pipeline fail and aborts the script before it can install anything -- so
+# the cold path would break in exactly the situation it exists to fix.
+tf_have="$(terraform version 2>/dev/null | head -1 | sed 's/^Terraform v//' || true)"
+if [ "$tf_have" = "$tf_want" ]; then
+  log "terraform ${tf_want} present"
+else
+  log "installing terraform ${tf_want} (found: ${tf_have:-none})"
+  tmp="$(mktemp -d)"
+  base="https://releases.hashicorp.com/terraform/${tf_want}"
+  zip="terraform_${tf_want}_linux_amd64.zip"
+  curl -fsSL "${base}/${zip}" -o "${tmp}/${zip}"
+  # Verify against HashiCorp's published checksums. Skipping this would mean trusting
+  # whatever the network returned for a binary that then runs against production state.
+  curl -fsSL "${base}/terraform_${tf_want}_SHA256SUMS" -o "${tmp}/SHA256SUMS"
+  (cd "$tmp" && grep " ${zip}\$" SHA256SUMS | sha256sum -c -)
+  python3 -c "import zipfile,sys;zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" \
+    "${tmp}/${zip}" "$tmp"
+  sudo install -m 0755 "${tmp}/terraform" /usr/local/bin/terraform
+  rm -rf "$tmp"
+  log "terraform installed: $(terraform version | head -1)"
+fi
 
 # --- AWS CLI v2 --------------------------------------------------------------------
 # Not in the base image. The bundled installer is the only supported route on Ubuntu;
