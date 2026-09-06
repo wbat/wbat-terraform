@@ -63,7 +63,7 @@ output "primary_ami_snapshot_start_time" {
 
 output "primary_root_volume_size" {
   value       = module.ec2.primary_root_volume_size
-  description = "Root volume size (GiB) of the running primary; a mismatch with the snapshot size means the DR AMI is stale."
+  description = "Root volume size (GiB) of the running primary. If this differs from primary_ami_snapshot_volume_size the DR AMI is built from the wrong disk."
 }
 
 output "primary_launch_template_id" {

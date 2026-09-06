@@ -5,11 +5,13 @@ data "aws_iam_role" "AWSDataLifecycleManagerDefaultRole" {
 # Source snapshots for the DR AMIs and launch templates.
 #
 # These previously selected `tag:Name = "WBAT ... Server - First"` with
-# `volume-size = 300`, which is the very first snapshot ever taken of each box -- a
-# permanent one-off, not a backup. So the AMI named "Primary-M_W_F-2AM_ET" was not built
-# from the M/W/F backups at all; it was pinned to a fossil of the pre-shrink 300 GB
-# volume. A rebuild would have come up with the original disk and years-old data, which
-# makes it worse than no DR artifact, because it looks like one.
+# `volume-size = 300`, which is the very first snapshot each policy ever took -- since
+# withdrawn from rotation and kept permanently, so a fossil rather than a live backup.
+# The AMI named "Primary-M_W_F-2AM_ET" was therefore pinned to a 2023 image of the
+# pre-shrink 300 GB volume: verified to be a snapshot of vol-0d5064ffa1256b9fa, a volume
+# that no longer exists, belonging to a previous primary instance. A rebuild would have
+# come up with that disk and years-old data, which is worse than having no DR artifact,
+# because it looks like one.
 #
 # Selection is now "newest completed snapshot whose Name matches the instance exactly":
 #
@@ -23,10 +25,16 @@ data "aws_iam_role" "AWSDataLifecycleManagerDefaultRole" {
 #   - The volume-size filter is gone on purpose. Hardcoding it is what let the source go
 #     stale silently through the 300 -> 200 GB shrink; size now follows the snapshot.
 #
-# Deliberately NOT filtered on `tag:aws:dlm:lifecycle-policy-id`, even though that is the
-# more precise provenance check: it would tie every plan to the policy's current ID, so
-# recreating the DLM policy would leave zero matching snapshots until its next scheduled
-# run and *every* apply on this workspace would fail hard in the meantime.
+# Deliberately NOT filtered on `tag:aws:dlm:lifecycle-policy-id`: it would tie every plan
+# to the policy's current ID, so recreating the DLM policy would leave zero matching
+# snapshots until its next scheduled run and *every* apply on this workspace would fail
+# hard in the meantime.
+#
+# Note that it would also not have helped. The "- First" fossils *do* carry
+# aws:dlm:lifecycle-policy-id tags, because they were produced by these very policies on
+# their first run in 2023 before being pinned permanently. Provenance does not distinguish
+# them; only the exact Name match does. Worth knowing before anyone "tightens" this filter
+# and assumes the fossils are excluded by lineage.
 #
 # Assumes one EBS volume per instance, which holds today -- both declare only
 # root_block_device. Add a volume filter here if a data volume is ever attached, since

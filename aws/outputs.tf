@@ -164,7 +164,7 @@ output "secondary_launch_template_id" {
 
 output "primary_dlm_policy_id" {
   value       = module.us-east-1.primary_dlm_policy_id
-  description = "DLM policy taking the M/W/F 2AM ET primary snapshots (3 retained)."
+  description = "DLM policy taking the M/W/F primary snapshots at 06:00 UTC (3 retained). The 2AM_ET in its name holds only under EDT; DLM cron is UTC-only."
 }
 
 output "secondary_dlm_policy_id" {

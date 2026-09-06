@@ -67,12 +67,12 @@ output "primary_ami_snapshot_volume_size" {
 
 output "primary_ami_snapshot_start_time" {
   value       = data.aws_ebs_snapshot.primary.start_time
-  description = "When the snapshot behind the primary AMI was taken. DLM runs Mon/Wed/Fri 02:00 ET and retains 3, so anything older than about a week means the schedule has stopped."
+  description = "When the snapshot behind the primary AMI was taken. DLM runs Mon/Wed/Fri at 06:00 UTC and retains 3, so anything older than about a week means the schedule has stopped. (DLM cron is UTC-only, so the policy's 2AM_ET name holds only under EDT; in winter it fires at 01:00 ET.)"
 }
 
 output "primary_root_volume_size" {
   value       = one(aws_instance.primary.root_block_device[*].volume_size)
-  description = "Root volume size (GiB) of the running primary. Should match primary_ami_snapshot_volume_size; a difference means the DR AMI is stale."
+  description = "Root volume size (GiB) of the running primary. If this differs from primary_ami_snapshot_volume_size the DR AMI is built from the wrong disk."
 }
 
 output "primary_launch_template_id" {
@@ -87,7 +87,7 @@ output "secondary_launch_template_id" {
 
 output "primary_dlm_policy_id" {
   value       = aws_dlm_lifecycle_policy.primary.id
-  description = "DLM policy taking the M/W/F 2AM ET primary snapshots (3 retained)."
+  description = "DLM policy taking the M/W/F primary snapshots at 06:00 UTC (3 retained). The 2AM_ET in its name holds only under EDT; DLM cron is UTC-only."
 }
 
 output "secondary_dlm_policy_id" {
