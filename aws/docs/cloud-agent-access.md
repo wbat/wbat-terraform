@@ -2,21 +2,41 @@
 
 An agent working in this repo can always do the offline loop — `terraform fmt`,
 `init -backend=false`, `validate`. It cannot see anything about the running system:
-no metrics, no logs, no plans, no shell. This document sets up the three access paths
-that fix that, in increasing order of privilege.
+no metrics, no logs, no plans, no shell. This document sets that up.
 
-Everything here is opt-in and independently revocable. `.cursor/start.sh` reports which
-paths are live at boot and continues without the ones that are not, so a partial setup
-still yields a working agent.
+It takes **two credentials**: an AWS key and an HCP Terraform token. Both are opt-in and
+independently revocable, and `.cursor/start.sh` reports which are live at boot, so a
+partial setup still yields a working agent.
 
-## What an agent can do with each path
+## What an agent gets
 
 | Path | Grants | Credential | Revoke by |
 | --- | --- | --- | --- |
 | AWS read-only | Metrics, logs, describes, cost | `cursor-agent` IAM key | Deleting the access key |
 | AWS Session Manager | Root-equivalent shell on both EC2 boxes | same key | `cursor_agent_shell_access = false` |
 | HCP Terraform | Read plans, runs, state outputs | API token | Revoking the token |
-| Tailscale | SSH over the tailnet | ephemeral auth key | Revoking the key / ACL |
+
+## Why not SSH
+
+Both servers are on the tailnet and both accept a `.pem` key, so SSH is possible. It is
+deliberately not wired into agents, because Session Manager provides the same shell with
+strictly less standing credential:
+
+- **No key material on the agent VM.** SSH needs either the `.pem` private key or a
+  Tailscale node identity. Session Manager authenticates with the same IAM credential
+  already needed for metrics, so shell access adds no new secret.
+- **Nothing expires on its own.** Tailscale auth keys last 90 days at most, so that path
+  breaks quarterly and always at the moment access is wanted.
+- **Nothing changes on the servers.** The instance profile already carries
+  `AmazonSSMManagedInstanceCore`. No inbound port, no security-group edit, no tailnet
+  node per agent VM.
+- **Sessions are attributable.** Every `StartSession` is a CloudTrail event tied to the
+  `cursor-agent` user, and access is revoked by deleting one access key.
+
+Tailscale and the `.pem` key remain the **human** paths, and they are the fallback if the
+SSM agent on a box ever stops reporting — a case `.cursor/start.sh` reports at boot.
+`AWS-StartSSHSession` is deliberately excluded from the IAM policy: it tunnels real SSH
+over SSM and would still require a private key on the VM.
 
 ## Prerequisite: allow secrets on a public repository
 
@@ -50,10 +70,6 @@ Read the policy before applying. The parts worth understanding:
   WordPress sites. It is scoped by `Name` tag to the two known instances and every
   session is recorded in CloudTrail, but it is still root. If that is more than you
   want, set `cursor_agent_shell_access = false` and keep the telemetry half.
-
-Session Manager is preferred over an SSH key because it needs no inbound port, no
-security-group change, and no private key on the agent VM — and the instance profile
-already carries `AmazonSSMManagedInstanceCore`, so nothing changes on the servers.
 
 ### Steps
 
@@ -120,51 +136,31 @@ curl -sS -H "Authorization: Bearer $TF_TOKEN_app_terraform_io" \
   | jq -r '.data[].attributes.name'
 ```
 
-## 3. Tailscale (SSH over the tailnet)
+## If the SSM agent stops reporting
 
-Only needed if you want SSH specifically. If AWS Session Manager is set up, an agent
-already has shell access to both boxes and this path is redundant.
+This is the one failure mode that costs an agent its shell, so it is worth recognising.
+`.cursor/start.sh` logs `WARN no instance reports an Online SSM agent` at boot, and
+`aws ssm start-session` fails with `TargetNotConnected`.
 
-This requires Tailscale to be **installed and running on the servers**. The usual admin
-route into the primary is public DNS with an SSH key, which does not imply the boxes are
-on a tailnet — confirm before setting this up.
-
-Cloud Agent VMs cannot use a TUN interface, so `.cursor/start.sh` runs `tailscaled` in
-userspace-networking mode with a SOCKS5/HTTP listener on `127.0.0.1:1055`, and
-`.cursor/install.sh` writes an `~/.ssh/config` that proxies tailnet hosts through
-`tailscale nc`. Plain `ssh` to a tailnet name works as a result; `ssh` to a public
-address is unaffected.
-
-### Steps
-
-1. In the Tailscale admin console, generate an auth key that is:
-   - **Ephemeral** — the node is removed automatically when the agent VM goes away,
-     instead of accumulating dead nodes on every run.
-   - **Pre-approved** — otherwise each new agent waits for manual device approval.
-   - **Tagged**, e.g. `tag:cursor-agent`, so ACLs target the tag rather than a device.
-2. Add it as the secret `TS_AUTHKEY`.
-3. Write an ACL granting that tag only what it needs — SSH to the two servers, nothing
-   else. Enable Tailscale SSH on the servers so no private key has to be distributed to
-   the agent VM. Do not put an SSH private key in a Cursor secret if this can be avoided;
-   Tailscale SSH authenticates the node's tailnet identity instead.
-
-Note that auth keys expire (90 days maximum). When one does, the start log reports
-`WARN tailscale up failed` and the agent falls back to SSM rather than losing all access.
-
-### Verify
+Telemetry is unaffected — metrics, logs, and describes all keep working, because they
+never touch the box. To restore the shell, connect over Tailscale or with the `.pem` key
+and check the agent:
 
 ```bash
-tailscale status              # agent node present, tagged
-ssh <user>@<server-tailnet-name> 'hostname -f'
+systemctl status amazon-ssm-agent
+sudo systemctl restart amazon-ssm-agent
 ```
 
-## Recommendation
+The usual causes are the service being stopped, the instance losing its instance profile,
+or egress to the `ssm`, `ssmmessages`, and `ec2messages` endpoints being blocked.
 
-Set up **AWS** and **HCP Terraform** first: together they cover metrics, logs, data,
-plans, and shell, with no changes on the servers. Add Tailscale only if you want SSH for
-its own sake.
+## Choosing how much to grant
 
-If you want the smallest useful grant, start with `cursor_agent_shell_access = false`.
-That gives full read-only visibility — enough to investigate almost everything in
-`aws/docs/` — while keeping interactive access to the production web server a
-human-in-the-loop action.
+`cursor_agent_shell_access = true` (the default in the PR that added this) gives full
+visibility plus shell. `false` gives read-only telemetry — enough to investigate almost
+everything documented under `aws/docs/` — while keeping interactive access to the
+production web server a human-in-the-loop action.
+
+Worth knowing when deciding: the shell is root-equivalent, and it is the only part of
+this setup that can change the running system. Everything else is constrained by IAM to
+reads.

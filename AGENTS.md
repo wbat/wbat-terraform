@@ -16,9 +16,10 @@ This repo is **Terraform Infrastructure as Code** (no runnable app). Real applie
 
 ### Visibility into the running system (optional, credential-gated)
 The offline loop above never needs credentials. Seeing the live system does, and that access is opt-in per environment — so check what you actually have before planning work that depends on it.
-- `.cursor/start.sh` runs at boot and logs which of AWS, HCP Terraform, and Tailscale are usable. Read `/tmp/cursor/start-user/start-user.log` first rather than discovering a missing credential mid-investigation.
+- `.cursor/start.sh` runs at boot and logs whether AWS and HCP Terraform credentials are usable, and whether the SSM agent is reporting. Read `/tmp/cursor/start-user/start-user.log` first rather than discovering a missing credential mid-investigation.
 - When AWS is available it is **read-only by design** (`aws/global/iam/user-CursorAgent.tf`): no writes, and an explicit deny on `s3:GetObject`, `secretsmanager:GetSecretValue`, and `kms:Decrypt`. Do not try to route around that deny; it is the reason the credential is safe to hand out.
-- Shell access is `aws ssm start-session`, not SSH, and may be switched off (`cursor_agent_shell_access`). It lands as `ssm-user` with sudo on a box serving ~91 production sites — treat it as production, and prefer read-only diagnosis.
+- Shell access is `aws ssm start-session`, **not SSH**, and may be switched off (`cursor_agent_shell_access`). It lands as `ssm-user` with sudo on a box serving ~91 production sites — treat it as production, and prefer read-only diagnosis.
+- Do not try to reach the servers over SSH. Both are on a tailnet and accept a `.pem` key, but neither credential is given to agents on purpose (Session Manager needs no key material). If SSM reports offline, that is a human-fallback situation, not something to work around.
 - Setup, verification commands, and revocation are documented in [aws/docs/cloud-agent-access.md](aws/docs/cloud-agent-access.md).
 
 ### Gotchas

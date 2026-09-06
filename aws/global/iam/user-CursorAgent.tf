@@ -165,10 +165,12 @@ resource "aws_iam_user_policy" "cursor_agent_shell" {
     Version = "2012-10-17"
     Statement = [
       {
-        # Session Manager shell. No inbound port, no security-group change, no private
-        # key to distribute, and every session is attributable in CloudTrail -- which is
-        # why this is preferred over issuing an SSH key. The instance profile already
-        # carries AmazonSSMManagedInstanceCore, so nothing changes on the instances.
+        # Session Manager shell, and the only shell path an agent has. No inbound port,
+        # no security-group change, no private key to distribute, and every session is
+        # attributable in CloudTrail -- which is why this was chosen over both a .pem
+        # key and Tailscale SSH, even though the servers are on the tailnet. The
+        # instance profile already carries AmazonSSMManagedInstanceCore, so nothing
+        # changes on the instances themselves.
         Sid      = "StartSessionOnManagedServers"
         Effect   = "Allow"
         Action   = ["ssm:StartSession"]
@@ -180,16 +182,17 @@ resource "aws_iam_user_policy" "cursor_agent_shell" {
         }
       },
       {
-        # AWS-owned session documents, needed only when --document-name is passed:
-        # ssh-over-SSM and port forwarding (useful for reaching DirectAdmin's admin port
-        # without exposing it publicly). The default shell document needs no grant.
-        Sid    = "UseSessionDocuments"
-        Effect = "Allow"
-        Action = ["ssm:StartSession"]
-        Resource = [
-          "arn:aws:ssm:us-east-1::document/AWS-StartSSHSession",
-          "arn:aws:ssm:us-east-1::document/AWS-StartPortForwardingSession",
-        ]
+        # Port forwarding, for reaching a service bound to localhost on the box -- the
+        # DirectAdmin admin port, say -- without exposing it publicly.
+        #
+        # AWS-StartSSHSession is deliberately absent. It tunnels real SSH over SSM and
+        # therefore still needs a private key on the agent VM, which is the thing this
+        # design avoids; the default shell document (which needs no grant here) provides
+        # interactive access instead.
+        Sid      = "UsePortForwardingDocument"
+        Effect   = "Allow"
+        Action   = ["ssm:StartSession"]
+        Resource = "arn:aws:ssm:us-east-1::document/AWS-StartPortForwardingSession"
       },
       {
         # Own sessions only. Without the ${aws:username} scoping this could terminate
