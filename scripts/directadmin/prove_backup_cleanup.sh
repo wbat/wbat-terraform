@@ -50,7 +50,16 @@ case "$subcommand" in
     fi
     exit "${STUB_COPY_RC:-0}"
     ;;
-  check) exit "${STUB_CHECK_RC:-0}" ;;
+  check)
+    # Let a proof fail verification for one specific destination prefix, so "this old
+    # directory is in S3" and "this one never made it" can be exercised in a single run.
+    if [[ -n "${STUB_CHECK_FAIL_MATCH:-}" ]]; then
+      for arg in "$@"; do
+        [[ "$arg" == *"${STUB_CHECK_FAIL_MATCH}"* ]] && exit 1
+      done
+    fi
+    exit "${STUB_CHECK_RC:-0}"
+    ;;
   *) exit 0 ;;
 esac
 STUB
@@ -90,15 +99,24 @@ run_hook() {
 
   "$@" # case-specific fixture setup
 
+  # Pinning DA_BACKUP_SYSTEM_ROOT is what most proofs want, but the root-detection proof
+  # has to leave it empty so the hook chooses between candidates the way it does on a host.
+  local root_env=(DA_BACKUP_SYSTEM_ROOT="$SYSTEM_ROOT")
+  if [[ -n "${STUB_ROOT_CANDIDATES:-}" ]]; then
+    root_env=(DA_BACKUP_SYSTEM_ROOT="" DA_BACKUP_SYSTEM_ROOTS="$STUB_ROOT_CANDIDATES")
+  fi
+
   set +e
   env PATH="${SANDBOX}/bin:${PATH}" \
     STUB_CALLS="$STUB_CALLS" \
     STUB_MAIL="$STUB_MAIL" \
     STUB_COPY_RC="${STUB_COPY_RC:-0}" \
     STUB_CHECK_RC="${STUB_CHECK_RC:-0}" \
+    STUB_CHECK_FAIL_MATCH="${STUB_CHECK_FAIL_MATCH:-}" \
     STUB_COPY_CREATES="${STUB_COPY_CREATES:-}" \
     DA_BACKUP_ADMIN_DIR="$ADMIN_DIR" \
-    DA_BACKUP_SYSTEM_ROOT="$SYSTEM_ROOT" \
+    "${root_env[@]}" \
+    DA_BACKUP_SYSTEM_KEEP_DAYS="${DA_BACKUP_SYSTEM_KEEP_DAYS:-7}" \
     DA_BACKUP_LOG="$HOOK_LOG" \
     DA_BACKUP_LOCK="${case_dir}/lock/da-backup-s3.lock" \
     DA_BACKUP_CONF="${SANDBOX}/backup.conf" \
@@ -233,6 +251,62 @@ unset DA_BACKUP_ALERT_USED_PCT
 grep -qi 'disk still' "${SANDBOX}/case6/mail.out" \
   || fail "no alert mailed when the disk stayed full after a clean run"
 echo "OK a clean run on a full disk warns without failing the backup"
+
+##############################################################################
+echo "== Proof 7: the hook must clean the root DirectAdmin actually writes to =="
+##############################################################################
+# This is the defect that fired on the primary. SYSTEM_ROOT was hardcoded to /home/backup,
+# which exists and is empty, while DirectAdmin wrote weekly archives to /backup. Every run
+# logged "cleaned local system backup dirs under /home/backup" and freed nothing; nine
+# weeks and 59 GB accumulated behind a log that read as healthy. Note this is invisible to
+# proof 2: pin the root and the hook looks perfect.
+CASE7="${SANDBOX}/case7"
+TODAY="$(date +%m-%d-%y)"
+fixture_7() {
+  # First candidate empty (like /home/backup), second holds the real backups (like /backup).
+  mkdir -p "${CASE7}/sysbackup/${TODAY}/mysql"
+  dd if=/dev/zero of="${CASE7}/sysbackup/${TODAY}/mysql/db.sql.gz" bs=1k count=64 status=none
+}
+STUB_ROOT_CANDIDATES="${CASE7}/backup ${CASE7}/sysbackup" run_hook case7 fixture_7
+unset STUB_ROOT_CANDIDATES
+
+((HOOK_RC == 0)) || fail "hook failed on a healthy run against a detected root (rc=${HOOK_RC})"
+grep -q "sysbackup/${TODAY}" "${CASE7}/rclone.calls" \
+  || fail "hook never uploaded from the populated root -- it is still assuming a hardcoded path"
+[[ ! -d "${CASE7}/sysbackup/${TODAY}" ]] \
+  || fail "backup left on disk: the hook picked a root it was not writing to (the primary's bug)"
+echo "OK the populated backup root is detected, uploaded, and cleaned"
+
+##############################################################################
+echo "== Proof 8: the age sweep must never delete a backup that is not in S3 =="
+##############################################################################
+# Fixing proof 7 is what makes this dangerous. Point a working -mtime sweep at the root
+# that really holds the backups and its first run deletes eight weekly archives, none of
+# which was ever uploaded -- 52 GB of the only copy, destroyed by the fix. Age means old,
+# not safe. Here 07-04-26 is missing from S3 and must survive; 07-11-26 is present and
+# should go.
+CASE8="${SANDBOX}/case8"
+fixture_8() {
+  local d
+  for d in 07-04-26 07-11-26; do
+    mkdir -p "${SYSTEM_ROOT}/${d}/mysql"
+    dd if=/dev/zero of="${SYSTEM_ROOT}/${d}/mysql/db.sql.gz" bs=1k count=64 status=none
+    touch -t 202601010000 "${SYSTEM_ROOT}/${d}"
+  done
+  make_system_dir "$TODAY" # today's backup still uploads and cleans normally
+}
+STUB_CHECK_FAIL_MATCH="2026-07-04" DA_BACKUP_SYSTEM_KEEP_DAYS=7 run_hook case8 fixture_8
+unset STUB_CHECK_FAIL_MATCH DA_BACKUP_SYSTEM_KEEP_DAYS
+
+[[ -d "${CASE8}/backup/07-04-26" ]] \
+  || fail "swept a backup that is not in S3 -- this is the 52 GB data-loss case"
+[[ ! -d "${CASE8}/backup/07-11-26" ]] \
+  || fail "kept a backup that S3 confirmed, so the sweep no longer reclaims anything"
+[[ ! -d "${CASE8}/backup/${TODAY}" ]] || fail "today's verified backup was left on disk"
+grep -qi 'local-only system backups' "${CASE8}/mail.out" \
+  || fail "no alert for a local-only backup the sweep had to keep"
+((HOOK_RC == 0)) || fail "keeping an unverified directory must not fail the run (rc=${HOOK_RC})"
+echo "OK the sweep deletes only what S3 confirms, and reports what it kept"
 
 echo
 echo "PASS: offline backup cleanup proofs"

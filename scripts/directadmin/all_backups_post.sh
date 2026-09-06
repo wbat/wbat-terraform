@@ -4,10 +4,9 @@
 # Install: /usr/local/directadmin/scripts/custom/all_backups_post.sh
 # system_backup_post.sh execs this file, so system backups run the same path.
 #
-# This hook is the only thing that stops /home/admin_backups and /home/backup growing
-# without bound on a 200 GB root volume. It had three ways to skip that cleanup while
-# still looking healthy in the log, which is how the primary reached 99% and fell over
-# (see aws/docs/disk-full-backup-incident.md):
+# This hook is the only thing that stops the local backup directories growing without
+# bound on a 200 GB root volume. It had four ways to skip that cleanup while still
+# logging success (see aws/docs/disk-full-backup-incident.md):
 #
 #   1. `set -e` aborted the run as soon as an rclone upload returned non-zero, and both
 #      cleanup steps came after both uploads. One transient S3 error left every local
@@ -16,11 +15,17 @@
 #      had resolved. Whenever the two disagreed -- hook firing after midnight, or upload
 #      falling back to the newest directory because today's did not exist -- cleanup
 #      deleted nothing, logged "cleaned local system backup dirs", and exited 0.
-#   3. Nothing alerted, so either outcome was invisible until the disk was full.
+#   3. SYSTEM_ROOT was hardcoded to a path that holds nothing on the host that matters.
+#      This is the one that actually fired on the primary, and it is indistinguishable
+#      from (2) in the log: both print a cleanup line after deleting nothing.
+#   4. Nothing alerted, so any of the above was invisible until the disk was full.
 #
 # The rules now: resolve every path once, confirm the objects are in S3 before deleting
 # the local copy, run each cleanup independently of the other upload's outcome, and mail
 # HEALTH_ALERT_TO whenever a run ends with backups still on disk.
+#
+# Deleting a backup is irreversible, so nothing here removes a local file it has not just
+# confirmed in S3 -- including the age-based sweep, where "old" is not evidence of "safe".
 #
 # Paths are overridable by environment variable so prove_backup_cleanup.sh can exercise
 # this without root, S3, or DirectAdmin.
@@ -31,7 +36,13 @@ set -uo pipefail
 # below captures its own exit status instead.
 
 ADMIN_DIR="${DA_BACKUP_ADMIN_DIR:-/home/admin_backups}"
-SYSTEM_ROOT="${DA_BACKUP_SYSTEM_ROOT:-/home/backup}"
+# DirectAdmin does not put system backups in the same place on every build: the primary
+# writes them to /backup, while the hook installed there had /home/backup hardcoded. That
+# directory exists and is empty, so for two months the hook logged "cleaned local system
+# backup dirs under /home/backup" after doing nothing at all, while /backup grew to 59 GB
+# of weekly archives. A hardcoded root fails silently and looks healthy; detect it.
+SYSTEM_ROOT="${DA_BACKUP_SYSTEM_ROOT:-}"
+SYSTEM_ROOT_CANDIDATES="${DA_BACKUP_SYSTEM_ROOTS:-/backup /home/backup}"
 BUCKET="${DA_BACKUP_BUCKET:-wbat-tellerstech-directadmin-backups-708113892725}"
 REMOTE="${DA_BACKUP_REMOTE:-s3backup}"
 LOG="${DA_BACKUP_LOG:-/var/log/da-backup-s3.log}"
@@ -135,6 +146,50 @@ disk_used_pct() {
 size_of() {
   du -sh "$1" 2>/dev/null | cut -f1
 }
+
+# Dated DirectAdmin backup directories are MM-DD-YY.
+dated_dir_count() {
+  local d n=0
+  for d in "$1"/*; do
+    [[ -d "$d" ]] || continue
+    [[ "$(basename "$d")" =~ ^[0-9]{2}-[0-9]{2}-[0-9]{2}$ ]] && n=$((n + 1))
+  done
+  printf '%d' "$n"
+}
+
+# Pick the root DirectAdmin is really writing to, preferring whichever candidate holds
+# dated backup directories. An explicit DA_BACKUP_SYSTEM_ROOT always wins so a host with
+# a non-standard layout, and the offline proof, can pin it.
+resolve_system_root() {
+  if [[ -n "$SYSTEM_ROOT" ]]; then
+    return 0
+  fi
+
+  local candidate best="" best_count=0 populated=()
+  for candidate in $SYSTEM_ROOT_CANDIDATES; do
+    [[ -d "$candidate" ]] || continue
+    [[ -n "$best" ]] || best="$candidate"
+    local count
+    count="$(dated_dir_count "$candidate")"
+    if ((count > 0)); then
+      populated+=("${candidate} (${count} dated dir(s))")
+      if ((count > best_count)); then
+        best="$candidate"
+        best_count="$count"
+      fi
+    fi
+  done
+
+  SYSTEM_ROOT="${best:-/home/backup}"
+
+  # Two populated roots means backups are being written to a path this run will not
+  # clean. Say so rather than quietly picking one and leaving the other to fill the disk.
+  if ((${#populated[@]} > 1)); then
+    log "WARN system backups found under more than one root: ${populated[*]}; this run only handles ${SYSTEM_ROOT}"
+  fi
+}
+
+resolve_system_root
 
 # Only one run at a time. The admin and system hooks are separate DirectAdmin events
 # that can overlap, and two concurrent runs would race: one deletes the files the other
@@ -285,15 +340,47 @@ cleanup_system_local() {
   fi
 }
 
+# Where a backup taken on MM-DD-YY would have been uploaded: the hook names the prefix
+# for the day it runs, which is the day the backup was taken.
+s3_prefix_for_stamp() {
+  local stamp="$1"
+  [[ "$stamp" =~ ^([0-9]{2})-([0-9]{2})-([0-9]{2})$ ]] || return 1
+  printf '%s:%s/%s/20%s-%s-%s/' \
+    "$REMOTE" "$BUCKET" "$HOST" "${BASH_REMATCH[3]}" "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+}
+
+unverified_dirs=()
+
+# Backstop for directories an earlier run uploaded but failed to remove.
+#
+# The obvious implementation -- find -mtime +N -exec rm -rf -- is the one that would have
+# destroyed 52 GB of the primary's only copies. Nine weekly archives had accumulated
+# under /backup because the hook was cleaning the wrong root, and not one of them had
+# ever reached S3; an age sweep pointed at the corrected root would have deleted eight of
+# them on its first run. Age says a backup is old, not that it is safe to delete. Ask S3.
 sweep_old_system_dirs() {
   [[ -d "$SYSTEM_ROOT" ]] || return 0
 
-  local d
+  local d stamp prefix rc
   while IFS= read -r d; do
     [[ -n "$d" ]] || continue
-    # Reaching this sweep means some earlier run uploaded a backup and failed to remove
-    # it, so say that rather than logging a silent delete.
-    log "WARN sweeping system backup dir older than ${SYSTEM_KEEP_DAYS}d: ${d} ($(size_of "$d")) -- an earlier run should already have removed it"
+    stamp="$(basename "$d")"
+
+    if ! prefix="$(s3_prefix_for_stamp "$stamp")"; then
+      log "WARN keeping ${d} ($(size_of "$d")): name is not an MM-DD-YY stamp, so there is no prefix to verify it against"
+      unverified_dirs+=("${d} ($(size_of "$d")) -- unrecognised name")
+      continue
+    fi
+
+    rc=0
+    rclone check "$d" "$prefix" "${CHECK_OPTS[@]}" || rc=$?
+    if ((rc != 0)); then
+      log "WARN keeping ${d} ($(size_of "$d")): not present in ${prefix} (rclone check rc=${rc}). This is a local-only backup, not stale cleanup."
+      unverified_dirs+=("${d} ($(size_of "$d")) -- not in ${prefix}")
+      continue
+    fi
+
+    log "sweeping ${d} ($(size_of "$d")): older than ${SYSTEM_KEEP_DAYS}d and confirmed in ${prefix}"
     rm -rf -- "$d"
   done < <(find "$SYSTEM_ROOT" -mindepth 1 -maxdepth 1 -type d -mtime "+${SYSTEM_KEEP_DAYS}" ! -path "${system_dir:-/nonexistent}" 2>/dev/null)
 }
@@ -336,6 +423,23 @@ $(tail -20 "$LOG" 2>/dev/null | sed 's/^/  /')
 Runbook: aws/docs/disk-full-backup-incident.md
 Retry by hand: /usr/local/directadmin/scripts/custom/all_backups_post.sh"
   exit 1
+fi
+
+if ((${#unverified_dirs[@]} > 0)); then
+  # These are old enough to sweep but are not in S3, so they are the only copy. Deleting
+  # them is a data-loss decision and belongs to a human, not to a -mtime predicate.
+  log "WARN ${#unverified_dirs[@]} old system backup dir(s) kept because they are not in S3"
+  alert "Local-only system backups on ${HOST} (disk ${used_pct}% used)" \
+    "These system backup directories are older than ${SYSTEM_KEEP_DAYS} days but are NOT in S3, so they were kept. They are consuming disk as the only copy of that data:
+
+$(printf '  - %s\n' "${unverified_dirs[@]}")
+
+Either upload them:
+  rclone copy <dir> ${REMOTE}:${BUCKET}/${HOST}/<YYYY-MM-DD>/ --s3-no-check-bucket --checksum
+or decide they are not worth keeping and remove them by hand.
+
+Disk: $(disk_summary "$SYSTEM_ROOT")
+Runbook: aws/docs/disk-full-backup-incident.md"
 fi
 
 if ((used_pct >= ALERT_USED_PCT)); then
