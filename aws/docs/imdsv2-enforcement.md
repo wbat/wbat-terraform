@@ -36,8 +36,11 @@ On the primary, something still is: **Installatron's auto-updater**.
 33 1,7,13,19 * * * root /usr/local/installatron/lib/cron.updater.sh
 ```
 
-which runs `/usr/local/installatron/repair -f`. The box is on `America/New_York`, so those
-local hours land at 05:33, 11:33, 17:33, and 23:33 UTC.
+which runs `/usr/local/installatron/repair -f`. The box is on `America/New_York`, so under
+EDT those local hours land at 05:33, 11:33, 17:33, and 23:33 UTC — an hour later in UTC once
+EST starts, since the crontab is local and does not move. Every UTC time below is the EDT
+mapping; there is a conversion table under
+[Identifying a v1 caller](#identifying-a-v1-caller).
 
 What was measured over the 7 days to 2026-09-06, from `MetadataNoToken` on the primary:
 **27 non-zero 5-minute buckets, 192 requests, and every one of the other 1,989 buckets
@@ -151,10 +154,24 @@ buckets across 14 days (4,032) fails outright; 3 days (864) is fine.
 ## Identifying a v1 caller
 
 If a *new* one appears, do not run the capture blind. Start it just before a burst you have
-already located with `--period 300`, and attribute the connection to a process:
+already located with `--period 300`, and attribute the connection to a process.
+
+**Time the capture in the box's local time, not UTC.** Cron schedules are local, so the UTC
+instant moves with daylight saving while the crontab does not. The Installatron job is
+`33 1,7,13,19` in `America/New_York`, which means:
+
+| Local (always) | UTC in summer (EDT) | UTC in winter (EST) |
+| --- | --- | --- |
+| 01:33, 07:33, 13:33, 19:33 | 05:33, 11:33, 17:33, 23:33 | 06:33, 12:33, 18:33, 00:33 |
+
+The measurements quoted in this document were taken in September, so they are the EDT column.
+Following them in January would miss every burst by an hour. Since you run the capture *on
+the box*, `date` there is already local — use that and avoid the conversion entirely.
 
 ```bash
-# Run a minute before a known burst; 05:33 or 23:33 UTC for the Installatron job
+# Confirm where you are in the schedule first; want a minute or two before :33
+date; date -u
+
 timeout 300 tcpdump -nn -A -s0 'dst 169.254.169.254 and tcp port 80' > /tmp/imds.txt &
 timeout 300 bash -c 'while :; do ss -Htnp dst 169.254.169.254 >> /tmp/imds-pids.txt; sleep 0.2; done'
 ```
