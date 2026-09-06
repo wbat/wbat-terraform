@@ -238,19 +238,54 @@ Config only. No databases. It reports success and exits clean, and a 55 KB file 
 to misread as a backup truncated by a full disk. Who changed the crontab, and when, is
 **not established** — there is no audit record and nothing in root's shell history.
 
-### 3. Memory headroom on the primary
+### 3. Memory headroom on the primary — and why more swap is the wrong lever
 
-The box is a `t3a.medium`: 2 vCPU, 3.8 GB RAM, 4 GB swap. The nightly job wants more than
-that. Options, roughly in order of how quickly they can be done:
+The box is a `t3a.medium`: 2 vCPU, 3.8 GB RAM, plus a 4 GB `/swapfile`.
 
-- Bound the pipeline's `since=all` load, or chunk it. This is the actual defect; the
-  other options work around it.
-- Give the job a memory ceiling so it dies alone instead of taking the host with it —
-  `systemd-run --scope -p MemoryMax=1G`, or a `ulimit -v` in the cron line.
-- More swap buys thrash, not survival. Sep 3 hit 96.7% swap and lived; the failure mode
-  is a box that is alive but does no work, which is indistinguishable from down.
-- Resize to a `t3a.large` (8 GB). Real money, and it raises the ceiling without removing
-  the unbounded query underneath it.
+**The swap that was added earlier is why this presented as a five-hour outage instead of
+a failed cron job.** That is not an argument against having swap, but it is an argument
+against treating it as the fix. Swap raises the ceiling; it does nothing about demand,
+and the demand here is unbounded. `%commit` reached **117.89%** — the kernel had promised
+9.6 GB against 7.8 GB of RAM and swap combined — so the ceiling was already gone. What
+swap bought was somewhere for the kernel to page to, which is what let a doomed process
+keep the host busy for five hours instead of dying in seconds. A box that is alive and
+doing no work is worse to operate than one that killed a cron job, because nothing can
+run on it, including whatever would have told you.
+
+Two facts say the current 4 GB is already spent: swap peaked at 80–97% on **every** night
+of the preceding week, and the `since=all` load appears in all 90 logged runs, against a
+database that grows. Another 4 GB buys a few more nights of the same graph.
+
+In order of leverage:
+
+1. **Bound the query.** `Dedupe: loading raw items (since=all)` reads a full table out of
+   a 472 MB SQLite file into Python objects, which inflates several times over in memory.
+   Chunking it, or doing the dedupe in SQL, is the actual defect. It lives in
+   `/home/tellerstec/public_html/wp-content/plugins/tellerstech-landing/oncallbrief-pipeline`,
+   not in this repository.
+2. **Cap the job so it dies alone.** This is the availability fix and it is independent
+   of (1) — it converts "host unreachable for five hours" into "one cron job failed".
+   Edit `crontab -u tellerstec -e` and wrap the command:
+
+   ```bash
+   45 3 * * * systemd-run --scope --quiet -p MemoryMax=1200M -p MemorySwapMax=0 \
+     bash -lc 'cd /home/tellerstec/public_html/wp-content/plugins/tellerstech-landing && \
+     RUN_ALL_HEALTHCHECK_URL=https://hc-ping.com/24677487-c62d-47e0-b329-8c66abf5fadc \
+     python3 oncallbrief-pipeline/run_all.py' >> /home/tellerstec/logs/oncallbrief.log 2>&1
+   ```
+
+   `MemorySwapMax=0` is the important half: without it the job is capped on RAM and still
+   free to thrash swap. The healthcheck ping doubles as the alert — a killed run stops
+   pinging, so it shows up as a missed check rather than needing new monitoring. Verify
+   the cap took effect by watching one run with
+   `systemd-cgtop` or checking for `memory.max` under the scope's cgroup.
+3. **Alert on the trend.** [`da_disk_guard.sh`](../../scripts/directadmin/da_disk_guard.sh)
+   now reads the day's peak `%swpused` out of `sar` as well as the current values, which
+   is the check that would have flagged this a week early. Defaults warn at 60% swap and
+   95% commit.
+4. **Resize to a `t3a.large`** (8 GB). Real money, and it raises the ceiling without
+   removing the unbounded query underneath it — worth doing only if (1) turns out to be
+   impractical.
 
 ### 4. The disk, on its own schedule
 
@@ -294,6 +329,122 @@ verified against S3.
 deletes eight weekly archives — 52 GB for which no S3 object exists. The sweep now
 verifies each directory against the prefix it would have been uploaded to, keeps whatever
 it cannot confirm, and mails about it. Proof 8 covers it.
+
+## DirectAdmin remediation — what to run, and what needs the panel
+
+Read this first: **the newest database backup that exists anywhere is
+`/backup/08-29-26/mysql`, and it is on the same disk as the database it protects.**
+Admin backups carry the databases (`database_data_aware=yes`) and have been failing since
+July; the weekly system backup carried them too until the Sep 5 run dropped them. So
+there is currently no off-host copy of any database newer than 2026-07-02. Getting that
+Aug 29 tree into S3 is the highest-value single action on this list, and it needs nothing
+from DirectAdmin:
+
+```bash
+rclone copy /backup/08-29-26 \
+  s3backup:wbat-tellerstech-directadmin-backups-708113892725/server/2026-08-29/ \
+  --s3-no-check-bucket --checksum --transfers 4
+rclone check /backup/08-29-26 \
+  s3backup:wbat-tellerstech-directadmin-backups-708113892725/server/2026-08-29/ \
+  --s3-no-check-bucket --checksum --one-way && echo VERIFIED
+```
+
+### 1. Take a backup now, bypassing the broken schedule (CLI)
+
+DirectAdmin can run a full admin backup in the foreground, without the task queue that
+the scheduled job goes through:
+
+```bash
+/usr/local/directadmin/directadmin admin-backup --destination=/home/admin_backups
+```
+
+This is also the cleanest diagnostic split available:
+
+- **It succeeds** → the backup engine is fine and the fault is in the stored job or the
+  task queue. Continue at step 2.
+- **It fails the same way** → the fault is in DirectAdmin itself, and step 2's debug
+  output is what to send to DA support.
+
+Single users, if a full run is too large to sit through:
+
+```bash
+/usr/local/directadmin/directadmin admin-backup --destination=/home/admin_backups --user=teller
+```
+
+### 2. Find out what `Not implemented` refers to (CLI)
+
+Re-queue the failing job by hand and run the task queue at debug level. `d2000` is the
+most verbose of the documented levels (`d80`, `d400`, `d800`, `d2000`):
+
+```bash
+echo 'action=backup&id=1' >> /usr/local/directadmin/data/task.queue.da
+/usr/local/directadmin/dataskq d2000
+```
+
+The 66 ms failure means the task was accepted and rejected internally, so the debug
+output should name the unsupported part. Also worth reading:
+
+```bash
+tail -100 /var/log/directadmin/errortaskq.log
+cat /usr/local/directadmin/data/admin/backup_crons.list     # the stored job, id=1
+grep -nE 'taskqueue|backup' /usr/local/directadmin/conf/directadmin.conf
+```
+
+Two known causes of task-queue failures worth ruling out while you are in there: a
+`taskqueueda=` override in `directadmin.conf` with a stray carriage return (DA 1.650+
+stopped tolerating it), and a `directadmin.conf` edited on Windows so every value has
+`\r` appended.
+
+### 3. Recreate the backup schedule — this one needs the panel
+
+There is no documented CLI command to *create or edit a scheduled* backup. The task queue
+accepts `action=backup` for a one-off run, and `admin-backup` runs one immediately, but
+the cron entry itself is written by the GUI wizard. So if step 2 shows the stored job is
+malformed, recreate it at **Admin Level → Admin Backup/Transfer → Schedule**:
+
+- **Who:** All Users
+- **When:** Cron Schedule, minute `0`, hour `5`, day of month `*`, month `*`, day of week `*`
+- **Where:** Local, path `/home/admin_backups` — must match `local_path` in the hook
+- **What:** All data
+
+Then delete the old job so both are not queued. The scriptable equivalent, if you would
+rather not use the browser, is `CMD_API_ADMIN_BACKUP` with `action=create`; DirectAdmin
+does not document its full parameter list and suggests running DA in debug mode to
+capture what the GUI sends, so the panel is genuinely the lower-risk path here.
+
+After it runs, confirm the whole chain rather than just the panel's success message:
+
+```bash
+ls -la /home/admin_backups/                    # did files appear?
+tail -40 /var/log/da-backup-s3.log             # did the hook fire and upload?
+aws s3 ls s3://wbat-tellerstech-directadmin-backups-708113892725/server/ | tail -5
+```
+
+### 4. Restore databases to the weekly system backup (CLI)
+
+The Sep 5 run archived four config paths and no databases. Compare the two scripts and
+put the databases back:
+
+```bash
+crontab -l | grep sysbk
+ls -la /usr/local/sysbk/sysbk /usr/local/directadmin/shared/sysbk.sh
+diff <(cat /usr/local/sysbk/sysbk 2>/dev/null) /usr/local/directadmin/shared/sysbk.sh
+cat /var/log/directadmin/sysbk.status.log
+```
+
+If the old script is still present and worked, reverting root's crontab to it is the
+smallest change. Verify by size, not by exit status — a correct run is gigabytes and
+takes about twenty minutes, and the broken one exits clean in under a second:
+
+```bash
+/usr/local/directadmin/shared/sysbk.sh -q; echo "rc=$?"
+du -sh /backup/"$(date +%m-%d-%y)"            # config-only is ~55 KB; with databases, GB
+ls /backup/"$(date +%m-%d-%y)"/               # expect a mysql/ directory
+```
+
+Note that step 3 makes this partly redundant: admin backups include databases, so once
+they work again the system backup matters mainly for server configuration. Both are worth
+having, but fix the admin backup first.
 
 ## Recovering space safely
 
@@ -355,11 +506,18 @@ files at all.
   captured and journald is volatile here; enabling a persistent journal
   (`mkdir -p /var/log/journal && systemctl restart systemd-journald`) would make the next
   occurrence answerable.
-- **No disk or memory alarm exists.** The only CloudWatch alarms in this account are the
+- **No CloudWatch disk or memory alarm exists.** The only alarms in this account are the
   two billing alarms in [`billing-alarms.tf`](../global/cloudwatch/billing-alarms.tf).
-  [`da_disk_guard.sh`](../../scripts/directadmin/da_disk_guard.sh) added here is hourly
-  cron on the host, which is exactly what a thrashing box cannot run — a real alarm needs
-  the CloudWatch agent publishing `disk_used_percent` and `mem_used_percent`.
+  [`da_disk_guard.sh`](../../scripts/directadmin/da_disk_guard.sh) added here covers disk,
+  inodes, and memory, but it is hourly cron on the host — exactly what a thrashing box
+  cannot run. It reads `sar` history specifically so it can report a spike it slept
+  through, but that is after the fact. An alarm that can page during the event needs the
+  CloudWatch agent publishing `disk_used_percent` and `mem_used_percent`, plus
+  `aws_cloudwatch_metric_alarm` resources beside the billing alarms.
+- **`StatusCheckFailed_Instance` is already published and unalarmed.** It went to 1 for
+  four and a half hours during this outage with no notification. That is a metric EC2
+  emits for free, needs no agent, and would have caught this — the cheapest available
+  improvement, and it belongs in Terraform.
 - **Restore has never been rehearsed**, and the bucket's newest primary backup is from
   2026-07-02. Whatever is restorable today is over two months stale.
 - **`/usr/local/sbin/migrate-backups-to-s3.sh` and `verify-backups-s3.sh`** exist on the

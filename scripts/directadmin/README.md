@@ -264,10 +264,24 @@ Alerting: a run that ends with backups still on disk mails `HEALTH_ALERT_TO` fro
 there is one per host rather than two that can disagree. There is no cooldown: backups run
 days apart, so every failed run gets its own mail.
 
-`da_disk_guard.sh` is the separate hourly watch for the volume itself. Nothing else in the
-account monitors disk (the only CloudWatch alarms are on billing, and the CloudWatch agent
-is not installed), so without it a filling volume is invisible until services start failing
-writes. It checks space **and** inodes, and rate-limits its alerts to one per 6h.
+`da_disk_guard.sh` is the separate hourly watch for the host's resources. Nothing else in
+the account monitors disk or memory (the only CloudWatch alarms are on billing, and the
+CloudWatch agent is not installed), so without it a filling volume or a nightly memory
+spike is invisible until services fail. It checks space, **inodes**, and **memory**, and
+rate-limits its alerts to one per 6h.
+
+Memory needs the extra trick: the 2026-09-06 outage developed and ended inside a
+ten-minute window, and a thrashing host cannot run cron at all. So the guard reads the
+day's peak `%swpused` back out of `sar` as well as sampling `/proc/meminfo`, letting it
+report a spike it slept through. It watches `Committed_AS` rather than just used memory,
+because commit hit 118% of RAM+swap while `%memused` still read a survivable 82%.
+
+| Threshold | Default | Override |
+|---|---|---|
+| Disk warning / critical | 85% / 92% | `DA_DISK_GUARD_WARN_PCT`, `DA_DISK_GUARD_CRIT_PCT` |
+| Inodes | 85% | `DA_DISK_GUARD_INODE_PCT` |
+| Swap (current or today's peak) | 60% | `DA_DISK_GUARD_SWAP_PCT` |
+| Committed memory vs RAM+swap | 95% | `DA_DISK_GUARD_COMMIT_PCT` |
 
 | File | Install path |
 |------|----------------|
