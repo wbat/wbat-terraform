@@ -29,7 +29,12 @@ resource "aws_launch_template" "primary" {
   }
 
   credit_specification {
-    cpu_credits = "standard"
+    # Must match the running instance's "unlimited". The instance sets it deliberately so
+    # the WordPress server can burst without throttling; leaving "standard" here meant a
+    # DR rebuild would silently come up throttle-prone under exactly the load that
+    # follows a recovery. The secondary keeps "standard" on both sides, which is correct
+    # for a DNS-only box.
+    cpu_credits = "unlimited"
   }
 
   hibernation_options {
@@ -42,6 +47,15 @@ resource "aws_launch_template" "primary" {
 
   maintenance_options {
     auto_recovery = "default"
+  }
+
+  # Match the instance so a DR rebuild does not come up with IMDSv1 enabled. A launch
+  # template that omits this silently reintroduces the weakness at exactly the moment
+  # nobody is checking.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
   }
 
   monitoring {
