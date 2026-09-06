@@ -5,8 +5,9 @@
 This repo is **Terraform Infrastructure as Code** (no runnable app). Real applies happen in **HCP Terraform**, not locally. There are three independent workspaces: `aws/`, `github/`, `tfc/`. All modules are local paths (no git/SSH module sources), so init/validate work offline without any secrets.
 
 ### Toolchain
-- Terraform is pinned to the version in `.terraform-version` (currently `1.15.7`). The startup update script installs it to `/usr/local/bin/terraform`.
+- Terraform is pinned to the version in `.terraform-version` (currently `1.15.7`). `.cursor/install.sh` installs that exact version to `/usr/local/bin/terraform`, verified against HashiCorp's published `SHA256SUMS`. Do not assume the base image provides it: a fresh Cloud Agent was observed booting with no `terraform` on PATH at all, which is why the install script owns it.
 - `python3` + `PyYAML` are already present in the base image (used only by optional `scripts/`).
+- The AWS CLI and the Session Manager plugin also come from `.cursor/install.sh`. `shellcheck` does **not**; install it with apt if you need to reproduce the CI lint locally.
 
 ### Lint / validate / "build" (the core dev loop)
 - Lint (from repo root): `terraform fmt -recursive -check`
