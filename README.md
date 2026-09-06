@@ -73,6 +73,7 @@ Brownfield resources are imported via blocks in [`aws/imports.tf`](aws/imports.t
 | Document | Description |
 |----------|-------------|
 | [CloudFront 502 troubleshooting](aws/docs/cloudfront-tellerstech-502-troubleshooting.md) | Origin connectivity and CloudFront error diagnosis |
+| [Root disk full / backup cleanup](aws/docs/disk-full-backup-incident.md) | 2026-09-06 outage: why the backup hook stopped freeing disk, and how to recover |
 | [Nginx catch-all vhost regression](aws/docs/nginx-vhost-catchall-regression.md) | Other hosted domains serving the default page / wrong SSL cert |
 | [DA vhost listen change window](aws/docs/da-vhost-listen-change-window.md) | Linked IP fix, reconciler install, rollback |
 | [DirectAdmin scripts](scripts/directadmin/README.md) | SES forwarder + vhost-listen reconciler install tables |

@@ -145,7 +145,9 @@ sudo ./scripts/directadmin/install_da_vhost_listen.sh --install
 
 `--verify` compares each installed file against the repo by SHA-256 and reports `ok`,
 `STALE`, or `MISSING`, exiting non-zero on any drift — so "did this merge actually reach
-production?" has a definite answer. `--install` is idempotent and **never overwrites**
+production?" has a definite answer. Its managed list covers **all** the DA tooling, not
+just the reconciler: the S3 backup hooks, the disk guard, its cron entry, and the
+logrotate config are included, so the weekly check below watches them too. `--install` is idempotent and **never overwrites**
 `/etc/da-vhost-listen/vhost-listen.conf`, because that file holds host-specific values
 (`EXPECTED_PUBLIC_IP`, `HEALTH_ALERT_TO`); it is only created from the example when
 absent. The runtime conf is therefore presence-checked, not content-compared.
@@ -232,23 +234,56 @@ Offline detector proof (from a laptop checkout, no box access needed):
 
 ---
 
-Install on **both** DirectAdmin servers (`server` and `server2`) under `/usr/local/directadmin/scripts/custom/`.
+## Backups to S3 (and the disk guard)
+
+Install on **both** DirectAdmin servers (`server` and `server2`).
 
 | File | DirectAdmin event |
 |------|-------------------|
-| `all_backups_post.sh` | After **Admin Backup** (`.tar.zst` or `.tar.gz` under `/home/admin_backups`) |
+| `all_backups_post.sh` | After **Admin Backup** (archives + staging dirs under `/home/admin_backups`) |
 | `system_backup_post.sh` | After **System Backup** (`apache/`, `bind/`, `custom/`, `mysql/` under `/home/backup/MM-DD-YY/`) |
 
-Both upload to `s3://wbat-tellerstech-directadmin-backups-<account>/<hostname>/YYYY-MM-DD/` (e.g. `server/` or `server2/`) via rclone remote `s3backup`, then **delete local copies** after a successful upload.
+Both upload to `s3://wbat-tellerstech-directadmin-backups-<account>/<hostname>/YYYY-MM-DD/` (e.g. `server/` or `server2/`) via rclone remote `s3backup`, then **delete the local copies that `rclone check` confirmed are in S3**.
+
+This hook is the only thing keeping backups off a 200 GB root volume, so it is written to
+fail safe in both directions: it never deletes a local copy it has not verified in S3, and
+it never leaves a verified copy on disk. On 2026-09-06 it managed to do both wrong at once
+and the primary ran out of disk — see
+[`aws/docs/disk-full-backup-incident.md`](../../aws/docs/disk-full-backup-incident.md) for
+what broke, and `prove_backup_cleanup.sh` for the six behaviours that are now pinned.
+
+Alerting: a run that ends with backups still on disk mails `HEALTH_ALERT_TO` from
+`/etc/da-vhost-listen/vhost-listen.conf` — the same address the vhost tooling uses, so
+there is one per host rather than two that can disagree. There is no cooldown: backups run
+days apart, so every failed run gets its own mail.
+
+`da_disk_guard.sh` is the separate hourly watch for the volume itself. Nothing else in the
+account monitors disk (the only CloudWatch alarms are on billing, and the CloudWatch agent
+is not installed), so without it a filling volume is invisible until services start failing
+writes. It checks space **and** inodes, and rate-limits its alerts to one per 6h.
+
+| File | Install path |
+|------|----------------|
+| `all_backups_post.sh` | `/usr/local/directadmin/scripts/custom/all_backups_post.sh` (mode 700) |
+| `system_backup_post.sh` | `/usr/local/directadmin/scripts/custom/system_backup_post.sh` (mode 700) |
+| `da_disk_guard.sh` | `/usr/local/sbin/da-disk-guard.sh` |
+| `cron.d-da-disk-guard` | `/etc/cron.d/da-disk-guard` (mode 644) |
+| `logrotate.d-da-ops` | `/etc/logrotate.d/da-ops` (mode 644) |
 
 ## Install / update backup hooks
 
+These rows are part of `install_da_vhost_listen.sh`'s managed list, so the one-command
+install and the weekly deploy-drift check cover them:
+
 ```bash
-install -m 700 scripts/directadmin/all_backups_post.sh \
-  /usr/local/directadmin/scripts/custom/all_backups_post.sh
-install -m 700 scripts/directadmin/system_backup_post.sh \
-  /usr/local/directadmin/scripts/custom/system_backup_post.sh
+cd /root/wbat-terraform && git pull
+./scripts/directadmin/install_da_vhost_listen.sh --verify   # read-only
+sudo ./scripts/directadmin/install_da_vhost_listen.sh --install
 ```
+
+They used to be installed by hand from this table, which meant nothing could answer "is
+the hook that runs after tonight's backup the hook in `main`?" — and a stale copy here
+fills the root volume rather than merely failing to self-heal.
 
 Requires root rclone config at `/root/.config/rclone/rclone.conf` with `s3backup` remote and `no_check_bucket = true`.
 
@@ -262,11 +297,25 @@ Objects are **not** deleted immediately after upload. The bucket lifecycle (Terr
 
 ## One-time catch-up (already on disk)
 
+Safe to run any time, including on a nearly full volume: it uploads what is there,
+verifies it, and deletes only the verified copies.
+
 ```bash
-/usr/local/directadmin/scripts/custom/all_backups_post.sh
-tail -30 /var/log/da-backup-s3.log
+/usr/local/directadmin/scripts/custom/all_backups_post.sh; echo "rc=$?"
+tail -40 /var/log/da-backup-s3.log
 df -h /
+/usr/local/sbin/da-disk-guard.sh --report   # top consumers, never alerts
 ```
+
+## Offline proof (no box access needed)
+
+```bash
+./scripts/directadmin/prove_backup_cleanup.sh
+```
+
+Runs the real hook against a stubbed rclone and mail in a temp sandbox, asserting both
+halves of fail-safe: a failed or unverifiable upload keeps the local copy and alerts, and
+a verified upload is always followed by the matching delete.
 
 ## Troubleshooting (backups)
 
@@ -276,4 +325,8 @@ df -h /
 | `create_backup_domain_dir: ... did not exist` in `errortaskq.log` | Same permission issue | `chmod 711` and re-run backup from DA UI |
 | Hook never runs for system backups | Missing `system_backup_post.sh` | Install both hook scripts (see above) |
 | Nothing new in S3 after schedule | `backup_crons.list` has `when=now` | Set `when=cron` to match `server` |
-| Upload works but local disk stays full | Old stub hook (no cleanup) | Deploy current `all_backups_post.sh` from this repo |
+| Upload works but local disk stays full | Stale hook installed | `install_da_vhost_listen.sh --verify`, then `--install` |
+| Log says `cleaned local ...` but the files are still there | Pre-2026-09-06 hook: cleanup resolved a different directory than the upload | `--install` the current hook; see [the incident doc](../../aws/docs/disk-full-backup-incident.md) |
+| `ERROR ... not verified in S3 (rclone check rc=N)` | Objects did not land, or the bucket is unreachable | Local copies were kept deliberately; fix rclone/S3 access and re-run the hook |
+| `ERROR another run held /var/log/... lock` | Admin and system backups overlapped and one waited out `DA_BACKUP_LOCK_WAIT` | `pgrep -a rclone`; clear the stuck upload, then re-run the hook |
+| Disk fills with no backups in `/home` | Not the backup hook | `da-disk-guard.sh --report` for the actual consumers |
