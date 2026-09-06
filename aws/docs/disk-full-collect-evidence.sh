@@ -228,6 +228,7 @@ print(json.dumps({"commands": sys.stdin.read().split("\n")}))
   awk -v out="$out" '
     /^===SECTION [A-Za-z_]+===$/ {
       name = $2
+      sub(/===$/, "", name)   # $2 is "host===", not "host"
       file = (name == "END") ? "" : out "/section-" name ".txt"
       next
     }
@@ -364,7 +365,11 @@ analyze() {
   # --- is the running hook even the repo's? ---
   local installed_hash installed_desc="not captured"
   installed_hash="$(read_section "$dir" installed_hashes | awk '/all_backups_post\.sh/ {print $1; exit}')"
-  if [[ -n "${installed_hash:-}" && "$installed_hash" != "MISSING" ]]; then
+  if [[ "${installed_hash:-}" == "MISSING" ]]; then
+    # Distinct from "stale" and far worse: with no hook at all, DirectAdmin writes
+    # backups to local disk and nothing ever uploads or removes them.
+    installed_desc="NOT INSTALLED on this host"
+  elif [[ -n "${installed_hash:-}" ]]; then
     installed_desc="$(identify_installed_hook "$installed_hash")"
   fi
   echo
@@ -404,7 +409,9 @@ analyze() {
     notes+=("Local backups are only ${backup_gb} GB (${share}% of used space), so they are not what filled the volume. Check 'top_dirs' in this capture for the real consumer before acting on the incident doc.")
   fi
 
-  if [[ "$installed_desc" != "current (matches this checkout)" && "$installed_desc" != "not captured" ]]; then
+  if [[ "$installed_desc" == "NOT INSTALLED on this host" ]]; then
+    notes+=("The backup hook is not installed here at all, so nothing has ever uploaded or cleaned up these backups. That alone fills the volume, and it needs 'install_da_vhost_listen.sh --install' regardless of what else this capture shows.")
+  elif [[ "$installed_desc" != "current (matches this checkout)" && "$installed_desc" != "not captured" ]]; then
     notes+=("The hook running on this host is ${installed_desc}. Any fix in main is not in effect until 'install_da_vhost_listen.sh --install' is run here.")
   fi
 
