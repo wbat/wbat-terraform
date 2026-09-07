@@ -143,9 +143,13 @@ cd /root/wbat-terraform && git pull
 sudo ./scripts/directadmin/install_da_vhost_listen.sh --install
 ```
 
-`--verify` compares each installed file against the repo by SHA-256 and reports `ok`,
-`STALE`, or `MISSING`, exiting non-zero on any drift — so "did this merge actually reach
-production?" has a definite answer. Its managed list covers **all** the DA tooling, not
+`--verify` compares each installed file against the repo by SHA-256 **and compares its
+permission mode**, reporting `ok`, `STALE`, `MODE <found> (expected <declared>)`, or
+`MISSING`, and exiting non-zero on any drift — so "did this merge actually reach
+production?" has a definite answer. The mode half matters as much as the content half: a
+hook that is byte-identical to the repo but has lost its executable bit cannot be run by
+DirectAdmin at all, so backups accumulate on local disk while a content-only check calls
+the host clean. Its managed list covers **all** the DA tooling, not
 just the reconciler: the S3 backup hooks, the disk guard, its cron entry, and the
 logrotate config are included, so the weekly check below watches them too. `--install` is idempotent and **never overwrites**
 `/etc/da-vhost-listen/vhost-listen.conf`, because that file holds host-specific values
@@ -226,11 +230,16 @@ installs so `--enforce` cannot run against the wrong box.
 Bare reconciler invocations default to `--check`. Cron and the boot unit pass
 `--enforce` deliberately. The `user_httpd_write_post` hook is `--check` only.
 
-Offline detector proof (from a laptop checkout, no box access needed):
+Offline proofs (from a laptop checkout, no box access needed):
 
 ```bash
-./scripts/directadmin/prove_vhost_listen_detector.sh
+./scripts/directadmin/prove_vhost_listen_detector.sh   # the reconciler's detector
+./scripts/directadmin/prove_install_verify.sh          # the deploy-drift check itself
 ```
+
+The second one exercises `--verify` in a sandbox through the `DA_VHOST_*` path overrides,
+including the case a content-only check got wrong: an unchanged hook at mode `600` must be
+reported as drift rather than `ok`.
 
 ---
 
@@ -256,7 +265,7 @@ it never leaves a verified copy on disk. Age is not treated as evidence that a b
 safe to delete — even the old-directory sweep checks S3 first, because on the primary the
 directories it would have swept were the only copy. See
 [`aws/docs/2026-09-06-primary-outage.md`](../../aws/docs/2026-09-06-primary-outage.md) for
-what was actually broken on that host, and `prove_backup_cleanup.sh` for the eight
+what was actually broken on that host, and `prove_backup_cleanup.sh` for the nine
 behaviours that are now pinned.
 
 Alerting: a run that ends with backups still on disk mails `HEALTH_ALERT_TO` from
@@ -336,7 +345,9 @@ df -h /
 
 Runs the real hook against a stubbed rclone and mail in a temp sandbox, asserting both
 halves of fail-safe: a failed or unverifiable upload keeps the local copy and alerts, and
-a verified upload is always followed by the matching delete.
+a verified upload is always followed by the matching delete. It also covers the case where
+the delete itself fails — a read-only filesystem or an immutable file — which must exit
+non-zero and mail rather than log "cleanup complete" over a backup still sitting on disk.
 
 ## Troubleshooting (backups)
 
@@ -347,10 +358,12 @@ a verified upload is always followed by the matching delete.
 | Hook never runs for system backups | Missing `system_backup_post.sh` | Install both hook scripts (see above) |
 | Nothing new in S3 after schedule | `backup_crons.list` has `when=now` | Set `when=cron` to match `server` |
 | Upload works but local disk stays full | Stale hook installed | `install_da_vhost_listen.sh --verify`, then `--install` |
+| `--verify` says `MODE 600 (expected 700)` | The hook is the right code but not executable, so DirectAdmin never runs it | `--install` resets the mode; check what stripped it (a manual `cp`, or an editor writing in place) |
 | Log says `cleaned local ...` but the files are still there | Pre-2026-09-06 hook: cleanup resolved a different directory than the upload, or a hardcoded `SYSTEM_ROOT` that DirectAdmin does not write to | `--install` the current hook; see [the incident doc](../../aws/docs/2026-09-06-primary-outage.md) |
 | `WARN keeping ... not present in <prefix>` | An old backup directory is **not** in S3, so the sweep kept it | Upload it, then delete by hand. Never `rm -rf` an unverified backup dir |
 | `WARN system backups found under more than one root` | Both `/backup` and `/home/backup` hold dated dirs | Only one is cleaned per run; consolidate them or pin `DA_BACKUP_SYSTEM_ROOT` |
 | Backups stop with no hook log at all | The DirectAdmin backup task itself is failing, so no post-hook fires | `grep 'dataskq.*backup' /var/log/messages`; a `Not implemented` error is a DA problem, not a hook problem |
 | `ERROR ... not verified in S3 (rclone check rc=N)` | Objects did not land, or the bucket is unreachable | Local copies were kept deliberately; fix rclone/S3 access and re-run the hook |
+| `backup local cleanup FAILED` / `ERROR could not remove N verified file(s)` | The upload was verified but the delete failed: read-only filesystem, `chattr +i`, or an I/O error | The copies named in the mail are already in S3 and safe to `rm` by hand; then find what blocked the delete (`mount | grep ' / '`, `lsattr`, `dmesg`) |
 | `ERROR another run held /var/log/... lock` | Admin and system backups overlapped and one waited out `DA_BACKUP_LOCK_WAIT` | `pgrep -a rclone`; clear the stuck upload, then re-run the hook |
 | Disk fills with no backups in `/home` | Not the backup hook | `da-disk-guard.sh --report` for the actual consumers |
