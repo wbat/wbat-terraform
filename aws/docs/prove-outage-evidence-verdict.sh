@@ -446,7 +446,54 @@ grep -q 'host logs: 3 ' <<<"$REPORT" \
 echo "OK a capped capture is read by its totals, not its surviving lines"
 
 ##############################################################################
-echo "== Proof 8: --analyze must re-read a capture with no aws CLI on PATH =="
+echo "== Proof 8: a capture that was cut off must not produce a confident answer =="
+##############################################################################
+# SSM caps StandardOutputContent at 24000 characters and the sections are written in
+# order, so what gets dropped is the tail: enospc, journal_errors, services. What survives
+# is the head: disk usage and backup sizes. That is the worst possible subset -- everything
+# that looks like support for the disk hypothesis arrives, everything that could refute it
+# does not, and the old code paired CONSISTENT with CONFIRMED and exited 0 on the strength
+# of it. A warning on stderr at collection time does not reach whoever runs --analyze on
+# the saved directory a day later.
+TRUNC="${SANDBOX}/case8-trunc"
+rm -rf "$TRUNC"
+cp -r "${SANDBOX}/case1" "$TRUNC"
+rm -f "${TRUNC}/section-enospc.txt"
+printf 'no ===SECTION END=== marker; SSM caps StandardOutputContent at 24000 chars\n' \
+  >"${TRUNC}/capture-truncated"
+
+set +e
+REPORT="$("$SCRIPT" --analyze "$TRUNC" 2>&1)"
+RC=$?
+set -e
+
+grep -q 'Full disk explains the outage:      INCONCLUSIVE' <<<"$REPORT" \
+  || fail "a truncated capture must not rule on the disk:"$'\n'"$REPORT"
+((RC == 2)) \
+  || fail "a truncated capture must exit 2 (inconclusive), got ${RC}:"$'\n'"$REPORT"
+grep -q 'no END marker' <<<"$REPORT" \
+  || fail "the reader must be told why the verdict was withheld:"$'\n'"$REPORT"
+echo "OK a cut-off capture is refused rather than read optimistically"
+
+# The other half: truncation removes the ability to prove absence, not the value of
+# evidence that did arrive. Case 1 has real ENOSPC lines, so its confirmation must survive.
+TRUNC2="${SANDBOX}/case8-trunc-confirmed"
+rm -rf "$TRUNC2"
+cp -r "${SANDBOX}/case1" "$TRUNC2"
+printf 'no ===SECTION END=== marker\n' >"${TRUNC2}/capture-truncated"
+
+set +e
+REPORT="$("$SCRIPT" --analyze "$TRUNC2" 2>&1)"
+RC=$?
+set -e
+
+grep -q 'Full disk explains the outage:      CONFIRMED' <<<"$REPORT" \
+  || fail "an ENOSPC line that did arrive is still evidence; truncation must not erase it:"$'\n'"$REPORT"
+((RC == 0)) || fail "a surviving confirmation keeps its exit status, got ${RC}"
+echo "OK truncation withholds absence, not presence"
+
+##############################################################################
+echo "== Proof 9: --analyze must re-read a capture with no aws CLI on PATH =="
 ##############################################################################
 # Collection and analysis are separate so a capture can be reviewed later, by someone
 # with no credentials at all.

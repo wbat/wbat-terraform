@@ -334,8 +334,18 @@ print(json.dumps({"commands": sys.stdin.read().split("\n")}))
   ' "$raw"
 
   if grep -q '===SECTION END===' "$raw"; then
+    rm -f "${out}/capture-truncated"
     echo "Capture complete: ${out}" >&2
   else
+    # A warning on stderr is not enough, and it is not enough in a specific direction.
+    # The sections are emitted in order and enospc is near the end, so the output limit
+    # removes the evidence that would refute the disk hypothesis while leaving the disk
+    # usage and backup sizes that appear to support it. analyze() would then combine
+    # CONSISTENT with CONFIRMED and exit 0 -- its most decisive answer, produced from a
+    # capture whose relevant half never arrived. Record it in the capture so --analyze
+    # sees it later too, when the stderr warning is long gone.
+    printf 'no ===SECTION END=== marker; SSM caps StandardOutputContent at 24000 chars\n' \
+      >"${out}/capture-truncated"
     echo "WARN capture looks truncated (no END marker); SSM caps output at 24000 chars." >&2
   fi
   return 0
@@ -575,6 +585,18 @@ analyze() {
     notes+=("The hook running on this host is ${installed_desc}. Any fix in main is not in effect until 'install_da_vhost_listen.sh --install' is run here.")
   fi
 
+  # Truncation invalidates absence, not presence. An ENOSPC line that did arrive is still
+  # an ENOSPC line, so a confirmation stands. But "nothing logged ENOSPC" cannot be
+  # asserted about a stream that was cut off, and neither can the CONSISTENT reading that
+  # pairs with a CONFIRMED cause to exit 0 -- the script's most decisive answer, which is
+  # exactly what this capture is least entitled to give.
+  local truncated=0
+  if [[ -f "${dir}/capture-truncated" ]] && [[ "$disk_verdict" != "CONFIRMED" ]]; then
+    truncated=1
+    disk_verdict="INCONCLUSIVE"
+    notes+=("This capture has no END marker, so SSM cut it off mid-stream. Sections are written in order and 'enospc' is near the end, so the part most likely missing is the part that decides this question, while the disk usage and backup sizes that appear to support it arrived early and survived. Re-capture before concluding anything: collect fewer sections, or pull the log tail separately.")
+  fi
+
   echo
   echo "================================================================"
   echo "VERDICT"
@@ -591,6 +613,9 @@ analyze() {
   elif [[ "$cause_verdict" == "CONFIRMED" ]] && [[ "$disk_verdict" == "CONFIRMED" || "$disk_verdict" == "CONSISTENT" ]]; then
     rc=0
   fi
+  # Applied last so nothing above can hand a truncated capture a decisive exit status. A
+  # confirmation from evidence that did arrive keeps its own rc; everything else is 2.
+  ((truncated == 1)) && rc=2
 
   echo
   echo "Capture kept at: ${dir}"
