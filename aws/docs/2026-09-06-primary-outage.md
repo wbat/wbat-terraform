@@ -5,9 +5,10 @@ about 03:50 EDT on Sunday 2026-09-06 and stayed down until a reboot at 09:13 EDT
 (13:13 UTC). The root volume was noticed at 99% used.
 
 **Short answer:** the 99% disk did **not** cause this outage. The host ran out of
-*memory*. A nightly cron job at 03:45 loads a 472 MB SQLite table into a 3.8 GB instance;
-on this run committed memory reached 9.6 GB, swap went from 17.6% to 85.9% inside one
-ten-minute interval, and the box thrashed until it was rebooted five hours later.
+*memory*. A nightly cron job at 03:45 does `SELECT * FROM raw_items` against a 2.9 GB MySQL
+table and `fetchall()`s it into a 3.8 GB instance; on this run committed memory reached
+9.6 GB, swap went from 17.6% to 85.9% inside one ten-minute interval, and the box thrashed
+until it was rebooted five hours later.
 
 The disk is a real problem, just a different one, and the investigation turned up two
 worse ones: **no backup has reached S3 since 2026-07-02**, and the weekly system backup
@@ -145,9 +146,25 @@ Its log stops mid-run and never resumes:
 03:46:47 INFO Dedupe: loading raw items (since=all)...
 ```
 
-That `since=all` is an unbounded load of a 472 MB SQLite database
-(`oncallbrief-pipeline/data/oncallbrief.db`). It is the last line the file ever received.
-On Sep 4 and Sep 5 the same job ran on past this point and finished around 03:54.
+That `since=all` is an unbounded load of the whole `raw_items` table. It is the last line
+the file ever received. On Sep 4 and Sep 5 the same job ran on past this point and finished
+around 03:54.
+
+**The store is MySQL, not the SQLite file this document used to name.** Earlier revisions
+attributed the load to `oncallbrief-pipeline/data/oncallbrief.db`, 472 MB on disk. That file
+is a **stale February artifact**: its newest `pipeline_runs` row is `2026-02-13`, week
+`2026-W07`, and its mtime matches. `oncallbrief/store.py` opens MySQL and says so in its
+docstring. Measured on the live database `tellerstec_oncallbrief`:
+
+| | |
+|---|---|
+| `raw_items` | **683,188 rows**, 2,768 MB data + 107 MB index |
+| `raw_text` across those rows | **2,650 MB**, averaging 4,067 bytes each |
+| Growth | **~3,600 rows and ~16 MB of `raw_text` per day** |
+| `items` | 63,265 rows, 281 MB |
+
+So the mechanism was right and the artifact was wrong, in the direction that mattered: the
+real table is six times the size of the file being blamed, and it grows every night.
 
 **The healthcheck's event log says the same thing from outside the host.** The `ocb run-all`
 check records a start ping and a completion ping, so it measures each run end to end without
@@ -346,19 +363,46 @@ of the preceding week, and a successful run needs about 5 GB of anonymous memory
 that has 3.8 GB of RAM — measured below. The margin on a good night is a few hundred
 megabytes. Another 4 GB of swap buys a few more nights of the same graph.
 
-One earlier claim here has to be withdrawn. This section attributed the growth to a
-database that grows, but `oncallbrief.db` is 472 MB with an mtime of **Feb 13 2026** and no
-WAL beside it — it has not been written to in seven months. The `since=all` load is still
-the memory defect, and the healthcheck still shows run time climbing from 11 min 08 s on
-Aug 24 to 13 min 20 s on Sep 5, but a growing table is not the reason and the cause of that
-trend is not established. Candidates, none checked: API latency on the model calls the log
-mentions, growth in the weekly item set feeding the run, or something outside the pipeline.
+A note on how this claim moved, because the correction is instructive. An earlier revision
+said the load came from a database that grows. Then `oncallbrief.db` turned out to have an
+mtime of Feb 2026, so the claim was withdrawn as unsupported. Both readings were wrong in
+the same way — they assumed the SQLite file was the store. It is not; MySQL is. The growth
+claim is now restored with numbers behind it: `raw_items` gains **~3,600 rows and ~16 MB of
+`raw_text` every day**, and `since=all` reads all 683,188 of them.
+
+That still does not, by itself, explain why Sep 5 completed and Sep 7 did not. Two days of
+ingest is about 1.2% more data, and the memory needed rose by considerably more than 1.2%.
+The honest reading is in the cap sizing below: the per-night figures come from `sar`'s
+ten-minute samples, which record where the run happened to be at 03:50, not its peak.
 
 In order of leverage:
 
-1. **Bound the query.** `Dedupe: loading raw items (since=all)` reads a full table out of
-   a 472 MB SQLite file into Python objects, which inflates several times over in memory.
-   Chunking it, or doing the dedupe in SQL, is the actual defect. It lives in
+1. **Bound the query.** This is the actual defect, and it is four lines. In
+   `oncallbrief/store.py`, `get_raw_items_not_yet_deduped()`:
+
+   ```python
+   cur = conn.execute("SELECT * FROM raw_items ORDER BY created_at DESC")
+   rows = cur.fetchall()
+   out = [r for r in rows if (r["id"] if isinstance(r, dict) else r[0]) not in linked_ids]
+   ```
+
+   `SELECT *` pulls `raw_text` — 2,650 MB across 683,188 rows — and `fetchall()` materializes
+   every row in Python before a single one is filtered. As Python objects that inflates
+   several times over, which is the whole memory footprint.
+
+   **`run_dedupe` never reads `raw_text` from those rows.** It groups them by URL identity;
+   the only fields it touches are the id, the URLs and the identity columns. The most
+   expensive thing in the query is loaded, held, and discarded. Naming the columns it
+   actually uses should remove roughly 2.6 GB of the 2.9 GB on its own.
+
+   Three smaller wins in the same function: filter `linked_ids` in SQL rather than fetching
+   everything and dropping rows in Python; stream with a server-side cursor instead of
+   `fetchall()`; and bound the straggler pass by date, since `since=all` re-examines rows
+   that were reconciled months ago. The docstring already explains that the two-query shape
+   exists to avoid an `O(raw_items × items)` correlated subquery — that reasoning is sound
+   and a `LEFT JOIN` or a temporary table of linked ids keeps it.
+
+   This lives in
    `/home/tellerstec/public_html/wp-content/plugins/tellerstech-landing/oncallbrief-pipeline`,
    not in this repository.
 2. **Cap the job so it dies alone.** This is the availability fix and it is independent
@@ -504,11 +548,67 @@ In order of leverage:
    still kills a run that heads for the 7.8 GB the machine actually has. Sep 5 succeeded at
    ~5 GB and Sep 6 did not stop — a 6 GB ceiling separates those two.
 
+   **That ceiling was too low, and the reason is worth keeping.** The first capped run, on
+   2026-09-07, was OOM-killed inside its cgroup at 03:50:42 — details in the section below.
+   The table above is built from `sar`, which samples every ten minutes. It records where a
+   run happened to be at 03:50, not where it peaked. Sizing a limit from it systematically
+   understates the requirement, and 20% of headroom over a number that is itself an
+   underestimate is not headroom at all. Nothing in the table was wrong; it was the wrong
+   instrument for the question, and picking a kill threshold from sampled data was the
+   error. A peak needs `systemd-cgtop`, `memory.peak` from the cgroup, or a one-second
+   sampler alongside the run.
+
    **This is survival, not headroom.** The cap keeps a bad night from taking the host with
    it; it does not create room that is not there. A job needing 5 GB of a 7.8 GB box every
    single night, with swap at 81–97% each time, has no margin for a slow API or a slightly
    larger week — which is what Sep 6 was. Bounding the query is the fix; until then a
    `t3a.large` (8 GB, roughly +$27/month) is the lever that actually restores margin.
+
+### The first capped run: 2026-09-07 03:45
+
+**The cap did what it was installed to do.** The job died alone and the host stayed up.
+
+```text
+Result=oom-kill                 ExecMainStatus=15   (killed, signal=TERM)
+started  Mon 2026-09-07 03:45:01 EDT
+killed   Mon 2026-09-07 03:50:42 EDT      after 5 min 41 s, 2 min 5 s of CPU
+
+kernel: oom-kill:constraint=CONSTRAINT_MEMCG, oom_memcg=/system.slice/oncallbrief.service
+kernel: Killed process 401670 (python3) total-vm:6663628kB anon-rss:2563704kB
+```
+
+`CONSTRAINT_MEMCG` is the whole point: the kill was scoped to the service's own cgroup, not
+to the machine. Compare the two mornings directly — `/var/log/messages` went from 2,897 lines
+in the 03:00 hour to **1** in the 04:00 hour on Sep 6, the box unreachable for five hours. On
+Sep 7 the 03:00 hour has 1,670 lines, the 04:00 hour is logging normally, `uptime` shows no
+reboot, and load average at 04:07 is 0.23. One failed cron job instead of an outage. That
+was the objective and it is met.
+
+The newsletter did not run, which is the cost. `anon-rss` at kill was 2,563,704 kB against a
+`memory.max` of 2,662,400 kB — pinned at 96% of the RAM limit — with swap at 74.4% and
+climbing when `sar` last sampled it. The job wanted more than the 5.86 GiB the two limits
+allow together.
+
+Because `MemoryMax` bounds only what the pipeline can hold in RAM, the rest of the host keeps
+its ~1.2 GB no matter how badly the job behaves. That property is what makes raising
+`MemorySwapMax` a materially different proposition from removing the cap: swap can grow
+without the host losing the memory it needs to stay reachable. The disk freed in step 2 makes
+a larger swapfile practical for the first time.
+
+Three ways forward, in increasing order of durability:
+
+1. **Let it complete once.** Add swap and raise `MemorySwapMax` while leaving `MemoryMax` at
+   `2600M`. Supervised, watching `memory.peak`, this also produces the peak figure that
+   `sar` cannot give — which is what any future limit should be set from.
+2. **Shrink the payload.** `raw_text` is 2,650 MB of the 2,768 MB, and the dedupe never reads
+   it. Blanking it for rows past a retention horizon (`UPDATE raw_items SET raw_text='' WHERE
+   created_at < …`) keeps every id, URL and identity column that dedupe and `items.source_ids`
+   depend on, and drops most of the weight. By month, `raw_text` is 79 MB for Sep so far,
+   480 for Aug, 451 for Jul, 556 for Jun, 262 for May, 132 for Apr, 227 for Mar, 463 for Feb.
+   A 60-day horizon removes roughly two thirds. Whether that history is worth keeping is a
+   product decision, not an operational one.
+3. **Fix the query**, as described above. This is the only option that stops the problem
+   returning as the table grows by its 16 MB a day.
 
    **Confirm the limits took effect.** `MemorySwapMax` is silently ignored under cgroup v1:
 
