@@ -11,6 +11,10 @@
 # hypothesis it was written for is worse than no diagnostic, so proof 2 asserts it
 # refutes, and proof 3 asserts it distinguishes "no hook installed" from "stale hook".
 #
+# Proofs 4 to 6 are all about not reading evidence into a capture that does not contain
+# it: a high-water mark with no failed writes, a capture that cannot show its logs were
+# readable, and ENOSPC lines belonging to an entirely different incident.
+#
 # Usage (from repo root):
 #   ./aws/docs/prove-outage-evidence-verdict.sh
 
@@ -135,6 +139,31 @@ run_capture() { # disk backups hook casename -> sets OUT_DIR, RC, REPORT
   set -e
 }
 
+# Replace the body of the enospc section, reading the new body from stdin. Done with awk
+# rather than `sed 's/.../&\n.../'` because BSD sed rejects \n in a replacement and these
+# proofs are meant to run from a laptop as well as CI.
+rewrite_enospc() { # infile outfile <new-body-on-stdin
+  local infile="$1" outfile="$2" body
+  body="$(cat)"
+  awk -v body="$body" '
+    /^===SECTION enospc===$/ { print; print body; inside = 1; next }
+    /^===SECTION / && inside { inside = 0 }
+    inside { next }
+    { print }
+  ' "$infile" >"$outfile"
+}
+
+run_prepared() { # remote-out-file casename -> sets OUT_DIR, RC, REPORT
+  local remote="$1" case_name="$2"
+  OUT_DIR="${SANDBOX}/${case_name}"
+  set +e
+  REPORT="$(env PATH="${SANDBOX}/bin:${PATH}" \
+    STUB_REMOTE_OUT="$remote" STUB_CONSOLE=/dev/null \
+    "$SCRIPT" --out "$OUT_DIR" 2>&1)"
+  RC=$?
+  set -e
+}
+
 ##############################################################################
 echo "== Proof 1: a full disk with large local backups must CONFIRM, exit 0 =="
 ##############################################################################
@@ -224,12 +253,57 @@ set -e
 
 grep -q 'Full disk explains the outage:      CONSISTENT' <<<"$REPORT" \
   || fail "a capture that cannot show the logs were searchable must stay CONSISTENT, not refute:"$'\n'"$REPORT"
-grep -q 'cannot tell whether the logs were searchable' <<<"$REPORT" \
+grep -q 'no log covering the incident window' <<<"$REPORT" \
   || fail "the report must say why it cannot rule ENOSPC out"
+grep -q 'capture does not record which logs were searchable' <<<"$REPORT" \
+  || fail "a legacy capture must be labelled as such rather than given a searched count"
 echo "OK absent evidence is not treated as evidence of absence"
 
 ##############################################################################
-echo "== Proof 6: --analyze must re-read a capture with no aws CLI on PATH =="
+echo "== Proof 6: ENOSPC lines from outside the incident window must not confirm =="
+##############################################################################
+# 2026-06-28 was a real disk-full failure and logged real ENOSPC lines. Its rotations can
+# still be on the box months later, so the on-box capture now selects logs by mtime and
+# labels the rest SKIPPED_OLD. Both halves of that have to hold here.
+make_remote_out full-quiet small current "${SANDBOX}/case6-remote.txt"
+
+# Case A: in-window logs are clean, and an old rotation is present but was not searched.
+# The June lines never reach the capture, so the September verdict must still refute.
+rewrite_enospc "${SANDBOX}/case6-remote.txt" "${SANDBOX}/case6a.txt" <<'ENOSPC'
+SEARCHED /var/log/messages
+SEARCHED /var/log/exim/mainlog
+SKIPPED_OLD /var/log/messages-20260628 (last written more than 14d ago)
+SKIPPED_OLD /var/log/exim/mainlog-20260628 (last written more than 14d ago)
+ENOSPC
+run_prepared "${SANDBOX}/case6a.txt" case6a
+
+grep -q 'Full disk explains the outage:      NOT SUPPORTED' <<<"$REPORT" \
+  || fail "an old rotation must not change a September refutation:"$'\n'"$REPORT"
+grep -q 'skipped 2 written outside the window' <<<"$REPORT" \
+  || fail "the report must disclose how many logs were excluded, or the search looks wider than it was"
+echo "OK an out-of-window rotation is excluded and disclosed"
+
+# Case B: every log fell outside the window, so there is nothing to search. This is the
+# case that fails against the unguarded version: with no SEARCHED lines the analysis took
+# the legacy path, counted every line in the section as a match, and turned two
+# SKIPPED_OLD *filenames* into "2 ENOSPC lines" -- CONFIRMED from no evidence at all.
+rewrite_enospc "${SANDBOX}/case6-remote.txt" "${SANDBOX}/case6b.txt" <<'ENOSPC'
+SKIPPED_OLD /var/log/messages-20260628 (last written more than 14d ago)
+SKIPPED_OLD /var/log/exim/mainlog-20260628 (last written more than 14d ago)
+ENOSPC
+run_prepared "${SANDBOX}/case6b.txt" case6b
+
+grep -q 'Full disk explains the outage:      CONSISTENT' <<<"$REPORT" \
+  || fail "with every log out of window the disk can be neither confirmed nor ruled out:"$'\n'"$REPORT"
+if grep -q 'Full disk explains the outage:      CONFIRMED' <<<"$REPORT"; then
+  fail "SKIPPED_OLD filenames were counted as ENOSPC matches -- absence of logs became proof"
+fi
+grep -q 'all 2 log file(s) were written outside the incident window' <<<"$REPORT" \
+  || fail "the report must say the section is unsearchable rather than print a match count of 0"
+echo "OK skipped filenames are not mistaken for ENOSPC evidence"
+
+##############################################################################
+echo "== Proof 7: --analyze must re-read a capture with no aws CLI on PATH =="
 ##############################################################################
 # Collection and analysis are separate so a capture can be reviewed later, by someone
 # with no credentials at all.

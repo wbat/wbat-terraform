@@ -160,16 +160,33 @@ echo "===SECTION enospc==="
 # Record which files were actually searchable. Without this, "no ENOSPC anywhere" and
 # "no logs to grep" produce an identical empty section, and they mean opposite things:
 # the first is evidence the disk did not break anything, the second is no evidence at all.
+#
+# Bound the search to the incident window as well. 2026-06-28 was a genuine disk-full
+# failure that logged real ENOSPC lines, so if one of its rotations is still on the box an
+# unbounded grep hands those lines to the verdict -- which treats any match as proof and
+# would confirm the wrong cause for a later outage. A rotation's mtime is when it stopped
+# being written, so selecting on mtime needs no timestamp parsing and does not care that
+# syslog omits the year. One list feeds both the markers and the grep; they were separate
+# before and could drift out of sync.
+ENOSPC_WINDOW_DAYS=14
+enospc_files=""
 for f in /var/log/messages /var/log/messages-* /var/log/mysqld.log \
          /var/log/mariadb/mariadb.log /var/log/exim/mainlog /var/log/exim/mainlog-* \
          /var/log/exim/paniclog /var/log/maillog /var/log/maillog-*; do
-  [ -f "$f" ] && echo "SEARCHED $f"
+  [ -f "$f" ] || continue
+  if [ -n "$(find "$f" -maxdepth 0 -mtime "-${ENOSPC_WINDOW_DAYS}" 2>/dev/null)" ]; then
+    echo "SEARCHED $f"
+    enospc_files="${enospc_files} ${f}"
+  else
+    echo "SKIPPED_OLD $f (last written more than ${ENOSPC_WINDOW_DAYS}d ago)"
+  fi
 done
-grep -ihE "no space left|ENOSPC|disk full|out of disk" \
-  /var/log/messages /var/log/messages-* /var/log/mysqld.log \
-  /var/log/mariadb/mariadb.log /var/log/exim/mainlog /var/log/exim/mainlog-* \
-  /var/log/exim/paniclog /var/log/maillog /var/log/maillog-* 2>/dev/null \
-  | tail -40 | sed 's/^/MATCH /'
+# -H keeps the filename on every hit. The old -h stripped it, so a capture gave no way to
+# tell which log, or which rotation, a match came from.
+if [ -n "$enospc_files" ]; then
+  grep -iHE "no space left|ENOSPC|disk full|out of disk" $enospc_files 2>/dev/null \
+    | tail -40 | sed 's/^/MATCH /'
+fi
 echo "===SECTION journal_errors==="
 journalctl --since "-4 days" -p err --no-pager 2>/dev/null | tail -60
 echo "===SECTION services==="
@@ -369,8 +386,15 @@ analyze() {
 
   # --- did the disk actually break the services? ---
   local enospc_lines console_enospc=0 console_enospc_label="no" svc_down="" enospc_searched=0
+  local enospc_markers=0 enospc_skipped=0
+  # SKIPPED_OLD counts as a marker even though it names a file that was not searched. A
+  # capture where every log fell outside the window is still a modern capture, and its
+  # SKIPPED_OLD lines must not reach the legacy branch below, which would count them as
+  # ENOSPC matches and confirm a full disk from nothing but log filenames.
+  enospc_markers="$(read_section "$dir" enospc | grep -cE '^(SEARCHED|SKIPPED_OLD) ' || true)"
   enospc_searched="$(read_section "$dir" enospc | grep -c '^SEARCHED ' || true)"
-  if ((enospc_searched > 0)); then
+  enospc_skipped="$(read_section "$dir" enospc | grep -c '^SKIPPED_OLD ' || true)"
+  if ((enospc_markers > 0)); then
     enospc_lines="$(read_section "$dir" enospc | grep -c '^MATCH ' || true)"
   else
     # Capture predates the SEARCHED/MATCH markers: every line is a match, and there is
@@ -391,7 +415,9 @@ analyze() {
   echo
   echo "-- Did a full disk break the services? --"
   if ((enospc_searched > 0)); then
-    echo "  ENOSPC / 'no space left' lines in host logs: ${enospc_lines:-0} (searched ${enospc_searched} log file(s))"
+    echo "  ENOSPC / 'no space left' lines in host logs: ${enospc_lines:-0} (searched ${enospc_searched} log file(s), skipped ${enospc_skipped} written outside the window)"
+  elif ((enospc_markers > 0)); then
+    echo "  ENOSPC / 'no space left' lines in host logs: not searchable (all ${enospc_skipped} log file(s) were written outside the incident window)"
   else
     echo "  ENOSPC / 'no space left' lines in host logs: ${enospc_lines:-0} (capture does not record which logs were searchable)"
   fi
@@ -445,7 +471,7 @@ analyze() {
     notes+=("The volume is ${used_pct}% used, but ${enospc_searched} log file(s) were searched and not one service logged ENOSPC. A nearly-full disk that no service ever failed a write against did not cause an outage. Unless the space was reclaimed before this capture, look elsewhere -- start with memory: 'sar -r -f /var/log/sa/saDD' and 'sar -S -f ...' around the failure window.")
   elif ((used_pct >= FULL_PCT)); then
     disk_verdict="CONSISTENT"
-    notes+=("The volume is still ${used_pct}% used, and this capture cannot tell whether the logs were searchable, so ENOSPC can be neither confirmed nor ruled out. Re-capture with a current version of this script to settle it.")
+    notes+=("The volume is still ${used_pct}% used, and this capture has no log covering the incident window to search, so ENOSPC can be neither confirmed nor ruled out. Either the capture predates the searchability markers, or every log had already rotated out of the window. Re-capture closer to the event, with a current version of this script, to settle it.")
   elif ((used_pct >= 0)); then
     disk_verdict="NOT SUPPORTED"
     notes+=("The volume is only ${used_pct}% used and nothing logged ENOSPC. Either the space was already reclaimed before this capture, or the outage had a different cause.")
