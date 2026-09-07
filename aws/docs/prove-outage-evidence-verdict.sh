@@ -586,7 +586,48 @@ grep -q 'Backup cleanup is why it filled:    CONFIRMED' <<<"$REPORT" \
 echo "OK a concurrent upload does not excuse a run that already failed"
 
 ##############################################################################
-echo "== Proof 10: --analyze must re-read a capture with no aws CLI on PATH =="
+echo "== Proof 10: 'we could not check' must not exit like 'the hypothesis holds' =="
+##############################################################################
+# CONSISTENT is what this script says when it had no log covering the window to search --
+# its own note spells out that ENOSPC can be neither confirmed nor ruled out. Pairing that
+# with a confirmed cause used to exit 0, so any caller reading the status instead of the
+# report was told the disk theory was established. A nearly-full volume with a large local
+# backup footprint is a state a healthy host reaches routinely, which makes this the
+# easiest false confirmation in the script to trigger.
+#
+# Round 6 stopped truncated captures from doing this. A complete capture whose logs had
+# simply rotated away still could.
+ROTATED="${SANDBOX}/case10-rotated"
+rm -rf "$ROTATED"
+cp -r "${SANDBOX}/case1" "$ROTATED"
+# Complete capture, high usage, big backups, a genuinely failed run -- and not one log
+# left inside the window to search.
+: >"${ROTATED}/section-enospc.txt"
+
+set +e
+REPORT="$("$SCRIPT" --analyze "$ROTATED" 2>&1)"
+RC=$?
+set -e
+
+grep -q 'Full disk explains the outage:      CONSISTENT' <<<"$REPORT" \
+  || fail "fixture did not hold: expected the no-searchable-logs verdict:"$'\n'"$REPORT"
+grep -q 'Backup cleanup is why it filled:    CONFIRMED' <<<"$REPORT" \
+  || fail "fixture did not hold: expected the cause to be confirmed:"$'\n'"$REPORT"
+((RC == 2)) \
+  || fail "a disk verdict that was never established must exit inconclusive, got ${RC}:"$'\n'"$REPORT"
+echo "OK an unverifiable disk verdict exits 2 however strong the cause looks"
+
+# And the decisive status must still be reachable, or the change is just a downgrade.
+set +e
+"$SCRIPT" --analyze "${SANDBOX}/case1" >/dev/null 2>&1
+RC=$?
+set -e
+((RC == 0)) \
+  || fail "a logged ENOSPC plus a confirmed cause must still exit 0, got ${RC}"
+echo "OK a service that actually logged ENOSPC still earns a decisive 0"
+
+##############################################################################
+echo "== Proof 11: --analyze must re-read a capture with no aws CLI on PATH =="
 ##############################################################################
 # Collection and analysis are separate so a capture can be reviewed later, by someone
 # with no credentials at all.

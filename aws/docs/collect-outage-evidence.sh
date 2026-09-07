@@ -26,6 +26,8 @@
 #
 # Exit status: 0 = hypothesis confirmed, 1 = contradicted (look elsewhere),
 #              2 = inconclusive, 3 = collection failed.
+# 0 requires a service to have logged ENOSPC inside the window. Disk usage and backup
+# sizes on their own are 2: they describe a state a healthy host reaches routinely.
 
 set -uo pipefail
 
@@ -688,9 +690,16 @@ analyze() {
 
   if [[ "$disk_verdict" == "NOT SUPPORTED" || "$cause_verdict" == "NOT SUPPORTED" ]]; then
     rc=1
-  elif [[ "$cause_verdict" == "CONFIRMED" ]] && [[ "$disk_verdict" == "CONFIRMED" || "$disk_verdict" == "CONSISTENT" ]]; then
+  elif [[ "$cause_verdict" == "CONFIRMED" && "$disk_verdict" == "CONFIRMED" ]]; then
     rc=0
   fi
+  # CONSISTENT used to be enough for rc=0 alongside a confirmed cause. But CONSISTENT is
+  # what this script says when it had no log covering the window to search -- its own note
+  # spells out that ENOSPC can be neither confirmed nor ruled out. Exiting 0 on that turned
+  # "we could not check" into "the hypothesis holds" for any caller reading the status
+  # rather than the report, and a nearly-full disk plus a large backup footprint is the
+  # easiest state on earth to reach without an outage. Only a service that actually logged
+  # ENOSPC earns a decisive 0.
   # Applied last so nothing above can hand a truncated capture a decisive exit status. A
   # confirmation from evidence that did arrive keeps its own rc; everything else is 2.
   ((truncated == 1)) && rc=2
