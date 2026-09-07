@@ -639,13 +639,49 @@ That last row is the config-only regression measured directly rather than inferr
 the Sep 5 system backup produced 60 KB and no `mysql/` tree at all, while every week before it
 carried 1.4–1.9 GB of databases.
 
-**`08-29-26` was uploaded and verified 2026-09-07 05:34 UTC** — the first backup of any kind to
-reach S3 since 2026-07-02, 67 days. `rclone check --checksum --one-way` reported 136 matching
-files and 0 differences, and reading the bucket back independently gives 136 objects totalling
-7,908,696,346 bytes with `mysql/` at 58 objects and 1,982,103,443 bytes, matching the local
-7.4 GB and 1.9 GB. The newest database dump is now off the disk it protects. The transfer took
-roughly two minutes, so the remaining eight weeks are about a quarter of an hour, not an
-overnight job. Nothing has been deleted.
+### Step 2 completed 2026-09-07 06:21 UTC
+
+All ten weeks are in S3 and the eight redundant local copies are gone. `rclone check --checksum
+--one-way` passed on every week before anything was deleted; the bucket was then read back
+independently:
+
+| Prefix | Objects | Bytes | `mysql/` bytes |
+|---|---|---|---|
+| 2026-07-04 | 136 | 6,578,804,826 | 1,423,050,939 |
+| 2026-07-11 | 136 | 6,647,740,587 | 1,488,486,131 |
+| 2026-07-18 | 136 | 6,767,112,530 | 1,569,866,385 |
+| 2026-07-25 | 136 | 6,865,878,810 | 1,653,156,153 |
+| 2026-08-01 | 136 | 6,923,510,424 | 1,707,039,242 |
+| 2026-08-08 | 136 | 7,042,539,440 | 1,775,345,804 |
+| 2026-08-15 | 136 | 7,106,980,350 | 1,843,950,635 |
+| 2026-08-22 | 136 | 7,848,011,628 | 1,911,713,351 |
+| 2026-08-29 | 136 | 7,908,696,346 | 1,982,103,443 |
+| 2026-09-05 | 2 | 55,126 | — |
+
+59.3 GiB, against a local `du -sh /backup` of 60 G. The check worth making here is not that the
+totals agree — a checksum pass already establishes that — but that **each week is strictly larger
+than the one before it, databases included**. That rules out the failure where one source
+directory is uploaded nine times under nine names and every checksum passes because it really is
+the same data. These are nine distinct weekly backups of a system that grew, plus the 55 KB
+config-only week.
+
+`server/` now runs unbroken from `2026-07-02` to `2026-09-05`, and the first upload landed
+2026-09-07 05:34 UTC — 67 days after the last one.
+
+```text
+/dev/nvme0n1p2  200G  146G   55G  73% /      (was 197G used, 3.8G free, 99%)
+/backup: 08-29-26, 09-05-26 -- 7.4G
+```
+
+`08-29-26` was deliberately kept on disk, so the newest databases now exist both locally and in
+S3. `09-05-26` was uploaded despite being worthless as a backup: left local and unreplicated it
+ages past seven days on Sep 12, the sweep correctly refuses to delete what it cannot confirm,
+and it emails about it on every run from then on. A backstop that cries wolf is one people learn
+to ignore — the same argument as the cross-midnight prefix fix.
+
+One reading note: `df -i` shows apparent total inodes going from 8.7 M to 104 M across this
+change. That is XFS estimating dynamically from free space, not anything about the filesystem
+changing.
 
 **`rclone lsd s3backup:` returns 403 and that is correct.** It calls `ListAllMyBuckets`, which
 the `directadmin-backup` IAM user is deliberately not granted; its policy allows `ListBucket`,
