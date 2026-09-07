@@ -142,15 +142,19 @@ run_capture() { # disk backups hook casename -> sets OUT_DIR, RC, REPORT
 # Replace the body of the enospc section, reading the new body from stdin. Done with awk
 # rather than `sed 's/.../&\n.../'` because BSD sed rejects \n in a replacement and these
 # proofs are meant to run from a laptop as well as CI.
-rewrite_enospc() { # infile outfile <new-body-on-stdin
-  local infile="$1" outfile="$2" body
+rewrite_section() { # section infile outfile <new-body-on-stdin
+  local section="$1" infile="$2" outfile="$3" body
   body="$(cat)"
-  awk -v body="$body" '
-    /^===SECTION enospc===$/ { print; print body; inside = 1; next }
+  awk -v body="$body" -v want="===SECTION ${section}===" '
+    $0 == want { print; print body; inside = 1; next }
     /^===SECTION / && inside { inside = 0 }
     inside { next }
     { print }
   ' "$infile" >"$outfile"
+}
+
+rewrite_enospc() { # infile outfile <new-body-on-stdin
+  rewrite_section enospc "$1" "$2"
 }
 
 run_prepared() { # remote-out-file casename -> sets OUT_DIR, RC, REPORT
@@ -327,10 +331,17 @@ extract_classifier() {
 run_classifier() { # <window-days> <logfile>... -> sets CLASSIFIED
   local days="$1"
   shift
+  run_classifier_split "$days" "$*" ""
+}
+
+# Plain and compressed inputs travel separately, because only the compressed ones need a
+# decompressor between the file and the grep.
+run_classifier_split() { # <window-days> <plain-list> <compressed-list> -> sets CLASSIFIED
   local runner="${SANDBOX}/classifier.sh"
   {
-    printf 'ENOSPC_WINDOW_DAYS=%s\n' "$days"
-    printf 'enospc_files="%s"\n' "$*"
+    printf 'ENOSPC_WINDOW_DAYS=%s\n' "$1"
+    printf 'enospc_files="%s"\n' "$2"
+    printf 'enospc_compressed="%s"\n' "$3"
     extract_classifier
   } >"$runner"
   CLASSIFIED="$(sh "$runner")"
@@ -445,6 +456,38 @@ grep -q 'host logs: 3 ' <<<"$REPORT" \
   || fail "the report must show the true in-window count, not the printed one:"$'\n'"$REPORT"
 echo "OK a capped capture is read by its totals, not its surviving lines"
 
+# logrotate compresses by default, so the newest rotation of a busy log is usually .gz --
+# and a recent rotation is exactly where an incident's last lines end up before the current
+# file rolls over. Handing that to a plain grep searches the compressed bytes, finds
+# nothing whatever the file says, and still counts the file as SEARCHED, so the verdict is
+# told the log was examined and came up clean.
+{
+  echo "${today_syslog} 03:45:07 primary kernel: EXT4-fs: No space left on device"
+  echo "${today_syslog} 03:45:08 primary kernel: unrelated line"
+} >"${LOGS}/messages-rotated"
+gzip -f "${LOGS}/messages-rotated"
+
+run_classifier_split 14 "" "${LOGS}/messages-rotated.gz"
+
+grep -q '^MATCH .*messages-rotated\.gz:' <<<"$CLASSIFIED" \
+  || fail "an ENOSPC record inside a gzipped rotation was not found:"$'\n'"$CLASSIFIED"
+grep -q '^TOTALS in_window=1 out_of_window=0 undated=0' <<<"$CLASSIFIED" \
+  || fail "the compressed match must be counted like any other:"$'\n'"$CLASSIFIED"
+echo "OK a gzipped rotation is decompressed rather than grepped as bytes"
+
+# A log inside the window that nothing on the host could open is not evidence of absence.
+rewrite_enospc "${SANDBOX}/case6-remote.txt" "${SANDBOX}/case7d.txt" <<'ENOSPC'
+SEARCHED /var/log/messages
+SKIPPED_UNREADABLE /var/log/messages-20260901.zst (needs zstd, which is not installed)
+ENOSPC
+run_prepared "${SANDBOX}/case7d.txt" case7d
+
+grep -q 'Full disk explains the outage:      INCONCLUSIVE' <<<"$REPORT" \
+  || fail "an unreadable in-window log must block a refutation:"$'\n'"$REPORT"
+grep -q 'could not be read' <<<"$REPORT" \
+  || fail "the report must say which logs could not be opened:"$'\n'"$REPORT"
+echo "OK a log that could not be opened is not counted as searched"
+
 ##############################################################################
 echo "== Proof 8: a capture that was cut off must not produce a confident answer =="
 ##############################################################################
@@ -493,7 +536,57 @@ grep -q 'Full disk explains the outage:      CONFIRMED' <<<"$REPORT" \
 echo "OK truncation withholds absence, not presence"
 
 ##############################################################################
-echo "== Proof 9: --analyze must re-read a capture with no aws CLI on PATH =="
+echo "== Proof 9: a backup mid-upload must not be read as a cleanup failure =="
+##############################################################################
+# The cause verdict was a size test and nothing else, so any capture with a large local
+# footprint concluded that the hook's cleanup had failed. But cleanup runs *after* the
+# upload verifies, so during a backup -- or during the rclone run that follows it -- tens
+# of gigabytes on disk is the system behaving exactly as designed. The collector has
+# recorded pgrep for rclone since the beginning and nothing ever read it.
+#
+# This matters most in the situation someone would actually run this: the disk is filling,
+# so they capture immediately, which is when a backup is most likely to be in flight.
+BIG_RUNNING="${SANDBOX}/case9-running"
+rm -rf "$BIG_RUNNING"
+cp -r "${SANDBOX}/case1" "$BIG_RUNNING"
+printf 'rclone copy /home/admin_backups s3backup:bucket/host/2026-09-06/ --checksum\n' \
+  >"${BIG_RUNNING}/section-rclone_running.txt"
+# No completed run that went wrong: no ERROR lines in the hook log, and no dated
+# directories left behind from a previous cleanup that freed nothing.
+: >"${BIG_RUNNING}/section-hook_log.txt"
+: >"${BIG_RUNNING}/section-backup_listing.txt"
+
+set +e
+REPORT="$("$SCRIPT" --analyze "$BIG_RUNNING" 2>&1)"
+set -e
+
+if grep -q 'Backup cleanup is why it filled:    CONFIRMED' <<<"$REPORT"; then
+  fail "a live upload was reported as a cleanup failure:"$'\n'"$REPORT"
+fi
+grep -q 'Backup cleanup is why it filled:    INCONCLUSIVE' <<<"$REPORT" \
+  || fail "a mid-upload capture must withhold the cause verdict:"$'\n'"$REPORT"
+grep -q 'rclone is running in this capture' <<<"$REPORT" \
+  || fail "the report must say why the cause was withheld:"$'\n'"$REPORT"
+echo "OK an upload in flight explains the footprint instead of indicting the hook"
+
+# The guard must not become an excuse. A run that already finished badly leaves stale dated
+# directories behind, and that is evidence regardless of what is running now.
+BIG_STALE="${SANDBOX}/case9-stale"
+rm -rf "$BIG_STALE"
+cp -r "${SANDBOX}/case1" "$BIG_STALE"
+printf 'rclone copy /home/admin_backups s3backup:bucket/host/2026-09-06/ --checksum\n' \
+  >"${BIG_STALE}/section-rclone_running.txt"
+
+set +e
+REPORT="$("$SCRIPT" --analyze "$BIG_STALE" 2>&1)"
+set -e
+
+grep -q 'Backup cleanup is why it filled:    CONFIRMED' <<<"$REPORT" \
+  || fail "stale directories are evidence of a failed run whatever rclone is doing now:"$'\n'"$REPORT"
+echo "OK a concurrent upload does not excuse a run that already failed"
+
+##############################################################################
+echo "== Proof 10: --analyze must re-read a capture with no aws CLI on PATH =="
 ##############################################################################
 # Collection and analysis are separate so a capture can be reviewed later, by someone
 # with no credentials at all.

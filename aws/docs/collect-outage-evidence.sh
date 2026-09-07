@@ -169,16 +169,46 @@ echo "===SECTION enospc==="
 # syslog omits the year. One list feeds both the markers and the grep; they were separate
 # before and could drift out of sync.
 ENOSPC_WINDOW_DAYS=14
+
+# logrotate compresses rotations by default, so the newest rotation of a busy log is very
+# often messages-20260901.gz. Passing that to a plain grep searches the compressed bytes,
+# which finds nothing no matter what the file says -- while the file still counted as
+# SEARCHED, so the verdict was told the log had been examined and had come up clean. A
+# recent rotation is precisely where an incident's last words end up before the current
+# file rolls over, so this is the case most likely to matter.
+# Which decompressor a file needs, and whether this host has it. A missing tool must make
+# the file unsearchable rather than silently empty: "we looked and found nothing" and "we
+# could not look" are the two states this whole section exists to keep apart.
+enospc_tool_for() {
+  case "$1" in
+    *.gz) printf 'gzip' ;;
+    *.bz2) printf 'bzip2' ;;
+    *.xz) printf 'xz' ;;
+    *.zst) printf 'zstd' ;;
+    *) printf 'cat' ;;
+  esac
+}
+
 enospc_files=""
+enospc_compressed=""
 for f in /var/log/messages /var/log/messages-* /var/log/mysqld.log \
          /var/log/mariadb/mariadb.log /var/log/exim/mainlog /var/log/exim/mainlog-* \
          /var/log/exim/paniclog /var/log/maillog /var/log/maillog-*; do
   [ -f "$f" ] || continue
-  if [ -n "$(find "$f" -maxdepth 0 -mtime "-${ENOSPC_WINDOW_DAYS}" 2>/dev/null)" ]; then
-    echo "SEARCHED $f"
+  if [ -z "$(find "$f" -maxdepth 0 -mtime "-${ENOSPC_WINDOW_DAYS}" 2>/dev/null)" ]; then
+    echo "SKIPPED_OLD $f (last written more than ${ENOSPC_WINDOW_DAYS}d ago)"
+    continue
+  fi
+  tool="$(enospc_tool_for "$f")"
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "SKIPPED_UNREADABLE $f (needs ${tool}, which is not installed)"
+    continue
+  fi
+  echo "SEARCHED $f"
+  if [ "$tool" = "cat" ]; then
     enospc_files="${enospc_files} ${f}"
   else
-    echo "SKIPPED_OLD $f (last written more than ${ENOSPC_WINDOW_DAYS}d ago)"
+    enospc_compressed="${enospc_compressed} ${f}"
   fi
 done
 # mtime bounds the file, not the records inside it. /var/log/exim/paniclog is the case that
@@ -193,7 +223,18 @@ done
 # --- BEGIN enospc classifier ---
 # prove-outage-evidence-verdict.sh extracts everything between these two markers and runs
 # it verbatim against fixture logs, so this block is the tested artefact rather than a
-# paraphrase of it. It depends only on ENOSPC_WINDOW_DAYS and enospc_files, both set above.
+# paraphrase of it. It depends only on ENOSPC_WINDOW_DAYS, enospc_files and
+# enospc_compressed, all set above.
+enospc_reader() {
+  case "$1" in
+    *.gz) gzip -dc -- "$1" ;;
+    *.bz2) bzip2 -dc -- "$1" ;;
+    *.xz) xz -dc -- "$1" ;;
+    *.zst) zstd -dc -- "$1" ;;
+    *) cat -- "$1" ;;
+  esac
+}
+
 window_re=""
 n=0
 while [ "$n" -le "$ENOSPC_WINDOW_DAYS" ]; do
@@ -223,8 +264,18 @@ DATED_RE='^([A-Z][a-z][a-z] [ 0-9][0-9] |[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0
 # counts so the verdict never depends on how many lines were printed.
 #
 # One awk pass rather than two greps per line: this runs on a host that is already sick.
-if [ -n "$enospc_files" ]; then
-  grep -iHE "no space left|ENOSPC|disk full|out of disk" $enospc_files 2>/dev/null \
+ENOSPC_PAT="no space left|ENOSPC|disk full|out of disk"
+if [ -n "$enospc_files" ] || [ -n "$enospc_compressed" ]; then
+  {
+    [ -n "$enospc_files" ] && grep -iHE "$ENOSPC_PAT" $enospc_files 2>/dev/null
+    # Decompressed streams have no filename of their own, so it is prefixed back on in the
+    # same file:line shape grep -H produces, which is what the classifier splits on.
+    for cf in $enospc_compressed; do
+      enospc_reader "$cf" 2>/dev/null | grep -iE "$ENOSPC_PAT" 2>/dev/null \
+        | sed "s|^|${cf}:|"
+    done
+    true
+  } \
     | awk -v win="$window_re" -v dated="$DATED_RE" '
         { rec = $0; sub(/^[^:]*:/, "", rec) }
         rec ~ "^(" win ")"  { n_in++;  if (n_in  <= 40) print "MATCH " $0;         next }
@@ -443,14 +494,15 @@ analyze() {
 
   # --- did the disk actually break the services? ---
   local enospc_lines console_enospc=0 console_enospc_label="no" svc_down="" enospc_searched=0
-  local enospc_markers=0 enospc_skipped=0 enospc_old=0 enospc_undated=0
+  local enospc_markers=0 enospc_skipped=0 enospc_old=0 enospc_undated=0 enospc_unreadable=0
   # SKIPPED_OLD counts as a marker even though it names a file that was not searched. A
   # capture where every log fell outside the window is still a modern capture, and its
   # SKIPPED_OLD lines must not reach the legacy branch below, which would count them as
   # ENOSPC matches and confirm a full disk from nothing but log filenames.
-  enospc_markers="$(read_section "$dir" enospc | grep -cE '^(SEARCHED|SKIPPED_OLD) ' || true)"
+  enospc_markers="$(read_section "$dir" enospc | grep -cE '^(SEARCHED|SKIPPED_OLD|SKIPPED_UNREADABLE) ' || true)"
   enospc_searched="$(read_section "$dir" enospc | grep -c '^SEARCHED ' || true)"
   enospc_skipped="$(read_section "$dir" enospc | grep -c '^SKIPPED_OLD ' || true)"
+  enospc_unreadable="$(read_section "$dir" enospc | grep -c '^SKIPPED_UNREADABLE ' || true)"
   if ((enospc_markers > 0)); then
     # '^MATCH ' requires the trailing space, so MATCH_OLD and MATCH_UNDATED are excluded
     # here by construction -- only records dated inside the window are evidence.
@@ -498,6 +550,9 @@ analyze() {
   if ((enospc_undated > 0)); then
     echo "  ...plus ${enospc_undated} ENOSPC record(s) whose timestamp could not be parsed -- read them by hand"
   fi
+  if ((enospc_unreadable > 0)); then
+    echo "  ...and ${enospc_unreadable} in-window log(s) could not be read at all (missing decompressor)"
+  fi
   echo "  same in EC2 console output (survives a wedged userland): ${console_enospc_label}"
   echo "  services not active now:${svc_down:- none}"
 
@@ -538,6 +593,11 @@ analyze() {
   if ((console_enospc == 1)) || ((${enospc_lines:-0} > 0)); then
     disk_verdict="CONFIRMED"
     notes+=("A service logged ENOSPC, which is direct evidence the volume filled and writes failed -- not an inference from disk usage.")
+  elif ((enospc_unreadable > 0)); then
+    # A log inside the window that nothing could open is not evidence of absence, and a
+    # rotation is where an incident's last lines usually are.
+    disk_verdict="INCONCLUSIVE"
+    notes+=("${enospc_unreadable} log file(s) inside the incident window could not be read because the host lacks the decompressor for them, so ENOSPC can be neither confirmed nor ruled out. Install it (usually gzip) and re-capture, or copy those rotations off and grep them elsewhere.")
   elif ((enospc_undated > 0)); then
     # Neither branch below is honest here. Confirming would resurrect the bias the window
     # was added to remove; refuting would print "not one service logged ENOSPC" while the
@@ -562,9 +622,27 @@ analyze() {
 
   local backup_gb_int
   backup_gb_int="$(awk -v k="$backup_kb" 'BEGIN {printf "%d", k/1048576}')"
+  # A big local footprint means cleanup failed only if cleanup has already had its turn.
+  # During a backup, or while rclone is still uploading one, tens of gigabytes on disk is
+  # the system working correctly -- the hook deletes after the upload verifies, so the
+  # files are supposed to be there. The collector has recorded pgrep for rclone all along
+  # and nothing read it, so a capture taken mid-upload confirmed a cleanup failure that
+  # had not happened, and could pair that with an ENOSPC hit to exit 0.
+  local rclone_active=0
+  if read_section "$dir" rclone_running | grep -qvE '^\(none\)$|^[[:space:]]*$'; then
+    rclone_active=1
+  fi
+
   if ((backup_gb_int >= BACKUP_GB_SIGNIFICANT)) || ((share >= BACKUP_SHARE_PCT)); then
-    cause_verdict="CONFIRMED"
-    notes+=("Local backups account for ${backup_gb} GB (${share}% of used space), so the backup hook's cleanup is the thing that failed.")
+    if ((rclone_active == 1)) && ((${stale_dirs:-0} == 0)) && ((${upload_errors:-0} == 0)); then
+      # Nothing here says a run finished badly: no stale dated directories, no upload
+      # errors, and an upload in flight that explains the footprint.
+      cause_verdict="INCONCLUSIVE"
+      notes+=("Local backups account for ${backup_gb} GB (${share}% of used space), but rclone is running in this capture and nothing shows a completed run that failed -- no stale dated directories, no upload errors. A backup mid-upload is supposed to occupy disk; cleanup happens after verification. Re-capture once 'pgrep -a rclone' is empty before concluding the hook is at fault.")
+    else
+      cause_verdict="CONFIRMED"
+      notes+=("Local backups account for ${backup_gb} GB (${share}% of used space), so the backup hook's cleanup is the thing that failed.")
+    fi
     if ((${claimed_clean:-0} > 0)) && ((${stale_dirs:-0} > 0)); then
       notes+=("Defect 2 signature present: the log claims it cleaned /home/backup while dated directories are still there. That is the bug that freed nothing while exiting 0.")
     fi
