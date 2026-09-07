@@ -76,6 +76,24 @@ The Monday 02:45 catch-up is now disabled outright rather than moved to a timer.
 while the previous week's brief exists — it exits in under a second — but nothing runs the
 expensive path if a week is ever missed.
 
+### Root cause fixed 2026-09-07 17:23 UTC
+
+The unbounded query is gone and the pipeline completes again. The whole run now peaks at
+**667 MB against its 2600 MB cap and uses no swap at all**, where the 03:45 run that morning
+was OOM-killed with 2600 MB of RAM and 3400 MB of swap available to it. Full detail, including
+what was measured and why the other two proposed remedies were dropped, is in
+[What the fix does, and what it measured](#what-the-fix-does-and-what-it-measured).
+
+The change is deployed on the primary but **is not yet committed to
+`TellersTechOrg/tellerstech-website`** — that repository is private and outside this
+repository's tooling. Until it is committed, the host is ahead of the checkout and a
+redeploy from `main` would reintroduce the outage. The originals are backed up on the box at
+`/root/oncallbrief-prefix-backup-20260907-130955/`, alongside a pre-run dump of `items`.
+
+The patch itself is deliberately **not** committed here. This repository is public and that
+one is not, so the diff is attached to the pull request as a downloadable artifact instead of
+being checked in.
+
 ## How this was established
 
 Evidence was collected read-only over SSM from both hosts and is reproducible with
@@ -377,8 +395,8 @@ ten-minute samples, which record where the run happened to be at 03:50, not its 
 
 In order of leverage:
 
-1. **Bound the query.** This is the actual defect, and it is four lines. In
-   `oncallbrief/store.py`, `get_raw_items_not_yet_deduped()`:
+1. **Bound the query.** This is the actual defect. In `oncallbrief/store.py`,
+   `get_raw_items_not_yet_deduped()`:
 
    ```python
    cur = conn.execute("SELECT * FROM raw_items ORDER BY created_at DESC")
@@ -390,17 +408,28 @@ In order of leverage:
    every row in Python before a single one is filtered. As Python objects that inflates
    several times over, which is the whole memory footprint.
 
-   **`run_dedupe` never reads `raw_text` from those rows.** It groups them by URL identity;
-   the only fields it touches are the id, the URLs and the identity columns. The most
-   expensive thing in the query is loaded, held, and discarded. Naming the columns it
-   actually uses should remove roughly 2.6 GB of the 2.9 GB on its own.
+   The number that matters is what survives that filter. Counted on the primary on
+   2026-09-07: **174 rows, together holding under 1 MB**. The function reads 683,188 rows and
+   2.65 GB to return 174 of them. It is not that the query is somewhat too broad — it is that
+   the filter runs in the wrong place, so the cost tracks the size of the table instead of the
+   size of the backlog. That is also why the failure arrived suddenly rather than gradually:
+   nothing about the nightly workload changed, the table simply crossed what 3.8 GB of RAM
+   could hold.
 
-   Three smaller wins in the same function: filter `linked_ids` in SQL rather than fetching
-   everything and dropping rows in Python; stream with a server-side cursor instead of
-   `fetchall()`; and bound the straggler pass by date, since `since=all` re-examines rows
-   that were reconciled months ago. The docstring already explains that the two-query shape
-   exists to avoid an `O(raw_items × items)` correlated subquery — that reasoning is sound
-   and a `LEFT JOIN` or a temporary table of linked ids keeps it.
+   **Correction to an earlier revision of this document,** which claimed `run_dedupe` never
+   reads `raw_text` and that naming columns would therefore drop 2.6 GB for free. It does read
+   it, in two places, and both would have failed quietly:
+
+   - `raw_text` from each group's identity row becomes the merged item's body. `upsert_item`
+     assigns `raw_text = VALUES(raw_text)` unconditionally for unbriefed rows, so a version
+     that stopped loading the column would not have errored — it would have **blanked the body
+     of every item it merged**.
+   - `_choose_identity_row` tie-breaks on `len(raw_text)`. Without the column every candidate
+     scores zero and the winning row changes, silently altering which title, URL and body a
+     merged item takes.
+
+   Both are cheap to keep once they are known: select `LENGTH(raw_text)` for the tie-break,
+   and fetch the bodies only for the identity rows, in batches.
 
    This lives in
    `/home/tellerstec/public_html/wp-content/plugins/tellerstech-landing/oncallbrief-pipeline`,
@@ -595,20 +624,62 @@ its ~1.2 GB no matter how badly the job behaves. That property is what makes rai
 without the host losing the memory it needs to stay reachable. The disk freed in step 2 makes
 a larger swapfile practical for the first time.
 
-Three ways forward, in increasing order of durability:
+Three ways forward were on the table. **Only the third was taken, and it made the other two
+unnecessary.** Recording all three, because the reasoning for dropping two of them is the
+useful part:
 
-1. **Let it complete once.** Add swap and raise `MemorySwapMax` while leaving `MemoryMax` at
-   `2600M`. Supervised, watching `memory.peak`, this also produces the peak figure that
-   `sar` cannot give — which is what any future limit should be set from.
-2. **Shrink the payload.** `raw_text` is 2,650 MB of the 2,768 MB, and the dedupe never reads
-   it. Blanking it for rows past a retention horizon (`UPDATE raw_items SET raw_text='' WHERE
-   created_at < …`) keeps every id, URL and identity column that dedupe and `items.source_ids`
-   depend on, and drops most of the weight. By month, `raw_text` is 79 MB for Sep so far,
-   480 for Aug, 451 for Jul, 556 for Jun, 262 for May, 132 for Apr, 227 for Mar, 463 for Feb.
-   A 60-day horizon removes roughly two thirds. Whether that history is worth keeping is a
-   product decision, not an operational one.
-3. **Fix the query**, as described above. This is the only option that stops the problem
-   returning as the table grows by its 16 MB a day.
+1. ~~**Let it complete once.** Add swap and raise `MemorySwapMax`.~~ **Not done, and should
+   not be.** This was a way to buy a completed run without fixing anything, and its stated
+   purpose — to obtain the peak figure `sar` could not give — is now served by a run that
+   fits. The fixed pipeline peaks at 667 MB and touches swap zero times, so more swap would
+   only widen the window in which a future regression can thrash the disk instead of failing.
+   The existing `2600M` / `3400M` pair is left exactly as it is: it is a safety cap, not a
+   budget, and the job now runs at 26% of it.
+2. ~~**Shrink the payload.** Blank `raw_text` for rows past a retention horizon.~~ **Not done,
+   and should not be.** This was destructive, irreversible, and aimed at a cost that no longer
+   exists — the 2,650 MB is simply never read now. Deleting seven months of article bodies to
+   speed up a query that no longer touches them would have been the worst possible trade. A
+   retention policy may still be worth having for disk and backup reasons; it is not an
+   incident fix and should not be justified by this incident.
+3. **Fix the query.** Done — see below. The only option that stops the problem returning as
+   the table grows by its 16 MB a day.
+
+### What the fix does, and what it measured
+
+Two changes in the pipeline repo (`TellersTechOrg/tellerstech-website`), in
+`oncallbrief/store.py` and `oncallbrief/ingest.py`:
+
+- `get_raw_items_not_yet_deduped` now selects **ids** first, subtracts the linked set, and
+  only then reads the rows that survived — in batches, and without `raw_text`. The cost is
+  proportional to the backlog rather than to the table.
+- The bodies the merge genuinely needs — one per group, for the identity row — are fetched
+  by `get_raw_item_texts` a batch of groups at a time, so the merge holds a bounded number of
+  them however far behind dedupe has fallen. `LENGTH(raw_text)` rides along with each row so
+  `_choose_identity_row`'s tie-break is unchanged.
+- `get_items_identity_stubs` stops loading `items.raw_text` (157 MB) that neither of its two
+  callers reads. Its docstring already claimed the rows were lightweight.
+
+Measured on the primary, 2026-09-07:
+
+| | Before | After |
+|---|---|---|
+| Dedupe pass (`since=all`) | OOM-killed at 2600M RAM + 3400M swap | **315 MB peak**, 21 s, under a 1500M cap with **swap disabled** |
+| Whole nightly pipeline | never reached step 3 | **667 MB peak**, swap peak **0 bytes**, exit 0 |
+| Rows read to merge 174 | 683,188 rows / 2.65 GB | 683,188 ids, then 174 rows |
+
+Correctness was checked against the pre-run backup of `items`, restored into a scratch
+schema and joined row by row: across all 83,479 pre-existing items, **zero lost their body**.
+The 42 rows whose `source_ids` grew and the handful whose title or URL improved are
+`merge_item_for_upsert` doing its documented job on unbriefed rows.
+
+Also proven offline before deploying, on a database seeded to the same shape at 1/34 scale:
+the merged `items` table came out **byte-identical** between the old and new code, including
+every `raw_text`, while peak RSS fell from 638 MB to 67 MB. Both halves of the change were
+individually reverted to confirm the comparison actually fails when they are missing — the
+tie-break revert changes which row wins, and the body-fetch revert blanks bodies.
+
+Six regression tests covering this live in the pipeline repo at
+`tests/test_dedupe_backlog.py`.
 
    **Confirm the limits took effect.** `MemorySwapMax` is silently ignored under cgroup v1:
 
