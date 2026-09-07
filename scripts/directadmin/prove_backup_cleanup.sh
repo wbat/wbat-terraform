@@ -111,6 +111,12 @@ run_hook() {
 
   "$@" # case-specific fixture setup
 
+  # Default to the system event. Every proof that asserts on the system tree is modelling
+  # "a system backup finished and DirectAdmin fired its hook", which on a host is
+  # system_backup_post.sh passing --event=system. Fixtures create their directories a
+  # moment before the run, so under the admin event the in-progress guard would defer them
+  # -- correctly, but that is Proof 12's subject, not theirs.
+  #
   # Pinning DA_BACKUP_SYSTEM_ROOT is what most proofs want, but the root-detection proof
   # has to leave it empty so the hook chooses between candidates the way it does on a host.
   local root_env=(DA_BACKUP_SYSTEM_ROOT="$SYSTEM_ROOT")
@@ -129,10 +135,12 @@ run_hook() {
     DA_BACKUP_ADMIN_DIR="$ADMIN_DIR" \
     "${root_env[@]}" \
     DA_BACKUP_SYSTEM_KEEP_DAYS="${DA_BACKUP_SYSTEM_KEEP_DAYS:-7}" \
+    DA_BACKUP_SYSTEM_QUIESCE_SEC="${DA_BACKUP_SYSTEM_QUIESCE_SEC:-900}" \
     DA_BACKUP_LOG="$HOOK_LOG" \
     DA_BACKUP_LOCK="${case_dir}/lock/da-backup-s3.lock" \
     DA_BACKUP_CONF="${SANDBOX}/backup.conf" \
     DA_BACKUP_ALERT_USED_PCT="${DA_BACKUP_ALERT_USED_PCT:-101}" \
+    DA_BACKUP_EVENT="${DA_BACKUP_EVENT:-system}" \
     "$HOOK" >"${case_dir}/stderr" 2>&1
   HOOK_RC=$?
   set -e
@@ -425,6 +433,122 @@ grep -q 'ERROR could not enumerate' "${CASE11}/da-backup-s3.log" \
 grep -q 'DirectAdmin backup upload FAILED' "${CASE11}/mail.out" \
   || fail "a partial enumeration must mail like any other upload failure"
 echo "OK an incomplete file list fails the run instead of defining it"
+
+##############################################################################
+echo "== Proof 12: a system backup still being written must not be uploaded or deleted =="
+##############################################################################
+# The most destructive path this branch opened. system_backup_post.sh execs this same
+# script, so a run cannot tell from the filesystem which DirectAdmin event started it. An
+# admin backup finishing at 03:10 finds today's system directory -- which the weekly
+# system backup is still writing into -- uploads the fraction that exists, verifies that
+# fraction against what it just uploaded, and rm -rf's the tree out from under sysbk. S3
+# then holds a partial archive recorded as a complete one, which is worse than holding
+# nothing. The flock does not help: it serialises hook runs, not the backup process.
+#
+# This was unreachable while SYSTEM_ROOT pointed at an empty /home/backup. Detecting the
+# real root is what made it live, so the fix and the hazard arrived in the same change.
+CASE12="${SANDBOX}/case12"
+fixture_12() {
+  make_admin_archive user1.tar.zst
+  make_system_dir "$TODAY"
+  # Being written to right now.
+  touch "${SYSTEM_ROOT}/${TODAY}/mysql/db.sql.gz"
+}
+DA_BACKUP_EVENT=admin run_hook case12 fixture_12
+unset DA_BACKUP_EVENT
+
+[[ -d "${CASE12}/backup/${TODAY}" ]] \
+  || fail "the admin event deleted a system backup that was still being written"
+((HOOK_RC == 0)) \
+  || fail "deferring a live directory is normal operation, not a failure (rc=${HOOK_RC})"
+grep -q "NOTE deferring .*${TODAY}" "${CASE12}/da-backup-s3.log" \
+  || fail "the deferral must be logged:"$'\n'"$(cat "${CASE12}/da-backup-s3.log")"
+grep -q 'left in place' "${CASE12}/da-backup-s3.log" \
+  || fail "the completion line must not claim cleanup was complete when a directory was skipped"
+[[ ! -f "${CASE12}/admin_backups/user1.tar.zst" ]] \
+  || fail "deferring the system tree must not stop admin cleanup; the two are independent"
+echo "OK an in-progress system backup is left alone by the admin event"
+
+# The system event is DirectAdmin's completion signal, so the identical directory must be
+# uploaded and cleaned immediately -- otherwise the guard above would just be a leak.
+CASE13="${SANDBOX}/case13"
+fixture_13() {
+  make_system_dir "$TODAY"
+  touch "${SYSTEM_ROOT}/${TODAY}/mysql/db.sql.gz"
+}
+DA_BACKUP_EVENT=system run_hook case13 fixture_13
+unset DA_BACKUP_EVENT
+
+[[ ! -d "${CASE13}/backup/${TODAY}" ]] \
+  || fail "the system event is the completion signal and must still clean up promptly"
+((HOOK_RC == 0)) || fail "the system event run failed (rc=${HOOK_RC})"
+echo "OK the system event still cleans the directory it was fired for"
+
+# And the guard must be a deferral, not a refusal. A directory that has stopped changing
+# is a finished backup whose hook never cleaned it -- the backlog case, and the reason the
+# admin event looks at the system tree at all. If this did not hold, the fix would trade
+# one silent leak for another.
+CASE16="${SANDBOX}/case16"
+fixture_16() {
+  make_system_dir "$TODAY"
+  find "${SYSTEM_ROOT}/${TODAY}" -exec touch -t 202601010000 {} +
+  touch -t 202601010000 "${SYSTEM_ROOT}/${TODAY}"
+}
+DA_BACKUP_EVENT=admin run_hook case16 fixture_16
+unset DA_BACKUP_EVENT
+
+[[ ! -d "${CASE16}/backup/${TODAY}" ]] \
+  || fail "a settled directory was deferred forever; the admin event must still clear a backlog"
+((HOOK_RC == 0)) || fail "clearing a settled directory must not fail the run (rc=${HOOK_RC})"
+echo "OK a directory that has stopped changing is still collected by the admin event"
+
+##############################################################################
+echo "== Proof 13: backups under a root this run ignores must reach a person =="
+##############################################################################
+# Picking the more populated root leaves the other one growing with nothing managing it.
+# That was logged, and a log is not a notification -- the entire failure being fixed here
+# is a hook writing reassuring lines into a file nobody opened while the volume filled.
+CASE14="${SANDBOX}/case14"
+fixture_14() {
+  make_system_dir "$TODAY" # the root detection will choose this one
+  make_system_dir "09-06-26"
+  mkdir -p "${CASE14}/sysbackup/07-04-26/mysql"
+  : >"${CASE14}/sysbackup/07-04-26/mysql/db.sql.gz"
+}
+STUB_ROOT_CANDIDATES="${SANDBOX}/case14/backup ${SANDBOX}/case14/sysbackup" \
+  run_hook case14 fixture_14
+unset STUB_ROOT_CANDIDATES
+
+grep -q 'more than one root' "${CASE14}/da-backup-s3.log" \
+  || fail "the second populated root was not detected:"$'\n'"$(cat "${CASE14}/da-backup-s3.log")"
+grep -q 'unhandled root' "${CASE14}/mail.out" \
+  || fail "an unmanaged backup tree must mail, not just log:"$'\n'"$(cat "${CASE14}/mail.out")"
+grep -q 'sysbackup' "${CASE14}/mail.out" \
+  || fail "the alert must name the root that is being ignored"
+echo "OK an ignored backup root is reported to a human"
+
+##############################################################################
+echo "== Proof 14: a sweep that cannot list its candidates must not claim success =="
+##############################################################################
+# Same discarded-status defect as the admin enumeration, in the scan that finds the
+# backlog. Process substitution threw find's status away, so a scan that died partway
+# swept what it had reached and reported a clean run over whatever it had not.
+CASE15="${SANDBOX}/case15"
+fixture_15() {
+  make_system_dir "$TODAY"
+  chmod 000 "$SYSTEM_ROOT"
+}
+DA_BACKUP_SYSTEM_KEEP_DAYS=7 run_hook case15 fixture_15
+unset DA_BACKUP_SYSTEM_KEEP_DAYS
+chmod 700 "${CASE15}/backup"
+
+((HOOK_RC != 0)) \
+  || fail "an unreadable backup root was swept as though it were empty"
+grep -q 'could not list old directories' "${CASE15}/da-backup-s3.log" \
+  || fail "the failed scan was not logged:"$'\n'"$(cat "${CASE15}/da-backup-s3.log")"
+grep -q 'could not be scanned' "${CASE15}/mail.out" \
+  || fail "a backlog that could not be enumerated must mail:"$'\n'"$(cat "${CASE15}/mail.out")"
+echo "OK a sweep that cannot see the backlog says so"
 
 echo
 echo "PASS: offline backup cleanup proofs"

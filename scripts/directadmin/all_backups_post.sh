@@ -54,6 +54,18 @@ LOCK_WAIT_SEC="${DA_BACKUP_LOCK_WAIT:-7200}"
 CONFIG="${DA_BACKUP_CONF:-/etc/da-vhost-listen/vhost-listen.conf}"
 HEALTH_ALERT_TO=""
 
+# Which DirectAdmin event invoked this run. system_backup_post.sh passes --event=system;
+# anything else is the admin-backup event. This is the only completion signal available
+# for the system tree: the admin hook can fire while the weekly system backup is halfway
+# through writing today's directory, and the flock below does not help because it
+# serialises hook runs, not the backup processes that produce the files.
+EVENT="${DA_BACKUP_EVENT:-admin}"
+[[ "${1:-}" == "--event=system" ]] && EVENT="system"
+
+# How long a system directory must sit untouched before a run that is *not* the system
+# event will treat it as finished. Only consulted for the admin event.
+SYSTEM_QUIESCE_SEC="${DA_BACKUP_SYSTEM_QUIESCE_SEC:-900}"
+
 # Backstop sweep for system backup dirs an earlier run failed to remove.
 SYSTEM_KEEP_DAYS="${DA_BACKUP_SYSTEM_KEEP_DAYS:-7}"
 # Used% at or above which a *successful* run is still worth an alert: cleanup worked and
@@ -160,6 +172,7 @@ dated_dir_count() {
 # Pick the root DirectAdmin is really writing to, preferring whichever candidate holds
 # dated backup directories. An explicit DA_BACKUP_SYSTEM_ROOT always wins so a host with
 # a non-standard layout, and the offline proof, can pin it.
+unhandled_roots=()
 resolve_system_root() {
   if [[ -n "$SYSTEM_ROOT" ]]; then
     return 0
@@ -183,9 +196,14 @@ resolve_system_root() {
   SYSTEM_ROOT="${best:-/home/backup}"
 
   # Two populated roots means backups are being written to a path this run will not
-  # clean. Say so rather than quietly picking one and leaving the other to fill the disk.
+  # clean. Saying so in the log is not saying it to anyone: nothing reads this file until
+  # someone already suspects a problem, and the whole failure being fixed here is a hook
+  # that logged reassuring things into a file nobody opened while the volume filled. The
+  # ignored root grows unbounded and no other check covers it, so this has to reach a
+  # person.
   if ((${#populated[@]} > 1)); then
     log "WARN system backups found under more than one root: ${populated[*]}; this run only handles ${SYSTEM_ROOT}"
+    unhandled_roots=("${populated[@]}")
   fi
 }
 
@@ -255,7 +273,12 @@ upload_admin() {
     return 1
   fi
   rm -f "$find_err"
-  admin_count="$(grep -c . "$admin_list" 2>/dev/null || echo 0)"
+  # grep -c prints 0 and exits 1 on no match, so `|| echo 0` appended a second line and
+  # made admin_count "0\n0" -- which is not a number, so the empty-directory check errored
+  # out instead of matching and every empty run logged "upload (0 files)" and called
+  # rclone for nothing.
+  admin_count="$(grep -c . "$admin_list" 2>/dev/null || true)"
+  admin_count="${admin_count:-0}"
 
   if ((admin_count == 0)); then
     log "skip admin: no files under ${ADMIN_DIR}"
@@ -314,6 +337,7 @@ cleanup_admin_local() {
 
 system_dir=""
 system_uploaded=0
+system_deferred=""
 
 resolve_system_dir() {
   [[ -d "$SYSTEM_ROOT" ]] || return 0
@@ -335,11 +359,45 @@ resolve_system_dir() {
   return 0
 }
 
+# Newest mtime anywhere under a directory, as an age in seconds. Used to decide whether a
+# system backup has stopped being written to.
+newest_mtime_age() {
+  local dir="$1" newest now
+  now="$(date +%s)"
+  newest="$(find "$dir" -newermt "@0" -printf '%T@\n' 2>/dev/null | sort -n | tail -1 | cut -d. -f1)"
+  [[ -n "$newest" ]] || {
+    printf '%d' 0
+    return 0
+  }
+  printf '%d' "$((now - newest))"
+}
+
 upload_system() {
   [[ -n "$system_dir" ]] || {
     log "skip system: no backup directory under ${SYSTEM_ROOT}"
     return 0
   }
+
+  # The directory this hook is about to upload and then delete may still be an open write
+  # target. DirectAdmin's system backup is a separate producer on its own schedule, and
+  # this same script runs for the admin event too, so an admin backup that finishes at
+  # 03:10 can find today's half-written system directory, upload the fraction that exists,
+  # verify that fraction against what it just uploaded, and rm -rf the tree while sysbk is
+  # still writing into it. The result is worse than a lost backup: S3 gets a partial
+  # archive recorded as a successful one. That path was inert while SYSTEM_ROOT pointed at
+  # an empty directory; detecting the real root is what made it reachable.
+  #
+  # The system event is DirectAdmin saying the write finished, so it proceeds. Every other
+  # caller has to see the directory hold still first.
+  if [[ "$EVENT" != "system" ]]; then
+    local age
+    age="$(newest_mtime_age "$system_dir")"
+    if ((age < SYSTEM_QUIESCE_SEC)); then
+      system_deferred="${system_dir} (last written ${age}s ago)"
+      log "NOTE deferring ${system_dir}: modified ${age}s ago and this is the ${EVENT} event, so the system backup may still be writing it. Leaving it for the system hook or a later run."
+      return 0
+    fi
+  fi
 
   local rc=0
   log "upload ${system_dir} ($(size_of "$system_dir")) -> ${DEST}"
@@ -397,6 +455,25 @@ sweep_old_system_dirs() {
   [[ -d "$SYSTEM_ROOT" ]] || return 0
 
   local d stamp prefix rc freed
+  local candidates find_rc=0
+  candidates="$(mktemp)" || {
+    log "ERROR could not create temp file for the sweep candidate list"
+    return 1
+  }
+  # Same reason the admin enumeration checks find's status: process substitution throws it
+  # away, and a find that dies partway still writes what it reached. Here that turns into
+  # a sweep which silently skips whatever came after the error -- leaving old directories
+  # on disk, adding nothing to unverified_dirs, and reporting a clean run. The one path
+  # whose job is clearing a backlog would then quietly clear part of it.
+  find "$SYSTEM_ROOT" -mindepth 1 -maxdepth 1 -type d -mtime "+${SYSTEM_KEEP_DAYS}" \
+    ! -path "${system_dir:-/nonexistent}" >"$candidates" 2>/dev/null || find_rc=$?
+  if ((find_rc != 0)); then
+    log "ERROR could not list old directories under ${SYSTEM_ROOT} (find rc=${find_rc}); the sweep saw a partial list, so any backlog it did not reach is still on disk"
+    cleanup_failures+=("${SYSTEM_ROOT} -- could not be scanned for old backups (find rc=${find_rc}); backlog may remain")
+    rm -f "$candidates"
+    return 1
+  fi
+
   while IFS= read -r d; do
     [[ -n "$d" ]] || continue
     stamp="$(basename "$d")"
@@ -421,7 +498,8 @@ sweep_old_system_dirs() {
       log "ERROR could not remove ${d} after confirming it in ${prefix}; it is safe in S3 but still using local disk"
       cleanup_failures+=("${d} (${freed}) -- verified in S3 but could not be deleted")
     fi
-  done < <(find "$SYSTEM_ROOT" -mindepth 1 -maxdepth 1 -type d -mtime "+${SYSTEM_KEEP_DAYS}" ! -path "${system_dir:-/nonexistent}" 2>/dev/null)
+  done <"$candidates"
+  rm -f "$candidates"
 }
 
 resolve_system_dir
@@ -501,6 +579,22 @@ Disk: $(disk_summary "$SYSTEM_ROOT")
 Runbook: aws/docs/2026-09-06-primary-outage.md"
 fi
 
+if ((${#unhandled_roots[@]} > 0)); then
+  log "WARN backups exist under a root this run did not handle"
+  alert "DirectAdmin backups under an unhandled root on ${HOST} (disk ${used_pct}% used)" \
+    "Dated backup directories were found under more than one root. This run handled ${SYSTEM_ROOT} only; the others are not being uploaded or cleaned by anything, so they grow until the volume is full.
+
+$(printf '  - %s\n' "${unhandled_roots[@]}")
+
+Usually this means DirectAdmin was reconfigured, or a legacy tree was left behind after a
+move. Decide which root is current, then either point the hook at it explicitly with
+DA_BACKUP_SYSTEM_ROOT, or upload and remove the stale tree:
+  rclone copy <dir> ${REMOTE}:${BUCKET}/${HOST}/<YYYY-MM-DD>/ --s3-no-check-bucket --checksum
+
+Disk: $(disk_summary "$SYSTEM_ROOT")
+Runbook: aws/docs/2026-09-06-primary-outage.md"
+fi
+
 if ((used_pct >= ALERT_USED_PCT)); then
   # Uploads and cleanup both worked and the volume is still nearly full, so the space is
   # going somewhere this hook does not manage. Worth a mail before it becomes an outage.
@@ -515,5 +609,11 @@ $(du -xh --max-depth=2 / 2>/dev/null | sort -rh | head -15 | sed 's/^/  /')
 Runbook: aws/docs/2026-09-06-primary-outage.md"
 fi
 
-log "OK backup upload and local cleanup complete"
+if [[ -n "$system_deferred" ]]; then
+  # Not a failure, but the run did less than the unqualified message claims, and the
+  # difference is a directory still occupying the disk.
+  log "OK backup upload and local cleanup complete, except ${system_deferred} which was left in place"
+else
+  log "OK backup upload and local cleanup complete"
+fi
 exit 0
