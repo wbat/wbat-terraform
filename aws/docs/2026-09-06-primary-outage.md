@@ -36,6 +36,23 @@ then touch DirectAdmin.
 | 6 | [Recreate the schedule](#3-recreate-the-backup-schedule--this-one-needs-the-panel) (panel) | — | Only once 2 and 4 have passed. |
 | 7 | A full all-users backup | **~45 GB** | Needs step 2 to have completed first. See the note there about peak local usage. |
 
+### State of the host, read 2026-09-07 05:02 UTC
+
+Merging the pull request that carries this document changes nothing on the server — this
+repository has no deploy pipeline, which is the same gap `--verify` exists to close. As of
+that reading, every step above is still outstanding:
+
+| Checked | Found |
+|---|---|
+| `/etc/oncallbrief.env` | Exists, `0600 root:root`, one `RUN_ALL_HEALTHCHECK_URL` line — **but nothing reads it yet** |
+| `oncallbrief.service` / `.timer` | Not installed. Both `run_all.py` entries still in `crontab -u tellerstec`, uncapped, still carrying the leaked URL |
+| `stat -fc %T /sys/fs/cgroup` | `cgroup2fs` — `MemorySwapMax` will be enforced |
+| Installed backup hook | Still `SYSTEM_ROOT="/home/backup"`, i.e. the pre-fix version. `da_disk_guard.sh` absent |
+| `df -h /` | `197G / 3.8G avail / 99%`, inodes 10% |
+| `/backup` | Now **60 GB across ten** dated directories — `09-05-26` has appeared since the first capture |
+| `crontab -u root` | Still `0 5 * * 6 /usr/local/directadmin/shared/sysbk.sh -q`, the config-only script. Next fires Sat 05:00 |
+| `oncallbrief.log` | Last line is still `03:46:47 ... since=all` from Sep 6. The job has not run since |
+
 ## How this was established
 
 Evidence was collected read-only over SSM from both hosts and is reproducible with
@@ -303,8 +320,17 @@ doing no work is worse to operate than one that killed a cron job, because nothi
 run on it, including whatever would have told you.
 
 Two facts say the current 4 GB is already spent: swap peaked at 80–97% on **every** night
-of the preceding week, and the `since=all` load appears in all 90 logged runs, against a
-database that grows. Another 4 GB buys a few more nights of the same graph.
+of the preceding week, and a successful run needs about 5 GB of anonymous memory on a box
+that has 3.8 GB of RAM — measured below. The margin on a good night is a few hundred
+megabytes. Another 4 GB of swap buys a few more nights of the same graph.
+
+One earlier claim here has to be withdrawn. This section attributed the growth to a
+database that grows, but `oncallbrief.db` is 472 MB with an mtime of **Feb 13 2026** and no
+WAL beside it — it has not been written to in seven months. The `since=all` load is still
+the memory defect, and the healthcheck still shows run time climbing from 11 min 08 s on
+Aug 24 to 13 min 20 s on Sep 5, but a growing table is not the reason and the cause of that
+trend is not established. Candidates, none checked: API latency on the model calls the log
+mentions, growth in the weekly item set feeding the run, or something outside the pipeline.
 
 In order of leverage:
 
@@ -336,8 +362,8 @@ In order of leverage:
    Type=oneshot
    User=tellerstec
    MemoryAccounting=yes
-   MemoryMax=1200M
-   MemorySwapMax=0
+   MemoryMax=2600M
+   MemorySwapMax=3400M
    EnvironmentFile=/etc/oncallbrief.env
    ExecStart=/bin/bash -lc 'cd /home/tellerstec/public_html/wp-content/plugins/tellerstech-landing && python3 oncallbrief-pipeline/run_all.py >> /home/tellerstec/logs/oncallbrief.log 2>&1'
    ```
@@ -411,19 +437,68 @@ In order of leverage:
    job, one of them uncapped, which is worse than either alone. Remove it in the same
    sitting.
 
-   `MemorySwapMax=0` is the important half: without it the job is capped on RAM and still
-   free to thrash swap, which is the whole failure mode. **It is silently ignored under
-   cgroup v1**, so confirm the host is on v2 rather than assuming:
+   **There are two `run_all.py` entries in that crontab, not one.** Read on the primary
+   2026-09-07:
+
+   ```text
+   45 3 * * *   ... RUN_ALL_HEALTHCHECK_URL=<leaked> python3 oncallbrief-pipeline/run_all.py
+   45 2 * * 1   ... RUN_ALL_HEALTHCHECK_URL=<leaked> python3 oncallbrief-pipeline/run_all.py --week previous
+   ```
+
+   The Monday 02:45 catch-up pings the **same** check and carries the **same** leaked URL,
+   so replacing only the nightly line leaves the exposed token live on the box and leaves a
+   second uncapped entry racing the timer. Its memory cost is usually nil — `sar` for Aug 31
+   02:40–03:00 is flat, and its log shows it exiting in under a second with
+   `brief already looks complete ... skipping ingest, summarize, and draft`. That is
+   conditional, though: on a Monday where the previous week's brief is *missing* it does the
+   full ingest and summarize, which is the expensive path. Give it its own
+   `oncallbrief-catchup.service` with the same limits and an `OnCalendar=Mon *-*-* 02:45:00`
+   timer, or drop it, but do not leave it in cron.
+
+   A third entry, `*/20 * * * *` running `oncallbrief.send_siw`, uses a different check whose
+   URL was never committed here. It needs no rotation and is untouched by this step.
+
+   **Where those two numbers come from, and why `MemorySwapMax=0` is wrong here.** An
+   earlier draft of this section said `MemoryMax=1200M` and `MemorySwapMax=0`, reasoning
+   that swap is the medium the thrash happens in so the job should be denied it. Measuring
+   what a *successful* run costs shows that would have killed the pipeline on its first
+   night. From `sar -r` and `sar -S` on the nights the job completed normally:
+
+   | | 03:40 baseline | 03:50 mid-run | pipeline's share |
+   |---|---|---|---|
+   | Sep 3 | 1.33 GB used, 0.59 GB swap | 3.36 GB used, 3.87 GB swap (96.7%) | ~2.0 GB RAM + ~3.3 GB swap |
+   | Sep 4 | 1.35 GB used, 0.55 GB swap | 3.20 GB used, 3.36 GB swap (84.0%) | ~1.9 GB RAM + ~2.8 GB swap |
+   | Sep 5 | 1.42 GB used, 0.54 GB swap | 3.40 GB used, 3.23 GB swap (80.7%) | ~2.0 GB RAM + ~2.7 GB swap |
+
+   A normal, successful run needs roughly **5 GB of anonymous memory** on a host with 3.8 GB
+   of RAM. It only finishes because swap absorbs the ~3 GB that does not fit. `1200M` is a
+   quarter of what it needs and `MemorySwapMax=0` removes the medium it depends on: either
+   one alone kills every run. That is precisely the failure this section warns about two
+   paragraphs earlier — a cap whose first symptom is a missed healthcheck, indistinguishable
+   from the cap working, inviting whoever is on call to remove it.
+
+   `2600M` + `3400M` is a 6 GB ceiling against a ~5 GB normal run. It leaves the ~1.8 GB the
+   rest of the box needs, gives the pipeline about 20% headroom over its observed cost, and
+   still kills a run that heads for the 7.8 GB the machine actually has. Sep 5 succeeded at
+   ~5 GB and Sep 6 did not stop — a 6 GB ceiling separates those two.
+
+   **This is survival, not headroom.** The cap keeps a bad night from taking the host with
+   it; it does not create room that is not there. A job needing 5 GB of a 7.8 GB box every
+   single night, with swap at 81–97% each time, has no margin for a slow API or a slightly
+   larger week — which is what Sep 6 was. Bounding the query is the fix; until then a
+   `t3a.large` (8 GB, roughly +$27/month) is the lever that actually restores margin.
+
+   **Confirm the limits took effect.** `MemorySwapMax` is silently ignored under cgroup v1:
 
    ```bash
-   stat -fc %T /sys/fs/cgroup          # cgroup2fs = both limits enforced; tmpfs = v1, swap cap ignored
+   stat -fc %T /sys/fs/cgroup          # cgroup2fs = both enforced; tmpfs = v1, swap cap ignored
    systemctl show oncallbrief.service -p MemoryMax -p MemorySwapMax
    sudo systemctl start oncallbrief.service && systemctl status oncallbrief.service
    ```
 
-   On v1, either boot with `systemd.unified_cgroup_hierarchy=1` or lower `MemoryMax` far
-   enough that the job dies before it can page heavily — a RAM-only cap on a host with 4 GB
-   of swap still permits the thrash that took five hours to resolve.
+   Checked on the primary 2026-09-07: `cgroup2fs`, so both limits are enforced. On a v1 host
+   the swap limit is dropped and the RAM limit alone permits the same thrash, so either boot
+   with `systemd.unified_cgroup_hierarchy=1` or accept that the cap is partial.
 
    A run that exceeds the cap shows as `code=killed, status=9/KILL` in `systemctl status`.
    The healthcheck ping doubles as the alert: a killed run never pings, so it surfaces as a
