@@ -53,6 +53,28 @@ that reading, every step above is still outstanding:
 | `crontab -u root` | Still `0 5 * * 6 /usr/local/directadmin/shared/sysbk.sh -q`, the config-only script. Next fires Sat 05:00 |
 | `oncallbrief.log` | Last line is still `03:46:47 ... since=all` from Sep 6. The job has not run since |
 
+### Step 1 completed 2026-09-07 05:17 UTC
+
+The units are installed and both `run_all.py` cron entries are commented out. Verified
+afterwards, because each of these had a way to fail that looks like success:
+
+| Checked | Result |
+|---|---|
+| `MemoryMax` / `MemorySwapMax` | `2726297600` / `3565158400` — the corrected 2600M + 3400M |
+| `TimeoutStartUSec` | **`infinity`**. `Type=oneshot` disables the start timeout; had it inherited the 90 s default, every 13-minute run would have been killed at 90 seconds |
+| `python3` under the unit | `/usr/bin/python3`, 3.9.25 — byte-identical resolution to the old cron `PATH`, and `httpx 0.28.1` imports, matching the `python-httpx/0.28.1` user agent in the check's history |
+| `/etc/oncallbrief.env` | Read by the unit, contains a well-formed hc-ping URL, and does **not** contain the leaked `24677487` UUID |
+| `crontab -u tellerstec` | No active `run_all` line. The `*/20` `send_siw` entry left alone |
+| `systemctl list-timers` | Next run `Mon 2026-09-07 03:45:00 EDT`. `Persistent=true` did not fire a catch-up on enable |
+
+The two commented-out cron lines still contain the leaked URL. Harmless once the old check is
+deleted, but they are a loaded gun: uncommenting one restores an uncapped job pointed at a dead
+ping URL. Delete the lines rather than leaving them commented.
+
+The Monday 02:45 catch-up is now disabled outright rather than moved to a timer. That is fine
+while the previous week's brief exists — it exits in under a second — but nothing runs the
+expensive path if a week is ever missed.
+
 ## How this was established
 
 Evidence was collected read-only over SSM from both hosts and is reproducible with
@@ -581,6 +603,36 @@ aws s3 ls s3://wbat-tellerstech-directadmin-backups-708113892725/server/
 If nothing newer than `2026-07-02/` appears, upload before deleting. Note the ordering:
 `08-29-26` goes first because it holds the only recent database dump, and a lexicographic
 glob would otherwise leave it until last.
+
+**Checked 2026-09-07: "only copy" is measured, not inferred.** The `server/` prefix holds 47
+dated prefixes and stops at `2026-07-02/`. Every one of the nine local weeks was queried
+directly — both the `MM-DD-YY` date and the day after, in case of a cross-midnight write — and
+every one returned **zero objects**:
+
+```text
+2026-07-04 … 2026-08-30, 2026-09-05, 2026-09-06 → objects=0 (20 prefixes, all empty)
+```
+
+What is on disk, and what each week is worth:
+
+| Week | Total | `mysql/` |
+|---|---|---|
+| 07-04-26 … 08-15-26 | 6.2–6.7 GB each | 1.4–1.8 GB each |
+| 08-22-26 | 7.4 GB | 1.8 GB |
+| **08-29-26** | **7.4 GB** | **1.9 GB — newest database dump anywhere** |
+| 09-05-26 | **60 KB** | **none** |
+
+That last row is the config-only regression measured directly rather than inferred from a log:
+the Sep 5 system backup produced 60 KB and no `mysql/` tree at all, while every week before it
+carried 1.4–1.9 GB of databases.
+
+**`rclone lsd s3backup:` returns 403 and that is correct.** It calls `ListAllMyBuckets`, which
+the `directadmin-backup` IAM user is deliberately not granted; its policy allows `ListBucket`,
+`GetBucketLocation` and `ListBucketMultipartUploads` on this bucket only, plus `PutObject`,
+`GetObject`, `DeleteObject` and the multipart actions on its objects. That is exactly what
+`rclone copy` and `rclone check --checksum --one-way` need, and it is why every command below
+passes `--s3-no-check-bucket`. The 403 reads like broken credentials at one in the morning;
+list the bucket path instead of the remote root to see the real state.
 
 Each week that verifies records its own path. The deletion step then reads that file rather
 than re-globbing, so a directory whose upload or checksum failed cannot be removed by the
