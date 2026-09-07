@@ -265,7 +265,7 @@ it never leaves a verified copy on disk. Age is not treated as evidence that a b
 safe to delete — even the old-directory sweep checks S3 first, because on the primary the
 directories it would have swept were the only copy. See
 [`aws/docs/2026-09-06-primary-outage.md`](../../aws/docs/2026-09-06-primary-outage.md) for
-what was actually broken on that host, and `prove_backup_cleanup.sh` for the nine
+what was actually broken on that host, and `prove_backup_cleanup.sh` for the ten
 behaviours that are now pinned.
 
 Alerting: a run that ends with backups still on disk mails `HEALTH_ALERT_TO` from
@@ -348,6 +348,8 @@ halves of fail-safe: a failed or unverifiable upload keeps the local copy and al
 a verified upload is always followed by the matching delete. It also covers the case where
 the delete itself fails — a read-only filesystem or an immutable file — which must exit
 non-zero and mail rather than log "cleanup complete" over a backup still sitting on disk.
+That applies to the old-directory sweep too: it is the path whose job is clearing a
+backlog, so a sweep that silently fails to reclaim anything is the worst place to be quiet.
 
 ## Troubleshooting (backups)
 

@@ -377,7 +377,7 @@ unverified_dirs=()
 sweep_old_system_dirs() {
   [[ -d "$SYSTEM_ROOT" ]] || return 0
 
-  local d stamp prefix rc
+  local d stamp prefix rc freed
   while IFS= read -r d; do
     [[ -n "$d" ]] || continue
     stamp="$(basename "$d")"
@@ -396,8 +396,12 @@ sweep_old_system_dirs() {
       continue
     fi
 
-    log "sweeping ${d} ($(size_of "$d")): older than ${SYSTEM_KEEP_DAYS}d and confirmed in ${prefix}"
-    rm -rf -- "$d"
+    freed="$(size_of "$d")"
+    log "sweeping ${d} (${freed}): older than ${SYSTEM_KEEP_DAYS}d and confirmed in ${prefix}"
+    if ! rm -rf -- "$d"; then
+      log "ERROR could not remove ${d} after confirming it in ${prefix}; it is safe in S3 but still using local disk"
+      cleanup_failures+=("${d} (${freed}) -- verified in S3 but could not be deleted")
+    fi
   done < <(find "$SYSTEM_ROOT" -mindepth 1 -maxdepth 1 -type d -mtime "+${SYSTEM_KEEP_DAYS}" ! -path "${system_dir:-/nonexistent}" 2>/dev/null)
 }
 

@@ -354,5 +354,44 @@ grep -q 'ERROR could not remove 1 verified file(s)' "${CASE9}/da-backup-s3.log" 
   || fail "an admin cleanup failure blocked the system cleanup; the two must stay independent"
 echo "OK an undeletable verified backup fails the run and names itself in the alert"
 
+##############################################################################
+echo "== Proof 10: the same failure in the age sweep must also be reported =="
+##############################################################################
+# Proof 9 covers the two cleanup helpers. The sweep is a third path that deletes verified
+# backups, and it was left with a bare 'rm -rf' -- so the one route that exists specifically
+# to clear a backlog could fail to clear it and still report a clean run. The backlog is the
+# whole reason the volume reached 99%, which makes silence here worse than in the helpers,
+# not better.
+#
+# 07-11-26 is old enough to sweep and confirmed in S3, so the sweep decides to delete it.
+# Its mysql/ subdirectory is not writable, so rm cannot empty it and the tree survives.
+# SYSTEM_ROOT itself stays writable, which keeps today's cleanup working and proves the
+# failure is attributed to the sweep rather than leaking from the helper.
+CASE10="${SANDBOX}/case10"
+fixture_10() {
+  mkdir -p "${SYSTEM_ROOT}/07-11-26/mysql"
+  dd if=/dev/zero of="${SYSTEM_ROOT}/07-11-26/mysql/db.sql.gz" bs=1k count=64 status=none
+  touch -t 202601010000 "${SYSTEM_ROOT}/07-11-26"
+  make_system_dir "$TODAY"
+  chmod 500 "${SYSTEM_ROOT}/07-11-26/mysql"
+}
+DA_BACKUP_SYSTEM_KEEP_DAYS=7 run_hook case10 fixture_10
+unset DA_BACKUP_SYSTEM_KEEP_DAYS
+chmod 700 "${CASE10}/backup/07-11-26/mysql"
+
+[[ -f "${CASE10}/backup/07-11-26/mysql/db.sql.gz" ]] \
+  || fail "fixture did not hold: the sweep removed the directory, so this proves nothing"
+((HOOK_RC != 0)) \
+  || fail "the sweep failed to reclaim a backlog directory and the hook still exited 0"
+grep -q 'backup local cleanup FAILED' "${CASE10}/mail.out" \
+  || fail "a failed sweep must mail:"$'\n'"$(cat "${CASE10}/mail.out")"
+grep -q '07-11-26' "${CASE10}/mail.out" \
+  || fail "the alert must name the directory that is still using disk"
+grep -q 'ERROR could not remove .*07-11-26' "${CASE10}/da-backup-s3.log" \
+  || fail "the failed sweep delete was not logged as an error"
+[[ ! -d "${CASE10}/backup/${TODAY}" ]] \
+  || fail "a sweep failure blocked today's cleanup; the paths must stay independent"
+echo "OK a sweep that cannot reclaim its target says so"
+
 echo
 echo "PASS: offline backup cleanup proofs"
