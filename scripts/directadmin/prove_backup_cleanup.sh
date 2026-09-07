@@ -621,5 +621,41 @@ grep -q 'backlog scan skipped' "${CASE17}/mail.out" \
   || fail "a skipped backlog scan must mail:"$'\n'"$(cat "${CASE17}/mail.out")"
 echo "OK a sweep that cannot allocate a temp file is reported, not swallowed"
 
+##############################################################################
+echo "== Proof 16: the newest-directory fallback must only ever pick a backup =="
+##############################################################################
+# When today's dated directory is missing -- the cross-midnight case this fallback exists
+# for -- it used to take the newest directory under the backup root regardless of name.
+# Whatever it picks is uploaded to S3 and then rm -rf'd, so anything a person or another
+# tool leaves under /backup was one late-running backup away from being destroyed: a
+# staging directory, an unpacked archive, a copy made before editing something. The sweep
+# already refuses to touch names it does not recognise; the two paths have to agree, or
+# the careful one is simply the one that never runs.
+CASE19="${SANDBOX}/case19"
+YESTERDAY="$(date -d '-1 day' +%m-%d-%y)"
+fixture_19() {
+  make_system_dir "$YESTERDAY"
+  mkdir -p "${SYSTEM_ROOT}/restore-staging/etc"
+  : >"${SYSTEM_ROOT}/restore-staging/etc/keepme.conf"
+  # Newer than the real backup, so an unrestricted "newest directory" prefers it.
+  touch "${SYSTEM_ROOT}/restore-staging"
+}
+DA_BACKUP_EVENT=system run_hook case19 fixture_19
+unset DA_BACKUP_EVENT
+
+[[ -f "${CASE19}/backup/restore-staging/etc/keepme.conf" ]] \
+  || fail "a directory that is not a backup was uploaded and deleted by the fallback"
+[[ -s "${CASE19}/rclone.calls" ]] \
+  || fail "fixture did not hold: the hook never called rclone, so nothing here was exercised"
+grep -q 'restore-staging' "${CASE19}/rclone.calls" \
+  && fail "a directory that is not a backup was sent to S3:"$'\n'"$(cat "${CASE19}/rclone.calls")"
+# The positive half: restricting the fallback must not disable it.
+[[ ! -d "${CASE19}/backup/${YESTERDAY}" ]] \
+  || fail "the real dated backup was not collected, so the fallback is now inert"
+grep -q "using newest dated directory .*${YESTERDAY}" "${CASE19}/da-backup-s3.log" \
+  || fail "the fallback should have named the dated directory it chose:"$'\n'"$(cat "${CASE19}/da-backup-s3.log")"
+echo "OK the fallback picks the dated backup and leaves everything else alone"
+
+
 echo
 echo "PASS: offline backup cleanup proofs"

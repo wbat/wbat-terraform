@@ -351,10 +351,21 @@ resolve_system_dir() {
   # DirectAdmin names these for the day the backup started, which is not today when the
   # run began before midnight or the schedule slipped. Fall back to the newest directory
   # and -- crucially -- record it, so cleanup removes what upload actually sent.
-  candidate="$(find "$SYSTEM_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)"
-  if [[ -n "$candidate" && -d "$candidate" ]]; then
+  #
+  # Only dated names are eligible. Whatever this picks gets uploaded and then rm -rf'd, so
+  # an unrestricted "newest directory" hands that to anything a person or another tool
+  # happens to leave under the backup root -- a staging directory, an extracted archive, a
+  # copy someone made before editing something. The sweep already refuses to delete a name
+  # it does not recognise, for exactly this reason; the fallback has to agree with it or
+  # the safer of the two paths is the one that never runs.
+  candidate="$(find "$SYSTEM_ROOT" -mindepth 1 -maxdepth 1 -type d \
+    -name '[0-9][0-9]-[0-9][0-9]-[0-9][0-9]' -printf '%T@ %p\n' 2>/dev/null \
+    | sort -n | tail -1 | cut -d' ' -f2-)"
+  # -name is a shape check, not a date check: 99-99-99 passes it. s3_prefix_for_stamp is
+  # the same validation the sweep uses, so the two paths accept exactly the same names.
+  if [[ -n "$candidate" && -d "$candidate" ]] && s3_prefix_for_stamp "$(basename "$candidate")" >/dev/null; then
     system_dir="$candidate"
-    log "NOTE ${SYSTEM_ROOT}/${SYSTEM_DIR_STAMP} does not exist; using newest directory ${system_dir}"
+    log "NOTE ${SYSTEM_ROOT}/${SYSTEM_DIR_STAMP} does not exist; using newest dated directory ${system_dir}"
   fi
   return 0
 }
