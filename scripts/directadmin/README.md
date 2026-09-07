@@ -265,7 +265,7 @@ it never leaves a verified copy on disk. Age is not treated as evidence that a b
 safe to delete — even the old-directory sweep checks S3 first, because on the primary the
 directories it would have swept were the only copy. See
 [`aws/docs/2026-09-06-primary-outage.md`](../../aws/docs/2026-09-06-primary-outage.md) for
-what was actually broken on that host, and `prove_backup_cleanup.sh` for the sixteen
+what was actually broken on that host, and `prove_backup_cleanup.sh` for the seventeen
 behaviours that are now pinned.
 
 `system_backup_post.sh` execs `all_backups_post.sh --event=system`, and that flag is load
@@ -378,6 +378,7 @@ backlog, so a sweep that silently fails to reclaim anything is the worst place t
 | `NOTE deferring <dir>` on every run | `system_backup_post.sh` is missing or predates `--event=system`, so no run is ever the completion signal | `--verify`, then `--install`. Until then the directory waits for the sweep |
 | `ERROR could not enumerate` / `could not list old directories` | `find` hit an unreadable subtree or an I/O error, so the file list was incomplete | Deliberate refusal to act on a partial list. Check permissions and `dmesg` for the underlying error |
 | `backlog scan skipped: could not create a temp file` | `mktemp` failed, so the old-directory sweep never ran | Usually `/tmp` out of space or inodes, or mounted read-only — the same volume this hook exists to keep clear. `df -h /tmp`, `df -i /tmp`, `mount \| grep /tmp` |
+| A stray `MM-DD-YY.s3dest` file under the backup root | A verified upload recorded its S3 destination and the local delete then failed | Expected, and deliberately left: the sweep reads it so a backup uploaded after midnight is verified against the prefix it actually went to, not the one its name implies. Removed automatically when the directory is finally reclaimed |
 | Backups stop with no hook log at all | The DirectAdmin backup task itself is failing, so no post-hook fires | `grep 'dataskq.*backup' /var/log/messages`; a `Not implemented` error is a DA problem, not a hook problem |
 | `ERROR ... not verified in S3 (rclone check rc=N)` | Objects did not land, or the bucket is unreachable | Local copies were kept deliberately; fix rclone/S3 access and re-run the hook |
 | `backup local cleanup FAILED` / `ERROR could not remove N verified file(s)` | The upload was verified but the delete failed: read-only filesystem, `chattr +i`, or an I/O error | The copies named in the mail are already in S3 and safe to `rm` by hand; then find what blocked the delete (`mount | grep ' / '`, `lsattr`, `dmesg`) |
