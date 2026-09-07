@@ -550,5 +550,38 @@ grep -q 'could not be scanned' "${CASE15}/mail.out" \
   || fail "a backlog that could not be enumerated must mail:"$'\n'"$(cat "${CASE15}/mail.out")"
 echo "OK a sweep that cannot see the backlog says so"
 
+##############################################################################
+echo "== Proof 15: a sweep that cannot even start must not report success =="
+##############################################################################
+# The caller ignores this function's return value, so a `return 1` on its own changes
+# nothing. The find-failure branch records itself in cleanup_failures; the mktemp branch
+# did not, so a /tmp that is full or read-only skipped the backlog scan entirely and the
+# run still logged cleanup complete. A host whose /tmp has run out of space is not a
+# hypothetical here -- it is the same disk, in the state this hook exists to prevent.
+#
+# The admin directory is removed so upload_admin returns before its own mktemp, which
+# isolates the failure to the sweep instead of tripping the earlier guard.
+CASE17="${SANDBOX}/case17"
+fixture_17() {
+  rmdir "$ADMIN_DIR"
+  make_system_dir "$TODAY"
+  mkdir -p "${SYSTEM_ROOT}/07-04-26/mysql"
+  : >"${SYSTEM_ROOT}/07-04-26/mysql/db.sql.gz"
+  touch -t 202601010000 "${SYSTEM_ROOT}/07-04-26"
+}
+TMPDIR="${SANDBOX}/no-such-tmpdir" DA_BACKUP_SYSTEM_KEEP_DAYS=7 \
+  run_hook case17 fixture_17
+unset DA_BACKUP_SYSTEM_KEEP_DAYS
+
+[[ -d "${CASE17}/backup/07-04-26" ]] \
+  || fail "fixture did not hold: the backlog directory was swept, so mktemp did not fail"
+((HOOK_RC != 0)) \
+  || fail "the backlog was never scanned and the hook still reported success"
+grep -q 'backlog was not scanned' "${CASE17}/da-backup-s3.log" \
+  || fail "the skipped scan was not logged:"$'\n'"$(cat "${CASE17}/da-backup-s3.log")"
+grep -q 'backlog scan skipped' "${CASE17}/mail.out" \
+  || fail "a skipped backlog scan must mail:"$'\n'"$(cat "${CASE17}/mail.out")"
+echo "OK a sweep that cannot allocate a temp file is reported, not swallowed"
+
 echo
 echo "PASS: offline backup cleanup proofs"

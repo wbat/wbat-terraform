@@ -456,8 +456,13 @@ sweep_old_system_dirs() {
 
   local d stamp prefix rc freed
   local candidates find_rc=0
+  # The caller ignores this function's status, and the branch below records its own
+  # failure, so this one has to as well or a /tmp that is full or read-only skips the
+  # entire backlog scan and the run still reports a clean cleanup. A host whose /tmp has
+  # run out of space is exactly the host whose backlog needs clearing.
   candidates="$(mktemp)" || {
-    log "ERROR could not create temp file for the sweep candidate list"
+    log "ERROR could not create temp file for the sweep candidate list; the old-directory backlog was not scanned"
+    cleanup_failures+=("${SYSTEM_ROOT} -- backlog scan skipped: could not create a temp file (is /tmp full or read-only?)")
     return 1
   }
   # Same reason the admin enumeration checks find's status: process substitution throws it
