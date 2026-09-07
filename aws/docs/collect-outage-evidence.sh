@@ -181,12 +181,53 @@ for f in /var/log/messages /var/log/messages-* /var/log/mysqld.log \
     echo "SKIPPED_OLD $f (last written more than ${ENOSPC_WINDOW_DAYS}d ago)"
   fi
 done
+# mtime bounds the file, not the records inside it. /var/log/exim/paniclog is the case that
+# breaks that assumption: it is rarely rotated, so one panic this week leaves it "recent"
+# while still holding June's disk-full lines. Those would be handed to the verdict as proof
+# for September. So date each hit as well.
+#
+# Comparing against pre-rendered date strings avoids parsing arbitrary log formats and
+# sidesteps syslog omitting the year -- a "Sep  6" line is in window because the string for
+# a day in the window is literally "Sep  6". Covers syslog (Sep  6), ISO (2026-09-06) and
+# the old MySQL stamp (260906).
+# --- BEGIN enospc classifier ---
+# prove-outage-evidence-verdict.sh extracts everything between these two markers and runs
+# it verbatim against fixture logs, so this block is the tested artefact rather than a
+# paraphrase of it. It depends only on ENOSPC_WINDOW_DAYS and enospc_files, both set above.
+window_re=""
+n=0
+while [ "$n" -le "$ENOSPC_WINDOW_DAYS" ]; do
+  for fmt in '+%Y-%m-%d' '+%b %e' '+%b %d' '+%y%m%d'; do
+    t="$(date -d "-${n} days" "$fmt" 2>/dev/null)" || t=""
+    [ -n "$t" ] && window_re="${window_re}|${t}"
+  done
+  n=$((n + 1))
+done
+window_re="$(printf '%s' "$window_re" | sed 's/^|//')"
+
+# Anything that starts with a timestamp we recognise but is not in the window is dated and
+# excluded. Anything we cannot date at all is reported separately rather than silently
+# counted either way: analyze() must not confirm from it, and must not claim the disk is
+# cleared while it exists.
+DATED_RE='^([A-Z][a-z][a-z] [ 0-9][0-9] |[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]|[0-9][0-9][0-9][0-9][0-9][0-9] )'
+
 # -H keeps the filename on every hit. The old -h stripped it, so a capture gave no way to
 # tell which log, or which rotation, a match came from.
 if [ -n "$enospc_files" ]; then
   grep -iHE "no space left|ENOSPC|disk full|out of disk" $enospc_files 2>/dev/null \
-    | tail -40 | sed 's/^/MATCH /'
+    | tail -40 \
+    | while IFS= read -r line; do
+        rec="${line#*:}"
+        if printf '%s' "$rec" | grep -qE "^(${window_re})"; then
+          printf 'MATCH %s\n' "$line"
+        elif printf '%s' "$rec" | grep -qE "$DATED_RE"; then
+          printf 'MATCH_OLD %s\n' "$line"
+        else
+          printf 'MATCH_UNDATED %s\n' "$line"
+        fi
+      done
 fi
+# --- END enospc classifier ---
 echo "===SECTION journal_errors==="
 journalctl --since "-4 days" -p err --no-pager 2>/dev/null | tail -60
 echo "===SECTION services==="
@@ -386,7 +427,7 @@ analyze() {
 
   # --- did the disk actually break the services? ---
   local enospc_lines console_enospc=0 console_enospc_label="no" svc_down="" enospc_searched=0
-  local enospc_markers=0 enospc_skipped=0
+  local enospc_markers=0 enospc_skipped=0 enospc_old=0 enospc_undated=0
   # SKIPPED_OLD counts as a marker even though it names a file that was not searched. A
   # capture where every log fell outside the window is still a modern capture, and its
   # SKIPPED_OLD lines must not reach the legacy branch below, which would count them as
@@ -395,7 +436,11 @@ analyze() {
   enospc_searched="$(read_section "$dir" enospc | grep -c '^SEARCHED ' || true)"
   enospc_skipped="$(read_section "$dir" enospc | grep -c '^SKIPPED_OLD ' || true)"
   if ((enospc_markers > 0)); then
+    # '^MATCH ' requires the trailing space, so MATCH_OLD and MATCH_UNDATED are excluded
+    # here by construction -- only records dated inside the window are evidence.
     enospc_lines="$(read_section "$dir" enospc | grep -c '^MATCH ' || true)"
+    enospc_old="$(read_section "$dir" enospc | grep -c '^MATCH_OLD ' || true)"
+    enospc_undated="$(read_section "$dir" enospc | grep -c '^MATCH_UNDATED ' || true)"
   else
     # Capture predates the SEARCHED/MATCH markers: every line is a match, and there is
     # no way to tell whether the logs existed. Treated as "cannot rule out" below.
@@ -420,6 +465,12 @@ analyze() {
     echo "  ENOSPC / 'no space left' lines in host logs: not searchable (all ${enospc_skipped} log file(s) were written outside the incident window)"
   else
     echo "  ENOSPC / 'no space left' lines in host logs: ${enospc_lines:-0} (capture does not record which logs were searchable)"
+  fi
+  if ((enospc_old > 0)); then
+    echo "  ...plus ${enospc_old} ENOSPC record(s) in those logs dated before the window (a prior incident, not this one)"
+  fi
+  if ((enospc_undated > 0)); then
+    echo "  ...plus ${enospc_undated} ENOSPC record(s) whose timestamp could not be parsed -- read them by hand"
   fi
   echo "  same in EC2 console output (survives a wedged userland): ${console_enospc_label}"
   echo "  services not active now:${svc_down:- none}"
@@ -461,6 +512,12 @@ analyze() {
   if ((console_enospc == 1)) || ((${enospc_lines:-0} > 0)); then
     disk_verdict="CONFIRMED"
     notes+=("A service logged ENOSPC, which is direct evidence the volume filled and writes failed -- not an inference from disk usage.")
+  elif ((enospc_undated > 0)); then
+    # Neither branch below is honest here. Confirming would resurrect the bias the window
+    # was added to remove; refuting would print "not one service logged ENOSPC" while the
+    # capture holds ENOSPC lines nobody has dated. Say what is actually known.
+    disk_verdict="INCONCLUSIVE"
+    notes+=("${enospc_undated} ENOSPC record(s) matched but carry no timestamp this script can parse, so they cannot be placed inside or outside the incident window. Read them in the 'enospc' section of the capture: if any is from the incident, the disk verdict is CONFIRMED; if all are older, re-run --analyze once they are excluded.")
   elif ((enospc_searched > 0)) && ((used_pct >= FULL_PCT)); then
     # A high-water mark is not an outage. This branch exists because the 2026-09-06
     # capture hit exactly this shape -- 99% used, zero ENOSPC across every log on the
@@ -468,7 +525,7 @@ analyze() {
     # diagnostic agreeing with the hypothesis it was written to test. The disk was a
     # red herring; the host had run at 99% for weeks and died of memory exhaustion.
     disk_verdict="NOT SUPPORTED"
-    notes+=("The volume is ${used_pct}% used, but ${enospc_searched} log file(s) were searched and not one service logged ENOSPC. A nearly-full disk that no service ever failed a write against did not cause an outage. Unless the space was reclaimed before this capture, look elsewhere -- start with memory: 'sar -r -f /var/log/sa/saDD' and 'sar -S -f ...' around the failure window.")
+    notes+=("The volume is ${used_pct}% used, but ${enospc_searched} log file(s) were searched and not one service logged ENOSPC inside the incident window. A nearly-full disk that no service ever failed a write against did not cause an outage. Unless the space was reclaimed before this capture, look elsewhere -- start with memory: 'sar -r -f /var/log/sa/saDD' and 'sar -S -f ...' around the failure window.")
   elif ((used_pct >= FULL_PCT)); then
     disk_verdict="CONSISTENT"
     notes+=("The volume is still ${used_pct}% used, and this capture has no log covering the incident window to search, so ENOSPC can be neither confirmed nor ruled out. Either the capture predates the searchability markers, or every log had already rotated out of the window. Re-capture closer to the event, with a current version of this script, to settle it.")

@@ -303,7 +303,109 @@ grep -q 'all 2 log file(s) were written outside the incident window' <<<"$REPORT
 echo "OK skipped filenames are not mistaken for ENOSPC evidence"
 
 ##############################################################################
-echo "== Proof 7: --analyze must re-read a capture with no aws CLI on PATH =="
+echo "== Proof 7: ENOSPC records must be dated, not just the file they live in =="
+##############################################################################
+# Proof 6 bounds which *files* are searched. That is not enough on its own:
+# /var/log/exim/paniclog is rarely rotated, so a single panic this week keeps its mtime
+# current while it still holds June's disk-full lines. Selecting the file then grepping it
+# unbounded hands those June lines to the verdict as September evidence -- the same bias,
+# one level down.
+#
+# The classifier that fixes this lives in the on-box script, which the fixtures above never
+# execute. So run the real thing: extract it verbatim between its markers and point it at
+# fixture logs. A copy pasted into this proof could drift from production and still pass.
+
+extract_classifier() {
+  awk '/# --- BEGIN enospc classifier ---/ {f = 1; next}
+       /# --- END enospc classifier ---/   {f = 0}
+       f' "$SCRIPT"
+}
+
+[[ -n "$(extract_classifier)" ]] \
+  || fail "could not extract the enospc classifier -- did its BEGIN/END markers move?"
+
+run_classifier() { # <window-days> <logfile>... -> sets CLASSIFIED
+  local days="$1"
+  shift
+  local runner="${SANDBOX}/classifier.sh"
+  {
+    printf 'ENOSPC_WINDOW_DAYS=%s\n' "$days"
+    printf 'enospc_files="%s"\n' "$*"
+    extract_classifier
+  } >"$runner"
+  CLASSIFIED="$(sh "$runner")"
+}
+
+if ! date -d '-1 day' '+%Y-%m-%d' >/dev/null 2>&1; then
+  fail "GNU 'date -d' is required to date-bound ENOSPC records, and the on-box script needs it too"
+fi
+
+LOGS="${SANDBOX}/logs"
+mkdir -p "$LOGS"
+
+# Dates are generated rather than hardcoded so this proof cannot rot into passing because
+# a literal drifted out of the window.
+today_syslog="$(date '+%b %e')"
+today_iso="$(date '+%Y-%m-%d')"
+old_syslog="$(date -d '-60 days' '+%b %e')"
+old_iso="$(date -d '-60 days' '+%Y-%m-%d')"
+
+{
+  echo "${today_syslog} 03:45:02 primary kernel: EXT4-fs (nvme0n1p1): No space left on device"
+  echo "${old_syslog} 03:12:44 primary kernel: EXT4-fs (nvme0n1p1): No space left on device"
+  echo "${old_iso} 03:12:45 exim paniclog: failed to write: No space left on device"
+  echo "spooler: write failed, no space left on device"
+} >"${LOGS}/paniclog"
+
+run_classifier 14 "${LOGS}/paniclog"
+
+grep -q "^MATCH .*${today_syslog}" <<<"$CLASSIFIED" \
+  || fail "a record from inside the window must stay a MATCH:"$'\n'"$CLASSIFIED"
+[[ "$(grep -c '^MATCH ' <<<"$CLASSIFIED")" == "1" ]] \
+  || fail "exactly one record is in window; the rest must not be counted as evidence:"$'\n'"$CLASSIFIED"
+[[ "$(grep -c '^MATCH_OLD ' <<<"$CLASSIFIED")" == "2" ]] \
+  || fail "both the syslog and ISO records from 60 days ago must be excluded:"$'\n'"$CLASSIFIED"
+[[ "$(grep -c '^MATCH_UNDATED ' <<<"$CLASSIFIED")" == "1" ]] \
+  || fail "a record with no parseable timestamp must be reported, not dropped:"$'\n'"$CLASSIFIED"
+grep -q "^MATCH_OLD .*${LOGS}/paniclog" <<<"$CLASSIFIED" \
+  || fail "excluded records must keep their filename so a human can find them"
+echo "OK records are dated individually inside a single current log"
+
+# The verdict side of the same fixture. An out-of-window record must not confirm, and the
+# refutation must stay available -- this is the paniclog case reaching analyze().
+rewrite_enospc "${SANDBOX}/case6-remote.txt" "${SANDBOX}/case7a.txt" <<ENOSPC
+SEARCHED /var/log/exim/paniclog
+MATCH_OLD /var/log/exim/paniclog:${old_iso} 03:12:44 No space left on device
+ENOSPC
+run_prepared "${SANDBOX}/case7a.txt" case7a
+
+if grep -q 'Full disk explains the outage:      CONFIRMED' <<<"$REPORT"; then
+  fail "a June ENOSPC record inside a current log confirmed a September outage:"$'\n'"$REPORT"
+fi
+grep -q 'Full disk explains the outage:      NOT SUPPORTED' <<<"$REPORT" \
+  || fail "an out-of-window record must leave the refutation intact:"$'\n'"$REPORT"
+grep -q '1 ENOSPC record(s) in those logs dated before the window' <<<"$REPORT" \
+  || fail "the excluded record must be disclosed, not silently dropped:"$'\n'"$REPORT"
+echo "OK an out-of-window record neither confirms nor disappears"
+
+# An undated record is the case where both verdicts would be dishonest.
+rewrite_enospc "${SANDBOX}/case6-remote.txt" "${SANDBOX}/case7b.txt" <<'ENOSPC'
+SEARCHED /var/log/exim/paniclog
+MATCH_UNDATED /var/log/exim/paniclog:spooler: write failed, no space left on device
+ENOSPC
+run_prepared "${SANDBOX}/case7b.txt" case7b
+
+grep -q 'Full disk explains the outage:      INCONCLUSIVE' <<<"$REPORT" \
+  || fail "an undated ENOSPC record must not be resolved either way:"$'\n'"$REPORT"
+if grep -q 'not one service logged ENOSPC' <<<"$REPORT"; then
+  fail "the refutation claimed nothing logged ENOSPC while an unread ENOSPC record was in the capture"
+fi
+grep -q 'timestamp could not be parsed' <<<"$REPORT" \
+  || fail "the report must tell the reader to go read the record by hand:"$'\n'"$REPORT"
+echo "OK an unreadable timestamp is escalated rather than guessed"
+
+##############################################################################
+echo "== Proof 8: --analyze must re-read a capture with no aws CLI on PATH =="
 ##############################################################################
 # Collection and analysis are separate so a capture can be reviewed later, by someone
 # with no credentials at all.
