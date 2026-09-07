@@ -287,20 +287,73 @@ In order of leverage:
    not in this repository.
 2. **Cap the job so it dies alone.** This is the availability fix and it is independent
    of (1) — it converts "host unreachable for five hours" into "one cron job failed".
-   Edit `crontab -u tellerstec -e` and wrap the command:
 
-   ```bash
-   45 3 * * * systemd-run --scope --quiet -p MemoryMax=1200M -p MemorySwapMax=0 \
-     bash -lc 'cd /home/tellerstec/public_html/wp-content/plugins/tellerstech-landing && \
-     RUN_ALL_HEALTHCHECK_URL=<keep the value already in the crontab> \
-     python3 oncallbrief-pipeline/run_all.py' >> /home/tellerstec/logs/oncallbrief.log 2>&1
+   The obvious form of this does not work, and fails in a way that looks like the cap
+   working. Wrapping the existing line in `systemd-run --scope -p MemoryMax=…` inside
+   `crontab -u tellerstec` runs `systemd-run` as an unprivileged user against the **system**
+   manager, which needs root or an interactive polkit agent. Cron has neither, so it exits
+   before Python starts. The pipeline stops running entirely, and the first symptom is a
+   missed healthcheck — which reads like the cap doing its job, and invites someone to
+   remove the wrapper and restore the uncapped command.
+
+   Install it as a root-owned unit instead, so the limits are set by the same manager that
+   starts the process:
+
+   ```ini
+   # /etc/systemd/system/oncallbrief.service
+   [Unit]
+   Description=oncallbrief pipeline (memory-capped)
+
+   [Service]
+   Type=oneshot
+   User=tellerstec
+   MemoryAccounting=yes
+   MemoryMax=1200M
+   MemorySwapMax=0
+   ExecStart=/bin/bash -lc 'cd /home/tellerstec/public_html/wp-content/plugins/tellerstech-landing && RUN_ALL_HEALTHCHECK_URL=<keep the value already in the crontab> python3 oncallbrief-pipeline/run_all.py >> /home/tellerstec/logs/oncallbrief.log 2>&1'
    ```
 
+   ```ini
+   # /etc/systemd/system/oncallbrief.timer
+   [Unit]
+   Description=Run the oncallbrief pipeline nightly
+
+   [Timer]
+   OnCalendar=*-*-* 03:45:00
+   Persistent=true
+
+   [Install]
+   WantedBy=timers.target
+   ```
+
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now oncallbrief.timer
+   crontab -u tellerstec -l                     # review, then remove the old 03:45 line
+   crontab -u tellerstec -e
+   ```
+
+   Leaving the cron entry in place alongside the timer gives two concurrent copies of the
+   job, one of them uncapped, which is worse than either alone. Remove it in the same
+   sitting.
+
    `MemorySwapMax=0` is the important half: without it the job is capped on RAM and still
-   free to thrash swap. The healthcheck ping doubles as the alert — a killed run stops
-   pinging, so it shows up as a missed check rather than needing new monitoring. Verify
-   the cap took effect by watching one run with
-   `systemd-cgtop` or checking for `memory.max` under the scope's cgroup.
+   free to thrash swap, which is the whole failure mode. **It is silently ignored under
+   cgroup v1**, so confirm the host is on v2 rather than assuming:
+
+   ```bash
+   stat -fc %T /sys/fs/cgroup          # cgroup2fs = both limits enforced; tmpfs = v1, swap cap ignored
+   systemctl show oncallbrief.service -p MemoryMax -p MemorySwapMax
+   sudo systemctl start oncallbrief.service && systemctl status oncallbrief.service
+   ```
+
+   On v1, either boot with `systemd.unified_cgroup_hierarchy=1` or lower `MemoryMax` far
+   enough that the job dies before it can page heavily — a RAM-only cap on a host with 4 GB
+   of swap still permits the thrash that took five hours to resolve.
+
+   A run that exceeds the cap shows as `code=killed, status=9/KILL` in `systemctl status`.
+   The healthcheck ping doubles as the alert: a killed run never pings, so it surfaces as a
+   missed check without new monitoring.
 3. **Alert on the trend.** [`da_disk_guard.sh`](../../scripts/directadmin/da_disk_guard.sh)
    now reads the day's peak `%swpused` out of `sar` as well as the current values, which
    is the check that would have flagged this a week early. Defaults warn at 60% swap and
