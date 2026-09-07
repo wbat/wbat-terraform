@@ -235,7 +235,26 @@ upload_admin() {
   # Enumerate once; copy, verify, and delete all read this same list. A backup that
   # appears mid-run is therefore uploaded by the next run rather than deleted here
   # without ever having been verified.
-  (cd "$ADMIN_DIR" && find . -type f -printf '%P\n') >"$admin_list" 2>/dev/null
+  #
+  # find's exit status matters as much as its output. An unreadable subtree or an I/O
+  # error makes it write a partial list and return non-zero, and a partial list is the
+  # dangerous kind of wrong here: everything downstream trusts it, so the files it did see
+  # get uploaded, verified and deleted while the rest stay on disk and the run reports
+  # success. That is the same silent-incompleteness failure as an unreported delete,
+  # reached one step earlier. A failed cd lands here too, as an empty list from a
+  # directory that could not be entered, which would otherwise log "no files" and return 0.
+  local find_err find_rc=0
+  find_err="$(mktemp)" || {
+    log "ERROR could not create temp file for enumeration errors"
+    return 1
+  }
+  (cd "$ADMIN_DIR" && find . -type f -printf '%P\n') >"$admin_list" 2>"$find_err" || find_rc=$?
+  if ((find_rc != 0)); then
+    log "ERROR could not enumerate ${ADMIN_DIR} completely (find rc=${find_rc}); refusing to upload a partial list because cleanup would then delete only what it saw: $(tr '\n' ';' <"$find_err" | cut -c1-300)"
+    rm -f "$find_err"
+    return 1
+  fi
+  rm -f "$find_err"
   admin_count="$(grep -c . "$admin_list" 2>/dev/null || echo 0)"
 
   if ((admin_count == 0)); then

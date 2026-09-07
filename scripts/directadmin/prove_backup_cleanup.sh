@@ -393,5 +393,38 @@ grep -q 'ERROR could not remove .*07-11-26' "${CASE10}/da-backup-s3.log" \
   || fail "a sweep failure blocked today's cleanup; the paths must stay independent"
 echo "OK a sweep that cannot reclaim its target says so"
 
+##############################################################################
+echo "== Proof 11: a partial enumeration must not be treated as the whole list =="
+##############################################################################
+# Everything downstream trusts the enumerated list -- upload reads it, verify reads it,
+# delete reads it. So a list that is short is worse than no list at all: the hook uploads
+# and deletes exactly the files it managed to see, leaves the rest on disk, and reports a
+# clean run. find signals this by exiting non-zero while still writing what it got, and
+# that status was being discarded along with stderr.
+#
+# An unreadable subdirectory reproduces it without root: find cannot descend, so it emits
+# the files it already found, warns, and exits 1.
+CASE11="${SANDBOX}/case11"
+fixture_11() {
+  make_admin_archive visible.tar.zst
+  mkdir -p "${ADMIN_DIR}/locked"
+  : >"${ADMIN_DIR}/locked/hidden.tar.zst"
+  chmod 000 "${ADMIN_DIR}/locked"
+}
+run_hook case11 fixture_11
+chmod 700 "${CASE11}/admin_backups/locked"
+
+[[ -f "${CASE11}/admin_backups/locked/hidden.tar.zst" ]] \
+  || fail "fixture did not hold: the unreadable file was somehow enumerated"
+[[ -f "${CASE11}/admin_backups/visible.tar.zst" ]] \
+  || fail "the hook deleted the files it could see while others were unaccounted for"
+((HOOK_RC != 0)) \
+  || fail "a partial enumeration reported success -- the whole point is that it cannot"
+grep -q 'ERROR could not enumerate' "${CASE11}/da-backup-s3.log" \
+  || fail "the enumeration failure was not logged:"$'\n'"$(cat "${CASE11}/da-backup-s3.log")"
+grep -q 'DirectAdmin backup upload FAILED' "${CASE11}/mail.out" \
+  || fail "a partial enumeration must mail like any other upload failure"
+echo "OK an incomplete file list fails the run instead of defining it"
+
 echo
 echo "PASS: offline backup cleanup proofs"
