@@ -83,8 +83,15 @@ MANAGED=(
 
 hash_of() { sha256sum "$1" 2>/dev/null | awk '{print $1}'; }
 
+# GNU and BSD stat disagree on how to print a permission mode. Always exits 0 so a
+# missing or unreadable file degrades to a visible "unknown" rather than aborting under
+# set -e in the middle of a drift report.
+mode_of() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null || echo "unknown"
+}
+
 verify() {
-  local drift=0 entry src dst mode src_h dst_h
+  local drift=0 entry src dst mode src_h dst_h dst_mode state
   printf '%-46s %s\n' "INSTALLED PATH" "STATE"
   printf '%-46s %s\n' "--------------" "-----"
   for entry in "${MANAGED[@]}"; do
@@ -102,12 +109,23 @@ verify() {
     fi
     src_h="$(hash_of "$src")"
     dst_h="$(hash_of "$dst")"
+    dst_mode="$(mode_of "$dst")"
+    state=""
+
     if [[ "$src_h" != "$dst_h" ]]; then
-      printf '%-46s %s\n' "$dst" "STALE (differs from repo)"
+      state="STALE (differs from repo)"
       drift=1
-    else
-      printf '%-46s %s\n' "$dst" "ok"
     fi
+    # Content-only comparison called this "ok". It matters most for the 700 hooks:
+    # DirectAdmin cannot execute a hook that has lost its executable bit, so backups
+    # accumulate on local disk while the drift check that exists to catch exactly that
+    # reports the host as clean.
+    if [[ "$dst_mode" != "$mode" ]]; then
+      state="${state:+${state}; }MODE ${dst_mode} (expected ${mode})"
+      drift=1
+    fi
+
+    printf '%-46s %s\n' "$dst" "${state:-ok}"
   done
 
   # Presence-only: contents are host-specific by design.

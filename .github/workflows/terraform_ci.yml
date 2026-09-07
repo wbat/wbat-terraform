@@ -42,6 +42,8 @@ jobs:
         run: ./scripts/directadmin/prove_vhost_listen_detector.sh
       - name: Offline backup cleanup proof
         run: ./scripts/directadmin/prove_backup_cleanup.sh
+      - name: Offline deploy-drift proof
+        run: bash ./scripts/directadmin/prove_install_verify.sh
       - name: Offline disk evidence verdict proof
         run: ./aws/docs/prove-outage-evidence-verdict.sh
 
