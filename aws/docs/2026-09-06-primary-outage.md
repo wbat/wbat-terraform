@@ -14,6 +14,28 @@ worse ones: **no backup has reached S3 since 2026-07-02**, and the weekly system
 **stopped including databases** on 2026-09-05. See
 [What actually needs fixing](#what-actually-needs-fixing).
 
+## Do it in this order
+
+The order matters, because the obvious first move is the one that breaks the host.
+`directadmin admin-backup` with no `--user` backs up every account, and on 2026-07-02 that
+produced roughly 45 GB of archives — `user.wbatnet.teller.tar.zst` alone was 43.4 GB.
+There is **3.8 GB free**. Running a full backup to buy peace of mind would fill the root
+volume within a minute and cause the ENOSPC outage this document spends its first half
+establishing did not happen. It is also exactly how the 2026-06-28 failure went.
+
+So: cap the memory first because it is free and tonight is coming, then buy disk headroom,
+then touch DirectAdmin.
+
+| # | Action | Disk cost | Why here |
+|---|--------|-----------|----------|
+| 1 | [Cap the nightly cron job](#3-memory-headroom-on-the-primary--and-why-more-swap-is-the-wrong-lever) | none | The job runs at 03:45 daily and has come close every night for a week. Costs nothing and needs no disk. |
+| 2 | [Upload the old `/backup` weeks, verify, then delete](#recovering-space-safely) | **frees ~52 GB** | `rclone` streams to S3 without staging locally, so this works at 99%. Takes the volume to ~74% and gets the newest database dump off-host in the same pass. |
+| 3 | Deploy the fixed tooling: `install_da_vhost_listen.sh --install` | negligible | Nothing else uploads or cleans up, and the installed hook is hand-edited. Must be in place before a backup succeeds. |
+| 4 | [Smoke-test DirectAdmin with one small account](#1-prove-the-backup-engine-works-without-filling-the-disk-cli) | kilobytes | Proves engine → hook → S3 → cleanup end to end for almost no space. |
+| 5 | [Diagnose `Not implemented`](#2-find-out-what-not-implemented-refers-to-cli) | none | Read-only. |
+| 6 | [Recreate the schedule](#3-recreate-the-backup-schedule--this-one-needs-the-panel) (panel) | — | Only once 2 and 4 have passed. |
+| 7 | A full all-users backup | **~45 GB** | Needs step 2 to have completed first. See the note there about peak local usage. |
+
 ## How this was established
 
 Evidence was collected read-only over SSM from both hosts and is reproducible with
@@ -270,7 +292,7 @@ In order of leverage:
    ```bash
    45 3 * * * systemd-run --scope --quiet -p MemoryMax=1200M -p MemorySwapMax=0 \
      bash -lc 'cd /home/tellerstec/public_html/wp-content/plugins/tellerstech-landing && \
-     RUN_ALL_HEALTHCHECK_URL=https://hc-ping.com/24677487-c62d-47e0-b329-8c66abf5fadc \
+     RUN_ALL_HEALTHCHECK_URL=<keep the value already in the crontab> \
      python3 oncallbrief-pipeline/run_all.py' >> /home/tellerstec/logs/oncallbrief.log 2>&1
    ```
 
@@ -287,11 +309,16 @@ In order of leverage:
    removing the unbounded query underneath it — worth doing only if (1) turns out to be
    impractical.
 
-### 4. The disk, on its own schedule
+### 4. The disk — not the cause, but a prerequisite for fixing the causes
 
-Nothing here is urgent now, but 3.8 GB of headroom is thin. Roughly 52 GB is recoverable
-by uploading the eight older `/backup` weeks to S3 and then deleting them — **in that
-order**, see [Recovering space safely](#recovering-space-safely).
+The disk did not take the server down, which made it tempting to file at the bottom of the
+list. That is wrong for a practical reason rather than a severity one: 3.8 GB of headroom
+is not enough to take a backup, so every fix in sections 1 and 2 is blocked behind it.
+
+Roughly 52 GB is recoverable by uploading the eight older `/backup` weeks to S3 and then
+deleting them — **in that order**, see
+[Recovering space safely](#recovering-space-safely). That pass also lifts the newest
+database dump off the host, which is the other reason to do it early.
 
 ## Backup hook defects — real, but not the cause
 
@@ -330,32 +357,96 @@ deletes eight weekly archives — 52 GB for which no S3 object exists. The sweep
 verifies each directory against the prefix it would have been uploaded to, keeps whatever
 it cannot confirm, and mails about it. Proof 8 covers it.
 
-## DirectAdmin remediation — what to run, and what needs the panel
+## Recovering space safely
 
-Read this first: **the newest database backup that exists anywhere is
-`/backup/08-29-26/mysql`, and it is on the same disk as the database it protects.**
-Admin backups carry the databases (`database_data_aware=yes`) and have been failing since
-July; the weekly system backup carried them too until the Sep 5 run dropped them. So
-there is currently no off-host copy of any database newer than 2026-07-02. Getting that
-Aug 29 tree into S3 is the highest-value single action on this list, and it needs nothing
-from DirectAdmin:
+This is step 2 of [the order above](#do-it-in-this-order), and it does double duty: it
+frees the headroom every DirectAdmin fix needs, and it is what gets the databases off the
+host. **The newest database backup that exists anywhere is `/backup/08-29-26/mysql`, on
+the same disk as the database it protects** — admin backups carry the databases and have
+failed since July, and the Sep 5 system backup dropped them, so nothing off-host is newer
+than 2026-07-02. If you only have time for one command today, make it the `08-29-26` one.
+
+Uploading is safe to do at 99% full: `rclone` streams from local files straight to S3 and
+stages nothing on disk. It is I/O heavy but not space heavy.
+
+**Do not delete anything under `/backup` before it is in S3.** Those nine directories are
+the only copy. Confirm for yourself first:
 
 ```bash
-rclone copy /backup/08-29-26 \
-  s3backup:wbat-tellerstech-directadmin-backups-708113892725/server/2026-08-29/ \
-  --s3-no-check-bucket --checksum --transfers 4
-rclone check /backup/08-29-26 \
-  s3backup:wbat-tellerstech-directadmin-backups-708113892725/server/2026-08-29/ \
-  --s3-no-check-bucket --checksum --one-way && echo VERIFIED
+aws s3 ls s3://wbat-tellerstech-directadmin-backups-708113892725/server/
 ```
 
-### 1. Take a backup now, bypassing the broken schedule (CLI)
-
-DirectAdmin can run a full admin backup in the foreground, without the task queue that
-the scheduled job goes through:
+If nothing newer than `2026-07-02/` appears, upload before deleting. Note the ordering:
+`08-29-26` goes first because it holds the only recent database dump, and a lexicographic
+glob would otherwise leave it until last.
 
 ```bash
-/usr/local/directadmin/directadmin admin-backup --destination=/home/admin_backups
+BUCKET=s3backup:wbat-tellerstech-directadmin-backups-708113892725/server
+
+upload_week() {
+  local d="$1" stamp iso
+  stamp="$(basename "$d")"                    # MM-DD-YY
+  iso="20${stamp:6:2}-${stamp:0:2}-${stamp:3:2}"
+  rclone copy "$d" "${BUCKET}/${iso}/" --s3-no-check-bucket --checksum --transfers 4 &&
+    rclone check "$d" "${BUCKET}/${iso}/" --s3-no-check-bucket --checksum --one-way &&
+    echo "VERIFIED $d"
+}
+
+upload_week /backup/08-29-26                  # newest databases -- do this one first
+for d in /backup/07-* /backup/08-0* /backup/08-1* /backup/08-22-26; do
+  upload_week "$d"
+done
+```
+
+Then delete only the directories that printed `VERIFIED`, keeping `08-29-26` on disk as
+the local copy of the most recent week:
+
+```bash
+for d in /backup/07-* /backup/08-0* /backup/08-1* /backup/08-22-26; do
+  rm -rf -- "$d"
+done
+df -h /                                        # expect ~74% used, ~52 GB reclaimed
+```
+
+That is enough headroom for the DirectAdmin steps. Then deploy the fixed tooling so this
+does not recur:
+
+```bash
+cd /root/wbat-terraform && git pull
+sudo ./scripts/directadmin/install_da_vhost_listen.sh --install
+./scripts/directadmin/install_da_vhost_listen.sh --verify
+/usr/local/sbin/da-disk-guard.sh --report
+```
+
+`--verify` matters: the primary's hook was hand-edited and matched no commit, so a merged
+fix would not otherwise have been running.
+
+## DirectAdmin remediation — what to run, and what needs the panel
+
+**Prerequisite: [free the disk first](#recovering-space-safely).** Everything below either
+writes archives to the root volume or is pointless without somewhere to put them, and the
+volume has 3.8 GB free.
+
+### 1. Prove the backup engine works without filling the disk (CLI)
+
+DirectAdmin can run an admin backup in the foreground, bypassing the task queue that the
+scheduled job goes through. Scope it to **one small account**, because a full run writes
+every account's archive to local disk before the post-backup hook gets a chance to upload
+anything:
+
+```bash
+/usr/local/directadmin/directadmin admin-backup --destination=/home/admin_backups --user=test2
+```
+
+`test2`, `brian2` and `aubrey` were all under 2 MB in the last successful backup, so any of
+them proves the whole chain — engine writes, hook fires, objects land in S3, local copy is
+removed — for kilobytes. Check all four stages, not just the command's exit status:
+
+```bash
+ls -la /home/admin_backups/                    # did the engine produce a file?
+tail -20 /var/log/da-backup-s3.log             # did the hook fire?
+aws s3 ls s3://wbat-tellerstech-directadmin-backups-708113892725/server/ | tail -3
+ls -la /home/admin_backups/                    # and did it clean up after itself?
 ```
 
 This is also the cleanest diagnostic split available:
@@ -365,11 +456,15 @@ This is also the cleanest diagnostic split available:
 - **It fails the same way** → the fault is in DirectAdmin itself, and step 2's debug
   output is what to send to DA support.
 
-Single users, if a full run is too large to sit through:
-
-```bash
-/usr/local/directadmin/directadmin admin-backup --destination=/home/admin_backups --user=teller
-```
+**On the eventual full run.** `all_backups_post.sh` is DirectAdmin's *all backups*
+hook — it fires once, after every account has been archived, so peak local usage is the
+sum of all archives at once (~45 GB, dominated by `teller` at 43.4 GB). Step 2 of the
+order above leaves roughly 52 GB free, which covers it but not comfortably. Two ways to
+avoid needing that headroom at all, neither implemented here: back up a few accounts at a
+time with repeated `--user=` runs, letting the hook clear each batch; or move the upload to
+DirectAdmin's per-user `user_backup_post.sh` hook so each archive is uploaded and deleted
+as it is produced, which would cap peak usage at the largest single account instead of the
+sum. The second is the better answer if `teller` keeps growing.
 
 ### 2. Find out what `Not implemented` refers to (CLI)
 
@@ -445,41 +540,6 @@ ls /backup/"$(date +%m-%d-%y)"/               # expect a mysql/ directory
 Note that step 3 makes this partly redundant: admin backups include databases, so once
 they work again the system backup matters mainly for server configuration. Both are worth
 having, but fix the admin backup first.
-
-## Recovering space safely
-
-**Do not delete anything under `/backup` before it is in S3.** Those nine directories are
-the only copy. Confirm for yourself first:
-
-```bash
-aws s3 ls s3://wbat-tellerstech-directadmin-backups-708113892725/server/
-```
-
-If nothing newer than `2026-07-02/` appears, upload before deleting:
-
-```bash
-for d in /backup/0[78]-*; do
-  stamp=$(basename "$d")                      # MM-DD-YY
-  iso="20${stamp:6:2}-${stamp:0:2}-${stamp:3:2}"
-  rclone copy "$d" "s3backup:wbat-tellerstech-directadmin-backups-708113892725/server/${iso}/" \
-    --s3-no-check-bucket --checksum --transfers 4
-  rclone check "$d" "s3backup:wbat-tellerstech-directadmin-backups-708113892725/server/${iso}/" \
-    --s3-no-check-bucket --checksum --one-way && echo "VERIFIED $d"
-done
-```
-
-Delete only the directories that printed `VERIFIED`, and keep the most recent week
-regardless. Then deploy the fixed tooling so this does not recur:
-
-```bash
-cd /root/wbat-terraform && git pull
-sudo ./scripts/directadmin/install_da_vhost_listen.sh --install
-./scripts/directadmin/install_da_vhost_listen.sh --verify
-/usr/local/sbin/da-disk-guard.sh --report
-```
-
-`--verify` matters: the primary's hook was hand-edited and matched no commit, so a merged
-fix would not otherwise have been running.
 
 ## Re-running the evidence capture
 
