@@ -5,9 +5,10 @@ about 03:50 EDT on Sunday 2026-09-06 and stayed down until a reboot at 09:13 EDT
 (13:13 UTC). The root volume was noticed at 99% used.
 
 **Short answer:** the 99% disk did **not** cause this outage. The host ran out of
-*memory*. A nightly cron job at 03:45 loads a 472 MB SQLite table into a 3.8 GB instance;
-on this run committed memory reached 9.6 GB, swap went from 17.6% to 85.9% inside one
-ten-minute interval, and the box thrashed until it was rebooted five hours later.
+*memory*. A nightly cron job at 03:45 does `SELECT * FROM raw_items` against a 2.9 GB MySQL
+table and `fetchall()`s it into a 3.8 GB instance; on this run committed memory reached
+9.6 GB, swap went from 17.6% to 85.9% inside one ten-minute interval, and the box thrashed
+until it was rebooted five hours later.
 
 The disk is a real problem, just a different one, and the investigation turned up two
 worse ones: **no backup has reached S3 since 2026-07-02**, and the weekly system backup
@@ -74,6 +75,24 @@ ping URL. Delete the lines rather than leaving them commented.
 The Monday 02:45 catch-up is now disabled outright rather than moved to a timer. That is fine
 while the previous week's brief exists — it exits in under a second — but nothing runs the
 expensive path if a week is ever missed.
+
+### Root cause fixed 2026-09-07 17:23 UTC
+
+The unbounded query is gone and the pipeline completes again. The whole run now peaks at
+**667 MB against its 2600 MB cap and uses no swap at all**, where the 03:45 run that morning
+was OOM-killed with 2600 MB of RAM and 3400 MB of swap available to it. Full detail, including
+what was measured and why the other two proposed remedies were dropped, is in
+[What the fix does, and what it measured](#what-the-fix-does-and-what-it-measured).
+
+The change is deployed on the primary but **is not yet committed to
+`TellersTechOrg/tellerstech-website`** — that repository is private and outside this
+repository's tooling. Until it is committed, the host is ahead of the checkout and a
+redeploy from `main` would reintroduce the outage. The originals are backed up on the box at
+`/root/oncallbrief-prefix-backup-20260907-130955/`, alongside a pre-run dump of `items`.
+
+The patch itself is deliberately **not** committed here. This repository is public and that
+one is not, so the diff is attached to the pull request as a downloadable artifact instead of
+being checked in.
 
 ## How this was established
 
@@ -145,9 +164,40 @@ Its log stops mid-run and never resumes:
 03:46:47 INFO Dedupe: loading raw items (since=all)...
 ```
 
-That `since=all` is an unbounded load of a 472 MB SQLite database
-(`oncallbrief-pipeline/data/oncallbrief.db`). It is the last line the file ever received.
-On Sep 4 and Sep 5 the same job ran on past this point and finished around 03:54.
+That `since=all` is an unbounded load of the whole `raw_items` table. It is the last line
+the file ever received. On Sep 4 and Sep 5 the same job ran on past this point and finished
+around 03:54.
+
+**The store is MySQL, not the SQLite file this document used to name.** Earlier revisions
+attributed the load to `oncallbrief-pipeline/data/oncallbrief.db`, 472 MB on disk. That file
+is a **stale February artifact**: its newest `pipeline_runs` row is `2026-02-13`, week
+`2026-W07`, and its mtime matches. `oncallbrief/store.py` opens MySQL and says so in its
+docstring. Measured on the live database `tellerstec_oncallbrief`:
+
+| | |
+|---|---|
+| `raw_items` | **683,188 rows** (exact), 2,768 MB data + 107 MB index |
+| `raw_text` across those rows | **2,650 MB**, averaging 4,067 bytes each |
+| Growth | **~3,600 rows and ~16 MB of `raw_text` per day** |
+| `items` | **83,479 rows** (exact), 157 MB of `raw_text` + 29 MB of identity columns |
+
+An earlier revision of this table said `items` held 63,265 rows, which does not reconcile
+with the 83,479 rows the correctness check below compares — a run that merged 174 raw rows
+cannot account for a 20,000-row gap. The 63,265 was an `information_schema.tables.table_rows`
+reading, which for InnoDB is a **sampled estimate, not a count**, and it drifts by more than
+people expect. Both figures re-read on 2026-09-07 to make the point:
+
+| Table | `information_schema` estimate | `COUNT(*)` | Error |
+|---|---|---|---|
+| `items` | 82,620 | 83,824 | −1.4% |
+| `raw_items` | 758,359 | 686,821 | **+10.4%** |
+
+Every row count in this document is now a `COUNT(*)`. Byte figures are still `data_length`
+and `SUM(LENGTH(...))` respectively, which is why the two do not add up to each other —
+`data_length` includes page overhead and free space within pages.
+
+So the mechanism was right and the artifact was wrong, in the direction that mattered: the
+real table is six times the size of the file being blamed, and it grows every night.
 
 **The healthcheck's event log says the same thing from outside the host.** The `ocb run-all`
 check records a start ping and a completion ping, so it measures each run end to end without
@@ -346,19 +396,57 @@ of the preceding week, and a successful run needs about 5 GB of anonymous memory
 that has 3.8 GB of RAM — measured below. The margin on a good night is a few hundred
 megabytes. Another 4 GB of swap buys a few more nights of the same graph.
 
-One earlier claim here has to be withdrawn. This section attributed the growth to a
-database that grows, but `oncallbrief.db` is 472 MB with an mtime of **Feb 13 2026** and no
-WAL beside it — it has not been written to in seven months. The `since=all` load is still
-the memory defect, and the healthcheck still shows run time climbing from 11 min 08 s on
-Aug 24 to 13 min 20 s on Sep 5, but a growing table is not the reason and the cause of that
-trend is not established. Candidates, none checked: API latency on the model calls the log
-mentions, growth in the weekly item set feeding the run, or something outside the pipeline.
+A note on how this claim moved, because the correction is instructive. An earlier revision
+said the load came from a database that grows. Then `oncallbrief.db` turned out to have an
+mtime of Feb 2026, so the claim was withdrawn as unsupported. Both readings were wrong in
+the same way — they assumed the SQLite file was the store. It is not; MySQL is. The growth
+claim is now restored with numbers behind it: `raw_items` gains **~3,600 rows and ~16 MB of
+`raw_text` every day**, and `since=all` reads all 683,188 of them.
+
+That still does not, by itself, explain why Sep 5 completed and Sep 7 did not. Two days of
+ingest is about 1.2% more data, and the memory needed rose by considerably more than 1.2%.
+The honest reading is in the cap sizing below: the per-night figures come from `sar`'s
+ten-minute samples, which record where the run happened to be at 03:50, not its peak.
 
 In order of leverage:
 
-1. **Bound the query.** `Dedupe: loading raw items (since=all)` reads a full table out of
-   a 472 MB SQLite file into Python objects, which inflates several times over in memory.
-   Chunking it, or doing the dedupe in SQL, is the actual defect. It lives in
+1. **Bound the query.** This is the actual defect. In `oncallbrief/store.py`,
+   `get_raw_items_not_yet_deduped()`:
+
+   ```python
+   cur = conn.execute("SELECT * FROM raw_items ORDER BY created_at DESC")
+   rows = cur.fetchall()
+   out = [r for r in rows if (r["id"] if isinstance(r, dict) else r[0]) not in linked_ids]
+   ```
+
+   `SELECT *` pulls `raw_text` — 2,650 MB across 683,188 rows — and `fetchall()` materializes
+   every row in Python before a single one is filtered. As Python objects that inflates
+   several times over, which is the whole memory footprint.
+
+   The number that matters is what survives that filter. Counted on the primary on
+   2026-09-07: **174 rows, together holding under 1 MB**. The function reads 683,188 rows and
+   2.65 GB to return 174 of them. It is not that the query is somewhat too broad — it is that
+   the filter runs in the wrong place, so the cost tracks the size of the table instead of the
+   size of the backlog. That is also why the failure arrived suddenly rather than gradually:
+   nothing about the nightly workload changed, the table simply crossed what 3.8 GB of RAM
+   could hold.
+
+   **Correction to an earlier revision of this document,** which claimed `run_dedupe` never
+   reads `raw_text` and that naming columns would therefore drop 2.6 GB for free. It does read
+   it, in two places, and both would have failed quietly:
+
+   - `raw_text` from each group's identity row becomes the merged item's body. `upsert_item`
+     assigns `raw_text = VALUES(raw_text)` unconditionally for unbriefed rows, so a version
+     that stopped loading the column would not have errored — it would have **blanked the body
+     of every item it merged**.
+   - `_choose_identity_row` tie-breaks on `len(raw_text)`. Without the column every candidate
+     scores zero and the winning row changes, silently altering which title, URL and body a
+     merged item takes.
+
+   Both are cheap to keep once they are known: select `LENGTH(raw_text)` for the tie-break,
+   and fetch the bodies only for the identity rows, in batches.
+
+   This lives in
    `/home/tellerstec/public_html/wp-content/plugins/tellerstech-landing/oncallbrief-pipeline`,
    not in this repository.
 2. **Cap the job so it dies alone.** This is the availability fix and it is independent
@@ -504,11 +592,137 @@ In order of leverage:
    still kills a run that heads for the 7.8 GB the machine actually has. Sep 5 succeeded at
    ~5 GB and Sep 6 did not stop — a 6 GB ceiling separates those two.
 
+   **That ceiling was too low, and the reason is worth keeping.** The first capped run, on
+   2026-09-07, was OOM-killed inside its cgroup at 03:50:42 — details in the section below.
+   The table above is built from `sar`, which samples every ten minutes. It records where a
+   run happened to be at 03:50, not where it peaked. Sizing a limit from it systematically
+   understates the requirement, and 20% of headroom over a number that is itself an
+   underestimate is not headroom at all. Nothing in the table was wrong; it was the wrong
+   instrument for the question, and picking a kill threshold from sampled data was the
+   error. A peak needs `systemd-cgtop`, `memory.peak` from the cgroup, or a one-second
+   sampler alongside the run.
+
    **This is survival, not headroom.** The cap keeps a bad night from taking the host with
    it; it does not create room that is not there. A job needing 5 GB of a 7.8 GB box every
    single night, with swap at 81–97% each time, has no margin for a slow API or a slightly
    larger week — which is what Sep 6 was. Bounding the query is the fix; until then a
    `t3a.large` (8 GB, roughly +$27/month) is the lever that actually restores margin.
+
+### The first capped run: 2026-09-07 03:45
+
+**The cap did what it was installed to do.** The job died alone and the host stayed up.
+
+```text
+Result=oom-kill                 ExecMainStatus=15   (killed, signal=TERM)
+started  Mon 2026-09-07 03:45:01 EDT
+killed   Mon 2026-09-07 03:50:42 EDT      after 5 min 41 s, 2 min 5 s of CPU
+
+kernel: oom-kill:constraint=CONSTRAINT_MEMCG, oom_memcg=/system.slice/oncallbrief.service
+kernel: Killed process 401670 (python3) total-vm:6663628kB anon-rss:2563704kB
+```
+
+`CONSTRAINT_MEMCG` is the whole point: the kill was scoped to the service's own cgroup, not
+to the machine. Compare the two mornings directly — `/var/log/messages` went from 2,897 lines
+in the 03:00 hour to **1** in the 04:00 hour on Sep 6, the box unreachable for five hours. On
+Sep 7 the 03:00 hour has 1,670 lines, the 04:00 hour is logging normally, `uptime` shows no
+reboot, and load average at 04:07 is 0.23. One failed cron job instead of an outage. That
+was the objective and it is met.
+
+The newsletter did not run, which is the cost. `anon-rss` at kill was 2,563,704 kB against a
+`memory.max` of 2,662,400 kB — pinned at 96% of the RAM limit — with swap at 74.4% and
+climbing when `sar` last sampled it. The job wanted more than the 5.86 GiB the two limits
+allow together.
+
+Because `MemoryMax` bounds only what the pipeline can hold in RAM, the rest of the host keeps
+its ~1.2 GB no matter how badly the job behaves. That property is what makes raising
+`MemorySwapMax` a materially different proposition from removing the cap: swap can grow
+without the host losing the memory it needs to stay reachable. The disk freed in step 2 makes
+a larger swapfile practical for the first time.
+
+Three ways forward were on the table. **Only the third was taken, and it made the other two
+unnecessary.** Recording all three, because the reasoning for dropping two of them is the
+useful part:
+
+1. ~~**Let it complete once.** Add swap and raise `MemorySwapMax`.~~ **Not done, and should
+   not be.** This was a way to buy a completed run without fixing anything, and its stated
+   purpose — to obtain the peak figure `sar` could not give — is now served by a run that
+   fits. The fixed pipeline peaks at 667 MB and touches swap zero times, so more swap would
+   only widen the window in which a future regression can thrash the disk instead of failing.
+   The existing `2600M` / `3400M` pair is left exactly as it is: it is a safety cap, not a
+   budget, and the job now runs at 26% of it.
+2. ~~**Shrink the payload.** Blank `raw_text` for rows past a retention horizon.~~ **Not done,
+   and should not be.** This was destructive, irreversible, and aimed at a cost that no longer
+   exists — the 2,650 MB is simply never read now. Deleting seven months of article bodies to
+   speed up a query that no longer touches them would have been the worst possible trade. A
+   retention policy may still be worth having for disk and backup reasons; it is not an
+   incident fix and should not be justified by this incident.
+3. **Fix the query.** Done — see below. The only option that stops the problem returning as
+   the table grows by its 16 MB a day.
+
+### What the fix does, and what it measured
+
+Two changes in the pipeline repo (`TellersTechOrg/tellerstech-website`), in
+`oncallbrief/store.py` and `oncallbrief/ingest.py`:
+
+- `get_raw_items_not_yet_deduped` now resolves **ids** first, subtracts the linked set, and
+  only then reads the rows that survived — in batches, and without `raw_text`.
+- That id scan is **streamed, not `fetchall`ed**. It still visits one row per row in the
+  table, but only the surviving ids are kept; materializing the other 686,647 as connector
+  row dicts cost more than every surviving row put together.
+- The bodies the merge genuinely needs — one per group, for the identity row — are fetched
+  by `get_raw_item_texts` a batch of groups at a time, so the merge holds a bounded number of
+  them however far behind dedupe has fallen. `LENGTH(raw_text)` rides along with each row so
+  `_choose_identity_row`'s tie-break is unchanged.
+- `get_items_identity_stubs` stops loading `items.raw_text` (157 MB) that neither of its two
+  callers reads. Its docstring already claimed the rows were lightweight.
+
+Measured on the primary, 2026-09-07:
+
+| | Before | After |
+|---|---|---|
+| Dedupe pass (`since=all`) | OOM-killed at 2600M RAM + 3400M swap | **315 MB peak**, 21 s, under a 1500M cap with **swap disabled** |
+| Whole nightly pipeline | never reached step 3 | **667 MB peak**, swap peak **0 bytes**, exit 0 |
+| Read to merge 174 rows | 683,188 rows / 2.65 GB | 686,821 ids, then 174 rows |
+
+(683,188 is the count taken during the analysis; 686,821 is the count after that day's
+ingest landed. Same table, three thousand rows apart, not two conflicting readings.)
+
+Correctness was checked against the pre-run backup of `items`, restored into a scratch
+schema and joined row by row: across all 83,479 pre-existing items, **zero lost their body**.
+The 42 rows whose `source_ids` grew and the handful whose title or URL improved are
+`merge_item_for_upsert` doing its documented job on unbriefed rows.
+
+### What is *not* bounded by the backlog
+
+An earlier revision of this section claimed the cost is now "proportional to the backlog
+rather than to the table". That is too strong, and the numbers in the table above say so:
+686,821 ids are still visited to find 174 rows. Two components still scale with the table,
+measured on the primary by running the id scan both ways, twice each, read-only:
+
+| | Peak RSS | Time |
+|---|---|---|
+| Linked-id set alone (`_get_linked_raw_ids`, 706,924 ids) | 94 MB | 4.3 s |
+| Id scan with `fetchall()` | 303 MB | 8.3 s |
+| Id scan streamed | **94 MB** | 11.4 s |
+
+So streaming removes 209 MB — the whole cost of materializing the scan — and buys it for
+about three seconds. What it cannot remove is the 94 MB floor: `_get_linked_raw_ids` parses
+every `items.source_ids` CSV into one Python set, and that set is inherently one entry per
+linked raw row. At ~3,600 new ids a day it grows roughly 170 MB a year.
+
+Against a 2600 MB cap that is years of runway, not a bound. The change that would make the
+claim true is a schema one: normalize `source_ids` into an `item_raw_links` join table so
+the exclusion becomes a `LEFT JOIN` and no Python set is built at all. Worth doing before
+the floor gets interesting; not worth doing during an incident.
+
+Also proven offline before deploying, on a database seeded to the same shape at 1/34 scale:
+the merged `items` table came out **byte-identical** between the old and new code, including
+every `raw_text`, while peak RSS fell from 638 MB to 67 MB. Both halves of the change were
+individually reverted to confirm the comparison actually fails when they are missing — the
+tie-break revert changes which row wins, and the body-fetch revert blanks bodies.
+
+Six regression tests covering this live in the pipeline repo at
+`tests/test_dedupe_backlog.py`.
 
    **Confirm the limits took effect.** `MemorySwapMax` is silently ignored under cgroup v1:
 
