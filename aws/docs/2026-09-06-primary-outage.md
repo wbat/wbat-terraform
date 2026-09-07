@@ -593,6 +593,19 @@ than 2026-07-02. If you only have time for one command today, make it the `08-29
 Uploading is safe to do at 99% full: `rclone` streams from local files straight to S3 and
 stages nothing on disk. It is I/O heavy but not space heavy.
 
+**Run every command in this section as root.** The rclone remote is defined in
+`/root/.config/rclone/rclone.conf` and nowhere else, so as `tellerstec` the first command
+fails with:
+
+```text
+NOTICE: Config file "/home/tellerstec/.config/rclone/rclone.conf" not found - using defaults
+CRITICAL: Failed to create file system for "s3backup:...": didn't find section in config file ("s3backup")
+```
+
+That is the remote being undefined for that user, not a credential or connectivity problem —
+and it is safe, because it fails before transferring anything. `/backup` is root-owned anyway,
+so the reads need root regardless.
+
 **Do not delete anything under `/backup` before it is in S3.** Those nine directories are
 the only copy. Confirm for yourself first:
 
@@ -625,6 +638,14 @@ What is on disk, and what each week is worth:
 That last row is the config-only regression measured directly rather than inferred from a log:
 the Sep 5 system backup produced 60 KB and no `mysql/` tree at all, while every week before it
 carried 1.4–1.9 GB of databases.
+
+**`08-29-26` was uploaded and verified 2026-09-07 05:34 UTC** — the first backup of any kind to
+reach S3 since 2026-07-02, 67 days. `rclone check --checksum --one-way` reported 136 matching
+files and 0 differences, and reading the bucket back independently gives 136 objects totalling
+7,908,696,346 bytes with `mysql/` at 58 objects and 1,982,103,443 bytes, matching the local
+7.4 GB and 1.9 GB. The newest database dump is now off the disk it protects. The transfer took
+roughly two minutes, so the remaining eight weeks are about a quarter of an hour, not an
+overnight job. Nothing has been deleted.
 
 **`rclone lsd s3backup:` returns 403 and that is correct.** It calls `ListAllMyBuckets`, which
 the `directadmin-backup` IAM user is deliberately not granted; its policy allows `ListBucket`,
