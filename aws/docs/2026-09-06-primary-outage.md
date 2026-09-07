@@ -176,10 +176,25 @@ docstring. Measured on the live database `tellerstec_oncallbrief`:
 
 | | |
 |---|---|
-| `raw_items` | **683,188 rows**, 2,768 MB data + 107 MB index |
+| `raw_items` | **683,188 rows** (exact), 2,768 MB data + 107 MB index |
 | `raw_text` across those rows | **2,650 MB**, averaging 4,067 bytes each |
 | Growth | **~3,600 rows and ~16 MB of `raw_text` per day** |
-| `items` | 63,265 rows, 281 MB |
+| `items` | **83,479 rows** (exact), 157 MB of `raw_text` + 29 MB of identity columns |
+
+An earlier revision of this table said `items` held 63,265 rows, which does not reconcile
+with the 83,479 rows the correctness check below compares — a run that merged 174 raw rows
+cannot account for a 20,000-row gap. The 63,265 was an `information_schema.tables.table_rows`
+reading, which for InnoDB is a **sampled estimate, not a count**, and it drifts by more than
+people expect. Both figures re-read on 2026-09-07 to make the point:
+
+| Table | `information_schema` estimate | `COUNT(*)` | Error |
+|---|---|---|---|
+| `items` | 82,620 | 83,824 | −1.4% |
+| `raw_items` | 758,359 | 686,821 | **+10.4%** |
+
+Every row count in this document is now a `COUNT(*)`. Byte figures are still `data_length`
+and `SUM(LENGTH(...))` respectively, which is why the two do not add up to each other —
+`data_length` includes page overhead and free space within pages.
 
 So the mechanism was right and the artifact was wrong, in the direction that mattered: the
 real table is six times the size of the file being blamed, and it grows every night.
@@ -649,9 +664,11 @@ useful part:
 Two changes in the pipeline repo (`TellersTechOrg/tellerstech-website`), in
 `oncallbrief/store.py` and `oncallbrief/ingest.py`:
 
-- `get_raw_items_not_yet_deduped` now selects **ids** first, subtracts the linked set, and
-  only then reads the rows that survived — in batches, and without `raw_text`. The cost is
-  proportional to the backlog rather than to the table.
+- `get_raw_items_not_yet_deduped` now resolves **ids** first, subtracts the linked set, and
+  only then reads the rows that survived — in batches, and without `raw_text`.
+- That id scan is **streamed, not `fetchall`ed**. It still visits one row per row in the
+  table, but only the surviving ids are kept; materializing the other 686,647 as connector
+  row dicts cost more than every surviving row put together.
 - The bodies the merge genuinely needs — one per group, for the identity row — are fetched
   by `get_raw_item_texts` a batch of groups at a time, so the merge holds a bounded number of
   them however far behind dedupe has fallen. `LENGTH(raw_text)` rides along with each row so
@@ -665,12 +682,38 @@ Measured on the primary, 2026-09-07:
 |---|---|---|
 | Dedupe pass (`since=all`) | OOM-killed at 2600M RAM + 3400M swap | **315 MB peak**, 21 s, under a 1500M cap with **swap disabled** |
 | Whole nightly pipeline | never reached step 3 | **667 MB peak**, swap peak **0 bytes**, exit 0 |
-| Rows read to merge 174 | 683,188 rows / 2.65 GB | 683,188 ids, then 174 rows |
+| Read to merge 174 rows | 683,188 rows / 2.65 GB | 686,821 ids, then 174 rows |
+
+(683,188 is the count taken during the analysis; 686,821 is the count after that day's
+ingest landed. Same table, three thousand rows apart, not two conflicting readings.)
 
 Correctness was checked against the pre-run backup of `items`, restored into a scratch
 schema and joined row by row: across all 83,479 pre-existing items, **zero lost their body**.
 The 42 rows whose `source_ids` grew and the handful whose title or URL improved are
 `merge_item_for_upsert` doing its documented job on unbriefed rows.
+
+### What is *not* bounded by the backlog
+
+An earlier revision of this section claimed the cost is now "proportional to the backlog
+rather than to the table". That is too strong, and the numbers in the table above say so:
+686,821 ids are still visited to find 174 rows. Two components still scale with the table,
+measured on the primary by running the id scan both ways, twice each, read-only:
+
+| | Peak RSS | Time |
+|---|---|---|
+| Linked-id set alone (`_get_linked_raw_ids`, 706,924 ids) | 94 MB | 4.3 s |
+| Id scan with `fetchall()` | 303 MB | 8.3 s |
+| Id scan streamed | **94 MB** | 11.4 s |
+
+So streaming removes 209 MB — the whole cost of materializing the scan — and buys it for
+about three seconds. What it cannot remove is the 94 MB floor: `_get_linked_raw_ids` parses
+every `items.source_ids` CSV into one Python set, and that set is inherently one entry per
+linked raw row. At ~3,600 new ids a day it grows roughly 170 MB a year.
+
+Against a 2600 MB cap that is years of runway, not a bound. The change that would make the
+claim true is a schema one: normalize `source_ids` into an `item_raw_links` join table so
+the exclusion becomes a `LEFT JOIN` and no Python set is built at all. Worth doing before
+the floor gets interesting; not worth doing during an incident.
 
 Also proven offline before deploying, on a database seeded to the same shape at 1/34 scale:
 the merged `items` table came out **byte-identical** between the old and new code, including
