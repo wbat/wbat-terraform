@@ -265,8 +265,19 @@ it never leaves a verified copy on disk. Age is not treated as evidence that a b
 safe to delete — even the old-directory sweep checks S3 first, because on the primary the
 directories it would have swept were the only copy. See
 [`aws/docs/2026-09-06-primary-outage.md`](../../aws/docs/2026-09-06-primary-outage.md) for
-what was actually broken on that host, and `prove_backup_cleanup.sh` for the eleven
+what was actually broken on that host, and `prove_backup_cleanup.sh` for the fourteen
 behaviours that are now pinned.
+
+`system_backup_post.sh` execs `all_backups_post.sh --event=system`, and that flag is load
+bearing. The two DirectAdmin events run the same script, so without it a run cannot tell
+whether the system directory it can see is finished or still being written — and the lock
+does not help, because it serialises hook runs rather than the backup process producing the
+files. The system event means DirectAdmin has said the write is complete, so that run
+uploads and cleans immediately. Any other run waits until the directory has been untouched
+for `DA_BACKUP_SYSTEM_QUIESCE_SEC` (default 900) before touching it, and logs a `NOTE
+deferring` line when it declines. If you see those every run, check that both hooks were
+installed from the same checkout: an old `system_backup_post.sh` without the flag makes
+every system backup look in-progress, and it will sit on disk until the sweep reaches it.
 
 Alerting: a run that ends with backups still on disk mails `HEALTH_ALERT_TO` from
 `/etc/da-vhost-listen/vhost-listen.conf` — the same address the vhost tooling uses, so
@@ -363,7 +374,9 @@ backlog, so a sweep that silently fails to reclaim anything is the worst place t
 | `--verify` says `MODE 600 (expected 700)` | The hook is the right code but not executable, so DirectAdmin never runs it | `--install` resets the mode; check what stripped it (a manual `cp`, or an editor writing in place) |
 | Log says `cleaned local ...` but the files are still there | Pre-2026-09-06 hook: cleanup resolved a different directory than the upload, or a hardcoded `SYSTEM_ROOT` that DirectAdmin does not write to | `--install` the current hook; see [the incident doc](../../aws/docs/2026-09-06-primary-outage.md) |
 | `WARN keeping ... not present in <prefix>` | An old backup directory is **not** in S3, so the sweep kept it | Upload it, then delete by hand. Never `rm -rf` an unverified backup dir |
-| `WARN system backups found under more than one root` | Both `/backup` and `/home/backup` hold dated dirs | Only one is cleaned per run; consolidate them or pin `DA_BACKUP_SYSTEM_ROOT` |
+| `WARN system backups found under more than one root` | Both `/backup` and `/home/backup` hold dated dirs | Only one is cleaned per run, and this now mails as well as logs. Consolidate them or pin `DA_BACKUP_SYSTEM_ROOT` |
+| `NOTE deferring <dir>` on every run | `system_backup_post.sh` is missing or predates `--event=system`, so no run is ever the completion signal | `--verify`, then `--install`. Until then the directory waits for the sweep |
+| `ERROR could not enumerate` / `could not list old directories` | `find` hit an unreadable subtree or an I/O error, so the file list was incomplete | Deliberate refusal to act on a partial list. Check permissions and `dmesg` for the underlying error |
 | Backups stop with no hook log at all | The DirectAdmin backup task itself is failing, so no post-hook fires | `grep 'dataskq.*backup' /var/log/messages`; a `Not implemented` error is a DA problem, not a hook problem |
 | `ERROR ... not verified in S3 (rclone check rc=N)` | Objects did not land, or the bucket is unreachable | Local copies were kept deliberately; fix rclone/S3 access and re-run the hook |
 | `backup local cleanup FAILED` / `ERROR could not remove N verified file(s)` | The upload was verified but the delete failed: read-only filesystem, `chattr +i`, or an I/O error | The copies named in the mail are already in S3 and safe to `rm` by hand; then find what blocked the delete (`mount | grep ' / '`, `lsattr`, `dmesg`) |
