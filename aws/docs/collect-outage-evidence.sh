@@ -213,19 +213,25 @@ DATED_RE='^([A-Z][a-z][a-z] [ 0-9][0-9] |[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0
 
 # -H keeps the filename on every hit. The old -h stripped it, so a capture gave no way to
 # tell which log, or which rotation, a match came from.
+#
+# Classify before capping, never after. A cap applied to the raw grep output is applied in
+# file order, so a single in-window hit in /var/log/messages can be pushed out by a hundred
+# historical hits in a paniclog that grep reaches later. The capture then holds nothing but
+# MATCH_OLD, and analyze() refutes -- stating that no service logged ENOSPC during the
+# incident, on the strength of having thrown away the line that said one did. Caps are per
+# class so out-of-window noise cannot crowd out evidence, and TOTALS reports the true
+# counts so the verdict never depends on how many lines were printed.
+#
+# One awk pass rather than two greps per line: this runs on a host that is already sick.
 if [ -n "$enospc_files" ]; then
   grep -iHE "no space left|ENOSPC|disk full|out of disk" $enospc_files 2>/dev/null \
-    | tail -40 \
-    | while IFS= read -r line; do
-        rec="${line#*:}"
-        if printf '%s' "$rec" | grep -qE "^(${window_re})"; then
-          printf 'MATCH %s\n' "$line"
-        elif printf '%s' "$rec" | grep -qE "$DATED_RE"; then
-          printf 'MATCH_OLD %s\n' "$line"
-        else
-          printf 'MATCH_UNDATED %s\n' "$line"
-        fi
-      done
+    | awk -v win="$window_re" -v dated="$DATED_RE" '
+        { rec = $0; sub(/^[^:]*:/, "", rec) }
+        rec ~ "^(" win ")"  { n_in++;  if (n_in  <= 40) print "MATCH " $0;         next }
+        rec ~ dated         { n_out++; if (n_out <= 10) print "MATCH_OLD " $0;     next }
+                            { n_un++;  if (n_un  <= 10) print "MATCH_UNDATED " $0 }
+        END { printf "TOTALS in_window=%d out_of_window=%d undated=%d\n", n_in, n_out, n_un }
+      '
 fi
 # --- END enospc classifier ---
 echo "===SECTION journal_errors==="
@@ -441,6 +447,16 @@ analyze() {
     enospc_lines="$(read_section "$dir" enospc | grep -c '^MATCH ' || true)"
     enospc_old="$(read_section "$dir" enospc | grep -c '^MATCH_OLD ' || true)"
     enospc_undated="$(read_section "$dir" enospc | grep -c '^MATCH_UNDATED ' || true)"
+    # Printed lines are capped per class, so counting them undercounts a busy log. TOTALS
+    # carries the real figures; prefer it wherever the capture provides it, so a verdict
+    # never turns on how much of the evidence fitted in the capture.
+    local totals
+    totals="$(read_section "$dir" enospc | grep -m1 '^TOTALS ' || true)"
+    if [[ -n "$totals" ]]; then
+      enospc_lines="$(sed -n 's/.*in_window=\([0-9]*\).*/\1/p' <<<"$totals")"
+      enospc_old="$(sed -n 's/.*out_of_window=\([0-9]*\).*/\1/p' <<<"$totals")"
+      enospc_undated="$(sed -n 's/.*undated=\([0-9]*\).*/\1/p' <<<"$totals")"
+    fi
   else
     # Capture predates the SEARCHED/MATCH markers: every line is a match, and there is
     # no way to tell whether the logs existed. Treated as "cannot rule out" below.

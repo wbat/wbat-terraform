@@ -404,6 +404,47 @@ grep -q 'timestamp could not be parsed' <<<"$REPORT" \
   || fail "the report must tell the reader to go read the record by hand:"$'\n'"$REPORT"
 echo "OK an unreadable timestamp is escalated rather than guessed"
 
+# Capping the raw grep output before dating it throws away evidence in file order. One
+# in-window hit in a log grep reads early is displaced by a backlog of historical hits in a
+# paniclog it reads later, and what survives is uniformly MATCH_OLD -- so analyze() refutes,
+# announcing that nothing logged ENOSPC during the incident, having discarded the line that
+# said otherwise. Worse than the unbounded grep it replaced: that one was wrong loudly.
+{
+  echo "${today_syslog} 03:45:02 primary kernel: EXT4-fs: No space left on device"
+} >"${LOGS}/messages"
+: >"${LOGS}/paniclog-busy"
+i=0
+while ((i < 60)); do
+  echo "${old_iso} 03:12:${i} exim paniclog: spool write: No space left on device" >>"${LOGS}/paniclog-busy"
+  i=$((i + 1))
+done
+
+run_classifier 14 "${LOGS}/messages" "${LOGS}/paniclog-busy"
+
+grep -q "^MATCH .*${LOGS}/messages" <<<"$CLASSIFIED" \
+  || fail "the single in-window record was displaced by 60 older ones:"$'\n'"$CLASSIFIED"
+grep -q '^TOTALS in_window=1 out_of_window=60 undated=0' <<<"$CLASSIFIED" \
+  || fail "TOTALS must report what was found, not what was printed:"$'\n'"$(grep '^TOTALS' <<<"$CLASSIFIED")"
+[[ "$(grep -c '^MATCH_OLD ' <<<"$CLASSIFIED")" -le 10 ]] \
+  || fail "out-of-window noise must stay capped or it bloats every capture"
+echo "OK evidence is classified before it is capped, and totals survive the cap"
+
+# The verdict side: a capture whose printed lines were capped must still confirm, because
+# TOTALS says an in-window record exists even though its line did not fit.
+rewrite_enospc "${SANDBOX}/case6-remote.txt" "${SANDBOX}/case7c.txt" <<ENOSPC
+SEARCHED /var/log/messages
+SEARCHED /var/log/exim/paniclog
+MATCH_OLD /var/log/exim/paniclog:${old_iso} 03:12:01 No space left on device
+TOTALS in_window=3 out_of_window=97 undated=0
+ENOSPC
+run_prepared "${SANDBOX}/case7c.txt" case7c
+
+grep -q 'Full disk explains the outage:      CONFIRMED' <<<"$REPORT" \
+  || fail "the verdict ignored TOTALS and refuted on the capped lines:"$'\n'"$REPORT"
+grep -q 'host logs: 3 ' <<<"$REPORT" \
+  || fail "the report must show the true in-window count, not the printed one:"$'\n'"$REPORT"
+echo "OK a capped capture is read by its totals, not its surviving lines"
+
 ##############################################################################
 echo "== Proof 8: --analyze must re-read a capture with no aws CLI on PATH =="
 ##############################################################################
