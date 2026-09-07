@@ -630,10 +630,16 @@ smallest change. Verify by size, not by exit status — a correct run is gigabyt
 takes about twenty minutes, and the broken one exits clean in under a second:
 
 ```bash
-/usr/local/directadmin/shared/sysbk.sh -q; echo "rc=$?"
+df -h /                                       # a correct run writes GB; do this after step 2
+/usr/local/sysbk/sysbk -q; echo "rc=$?"       # the reverted script, not shared/sysbk.sh
 du -sh /backup/"$(date +%m-%d-%y)"            # config-only is ~55 KB; with databases, GB
 ls /backup/"$(date +%m-%d-%y)"/               # expect a mysql/ directory
 ```
+
+Run the script you reverted **to**, not the one you reverted **from**.
+`/usr/local/directadmin/shared/sysbk.sh` is the replacement identified above as the thing
+that produces the 55 KB config-only archive, so verifying with it reproduces the bug and
+looks like the revert failed.
 
 Note that step 3 makes this partly redundant: admin backups include databases, so once
 they work again the system backup matters mainly for server configuration. Both are worth
