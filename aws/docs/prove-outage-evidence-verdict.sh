@@ -91,7 +91,11 @@ make_remote_out() {
     printf '110000000\t/var/lib/mysql\n'
     echo "===SECTION backup_listing==="
     echo "--- /home/backup ---"
-    [[ "$backups" == "big" ]] && echo "drwx------ 5 root root 4096 Sep  5 05:31 09-05-26"
+    if [[ "$backups" == "big" ]]; then
+      echo "drwx------ 5 root root 4096 Sep  5 05:31 09-05-26"
+      # Left behind by a run that finished more than a day ago -- the defect-2 signature.
+      echo "DATED_DIR age_s=104400 /home/backup/09-05-26"
+    fi
     echo "===SECTION hook_log==="
     if [[ "$backups" == "big" ]]; then
       echo "2026-09-05T05:40:11-04:00 upload system backup /home/backup/09-05-26 -> s3backup:.../server/2026-09-05/"
@@ -328,20 +332,21 @@ extract_classifier() {
 [[ -n "$(extract_classifier)" ]] \
   || fail "could not extract the enospc classifier -- did its BEGIN/END markers move?"
 
-run_classifier() { # <window-days> <logfile>... -> sets CLASSIFIED
-  local days="$1"
-  shift
-  run_classifier_split "$days" "$*" ""
+run_classifier() { # <incident-date> <pad-days> <logfile>... -> sets CLASSIFIED
+  local inc="$1" pad="$2"
+  shift 2
+  run_classifier_split "$inc" "$pad" "$*" ""
 }
 
 # Plain and compressed inputs travel separately, because only the compressed ones need a
 # decompressor between the file and the grep.
-run_classifier_split() { # <window-days> <plain-list> <compressed-list> -> sets CLASSIFIED
+run_classifier_split() { # <incident-date> <pad-days> <plain> <compressed> -> sets CLASSIFIED
   local runner="${SANDBOX}/classifier.sh"
   {
-    printf 'ENOSPC_WINDOW_DAYS=%s\n' "$1"
-    printf 'enospc_files="%s"\n' "$2"
-    printf 'enospc_compressed="%s"\n' "$3"
+    printf "INCIDENT_DATE='%s'\n" "$1"
+    printf "INCIDENT_PAD_DAYS='%s'\n" "$2"
+    printf 'enospc_files="%s"\n' "$3"
+    printf 'enospc_compressed="%s"\n' "$4"
     extract_classifier
   } >"$runner"
   CLASSIFIED="$(sh "$runner")"
@@ -354,23 +359,25 @@ fi
 LOGS="${SANDBOX}/logs"
 mkdir -p "$LOGS"
 
-# Dates are generated rather than hardcoded so this proof cannot rot into passing because
-# a literal drifted out of the window.
-today_syslog="$(date '+%b %e')"
-today_iso="$(date '+%Y-%m-%d')"
-old_syslog="$(date -d '-60 days' '+%b %e')"
-old_iso="$(date -d '-60 days' '+%Y-%m-%d')"
+# Every date here is derived from one incident anchor, so the window and the records move
+# together and no literal can drift out of the window. INC is deliberately not today's
+# date: the window must be a property of the outage, and a proof that used "now" for both
+# sides would pass just as happily against the relative window this replaced.
+INC="2026-09-06"
+in_syslog="$(date -d "$INC" '+%b %e')"
+old_syslog="$(date -d "${INC} -60 days" '+%b %e')"
+old_iso="$(date -d "${INC} -60 days" '+%Y-%m-%d')"
 
 {
-  echo "${today_syslog} 03:45:02 primary kernel: EXT4-fs (nvme0n1p1): No space left on device"
+  echo "${in_syslog} 03:45:02 primary kernel: EXT4-fs (nvme0n1p1): No space left on device"
   echo "${old_syslog} 03:12:44 primary kernel: EXT4-fs (nvme0n1p1): No space left on device"
   echo "${old_iso} 03:12:45 exim paniclog: failed to write: No space left on device"
   echo "spooler: write failed, no space left on device"
 } >"${LOGS}/paniclog"
 
-run_classifier 14 "${LOGS}/paniclog"
+run_classifier "$INC" 1 "${LOGS}/paniclog"
 
-grep -q "^MATCH .*${today_syslog}" <<<"$CLASSIFIED" \
+grep -q "^MATCH .*${in_syslog}" <<<"$CLASSIFIED" \
   || fail "a record from inside the window must stay a MATCH:"$'\n'"$CLASSIFIED"
 [[ "$(grep -c '^MATCH ' <<<"$CLASSIFIED")" == "1" ]] \
   || fail "exactly one record is in window; the rest must not be counted as evidence:"$'\n'"$CLASSIFIED"
@@ -421,7 +428,7 @@ echo "OK an unreadable timestamp is escalated rather than guessed"
 # announcing that nothing logged ENOSPC during the incident, having discarded the line that
 # said otherwise. Worse than the unbounded grep it replaced: that one was wrong loudly.
 {
-  echo "${today_syslog} 03:45:02 primary kernel: EXT4-fs: No space left on device"
+  echo "${in_syslog} 03:45:02 primary kernel: EXT4-fs: No space left on device"
 } >"${LOGS}/messages"
 : >"${LOGS}/paniclog-busy"
 i=0
@@ -430,7 +437,7 @@ while ((i < 60)); do
   i=$((i + 1))
 done
 
-run_classifier 14 "${LOGS}/messages" "${LOGS}/paniclog-busy"
+run_classifier "$INC" 1 "${LOGS}/messages" "${LOGS}/paniclog-busy"
 
 grep -q "^MATCH .*${LOGS}/messages" <<<"$CLASSIFIED" \
   || fail "the single in-window record was displaced by 60 older ones:"$'\n'"$CLASSIFIED"
@@ -462,12 +469,12 @@ echo "OK a capped capture is read by its totals, not its surviving lines"
 # nothing whatever the file says, and still counts the file as SEARCHED, so the verdict is
 # told the log was examined and came up clean.
 {
-  echo "${today_syslog} 03:45:07 primary kernel: EXT4-fs: No space left on device"
-  echo "${today_syslog} 03:45:08 primary kernel: unrelated line"
+  echo "${in_syslog} 03:45:07 primary kernel: EXT4-fs: No space left on device"
+  echo "${in_syslog} 03:45:08 primary kernel: unrelated line"
 } >"${LOGS}/messages-rotated"
 gzip -f "${LOGS}/messages-rotated"
 
-run_classifier_split 14 "" "${LOGS}/messages-rotated.gz"
+run_classifier_split "$INC" 1 "" "${LOGS}/messages-rotated.gz"
 
 grep -q '^MATCH .*messages-rotated\.gz:' <<<"$CLASSIFIED" \
   || fail "an ENOSPC record inside a gzipped rotation was not found:"$'\n'"$CLASSIFIED"
@@ -487,6 +494,40 @@ grep -q 'Full disk explains the outage:      INCONCLUSIVE' <<<"$REPORT" \
 grep -q 'could not be read' <<<"$REPORT" \
   || fail "the report must say which logs could not be opened:"$'\n'"$REPORT"
 echo "OK a log that could not be opened is not counted as searched"
+
+# The window used to be "the 14 days before collection", which makes the verdict depend on
+# when somebody got round to running this. Two ways that goes wrong, and this covers both
+# with one fixture: a disk-full event weeks before the outage is inside a 14-day window if
+# you collect promptly, and an event *after* the outage is inside it too. Neither is
+# evidence about the incident. The anchor is now the incident date, so a record written
+# today is out of window when the outage was months ago -- which is the assertion the old
+# behaviour cannot satisfy.
+#
+# Anchored on 2026-06-28, the earlier genuine disk-full failure on this same host, because
+# investigating it today is the concrete case: a record written today is months away from
+# that outage and must not count, yet a window measured backwards from collection puts it
+# at the very centre.
+OLD_INC="2026-06-28"
+{
+  echo "$(date '+%b %e') 04:02:11 primary kernel: EXT4-fs: No space left on device"
+  echo "$(date -d "${OLD_INC} +30 days" '+%Y-%m-%d') 04:02:12 exim paniclog: No space left on device"
+  echo "$(date -d "$OLD_INC" '+%Y-%m-%d') 03:45:02 primary kernel: EXT4-fs: No space left on device"
+} >"${LOGS}/messages-anchored"
+
+# Guard against this proof quietly losing its point if it is ever run on 2026-06-27..29.
+if [[ "$(date '+%b %e')" == "$(date -d "$OLD_INC" '+%b %e')" ]]; then
+  fail "this proof needs today to be outside the anchored window; pick a different OLD_INC"
+fi
+
+run_classifier "$OLD_INC" 1 "${LOGS}/messages-anchored"
+
+grep -q '^TOTALS in_window=1 out_of_window=2 undated=0' <<<"$CLASSIFIED" \
+  || fail "only the record from the incident window may count:"$'\n'"$CLASSIFIED"
+grep -q "^MATCH .*$(date -d "$OLD_INC" '+%Y-%m-%d')" <<<"$CLASSIFIED" \
+  || fail "the incident's own record must be the one that matches:"$'\n'"$CLASSIFIED"
+grep -q "^MATCH_OLD .*$(date '+%b %e')" <<<"$CLASSIFIED" \
+  || fail "a record written today is not evidence about an outage in June:"$'\n'"$CLASSIFIED"
+echo "OK the window follows the incident, not the day the capture was taken"
 
 ##############################################################################
 echo "== Proof 8: a capture that was cut off must not produce a confident answer =="
@@ -584,6 +625,36 @@ set -e
 grep -q 'Backup cleanup is why it filled:    CONFIRMED' <<<"$REPORT" \
   || fail "stale directories are evidence of a failed run whatever rclone is doing now:"$'\n'"$REPORT"
 echo "OK a concurrent upload does not excuse a run that already failed"
+
+# And the thing that made the guard above almost useless: staleness was inferred from the
+# directory's *name*. Every healthy system backup has today's dated directory on disk while
+# it is being written, so the guard's own precondition -- no stale directories -- was false
+# in precisely the situation it was written for. Age, not name.
+ACTIVE_DIR="${SANDBOX}/case9-active"
+rm -rf "$ACTIVE_DIR"
+cp -r "${SANDBOX}/case1" "$ACTIVE_DIR"
+printf 'rclone copy /backup/09-06-26 s3backup:bucket/host/2026-09-06/ --checksum\n' \
+  >"${ACTIVE_DIR}/section-rclone_running.txt"
+: >"${ACTIVE_DIR}/section-hook_log.txt"
+{
+  echo "--- /backup ---"
+  echo "drwx------ 5 root root 4096 Sep  6 03:50 09-06-26"
+  # Written to four minutes ago: this is the backup in flight, not a leftover.
+  echo "DATED_DIR age_s=240 /backup/09-06-26"
+} >"${ACTIVE_DIR}/section-backup_listing.txt"
+
+set +e
+REPORT="$("$SCRIPT" --analyze "$ACTIVE_DIR" 2>&1)"
+set -e
+
+grep -q 'still being written: 1' <<<"$REPORT" \
+  || fail "an actively written directory must be reported as such:"$'\n'"$REPORT"
+grep -q 'left behind (idle > 6h): 0' <<<"$REPORT" \
+  || fail "a directory touched four minutes ago is not a leftover:"$'\n'"$REPORT"
+if grep -q 'Backup cleanup is why it filled:    CONFIRMED' <<<"$REPORT"; then
+  fail "today's in-progress directory was counted as evidence of a failed cleanup:"$'\n'"$REPORT"
+fi
+echo "OK the directory being written right now does not count as a leftover"
 
 ##############################################################################
 echo "== Proof 10: 'we could not check' must not exit like 'the hypothesis holds' =="

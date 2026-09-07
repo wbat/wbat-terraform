@@ -44,6 +44,30 @@ FULL_PCT=90
 BACKUP_GB_SIGNIFICANT=20
 BACKUP_SHARE_PCT=25
 
+# The incident this script is about, and how far either side of it a record still counts.
+# These are dates, not offsets from today: an ENOSPC line is evidence for this outage
+# because of when it was written, not because of when somebody got round to collecting it.
+# Anchoring on "the last 14 days" meant a capture taken on the 7th accepted an unrelated
+# disk-full event from late August, and a capture taken weeks later would accept events
+# that postdate the outage entirely -- either way the collector confirms the hypothesis
+# from a record that has nothing to do with it.
+INCIDENT_DATE="${INCIDENT_DATE:-2026-09-06}"
+INCIDENT_PAD_DAYS="${INCIDENT_PAD_DAYS:-1}"
+
+# How long a dated backup directory can go untouched before it is a leftover rather than
+# one being written. The Aug 29 system backup ran 22 minutes; six hours is well clear of a
+# slow run while still catching anything the previous night left behind.
+ACTIVE_DIR_MAX_AGE_S=21600
+
+if [[ ! "$INCIDENT_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+  echo "ERROR: INCIDENT_DATE must be YYYY-MM-DD, got '${INCIDENT_DATE}'" >&2
+  exit 3
+fi
+if [[ ! "$INCIDENT_PAD_DAYS" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: INCIDENT_PAD_DAYS must be a whole number of days, got '${INCIDENT_PAD_DAYS}'" >&2
+  exit 3
+fi
+
 usage() { sed -n '2,26p' "$0"; }
 
 while [[ $# -gt 0 ]]; do
@@ -125,6 +149,10 @@ have_sha256() {
 # characters, and routing around that needs an S3 output bucket. Every command below is
 # bounded (tail/head/max-depth) so the whole capture fits.
 remote_script() {
+  # The only values interpolated into the remote script. Both are validated at startup, so
+  # this cannot inject anything, and single quotes keep the remote shell from re-reading
+  # them. Everything else is a quoted heredoc.
+  printf "INCIDENT_DATE='%s'\nINCIDENT_PAD_DAYS='%s'\n" "$INCIDENT_DATE" "$INCIDENT_PAD_DAYS"
   cat <<'REMOTE'
 echo "===SECTION host==="
 date -u +%Y-%m-%dT%H:%M:%SZ
@@ -145,6 +173,20 @@ echo "===SECTION backup_listing==="
 for d in /home/backup /backup /home/admin_backups; do
   echo "--- $d ---"
   ls -la "$d/" 2>/dev/null
+done
+# The name says which day a backup is for; it does not say whether anything is still
+# writing to it. Today's directory is present during every healthy system backup, so
+# counting dated names as "stale" reports the normal case as a failure -- and defeats the
+# in-flight-upload guard in analyze(), which is exactly the situation it was added for.
+# Emit the age so staleness can be a fact about the directory rather than about its name.
+enospc_now="$(date +%s)"
+for d in /home/backup /backup; do
+  [ -d "$d" ] || continue
+  find "$d" -mindepth 1 -maxdepth 1 -type d -name '[0-9][0-9]-[0-9][0-9]-[0-9][0-9]' \
+    -printf '%T@ %p\n' 2>/dev/null \
+    | while read -r ts p; do
+      echo "DATED_DIR age_s=$((enospc_now - ${ts%.*})) ${p}"
+    done
 done
 echo "===SECTION hook_log==="
 tail -150 /var/log/da-backup-s3.log 2>/dev/null
@@ -170,7 +212,11 @@ echo "===SECTION enospc==="
 # being written, so selecting on mtime needs no timestamp parsing and does not care that
 # syslog omits the year. One list feeds both the markers and the grep; they were separate
 # before and could drift out of sync.
-ENOSPC_WINDOW_DAYS=14
+# A log that stopped being written before the window opened cannot contain a record from
+# inside it, whatever today's date is. Selecting on "modified since the window opened"
+# rather than "modified in the last 14 days" means a capture taken late still searches the
+# right rotations, and a capture taken promptly does not drag in months of unrelated ones.
+ENOSPC_FILE_SINCE="$(date -d "${INCIDENT_DATE} -${INCIDENT_PAD_DAYS} days" +%Y-%m-%d)"
 
 # logrotate compresses rotations by default, so the newest rotation of a busy log is very
 # often messages-20260901.gz. Passing that to a plain grep searches the compressed bytes,
@@ -197,8 +243,8 @@ for f in /var/log/messages /var/log/messages-* /var/log/mysqld.log \
          /var/log/mariadb/mariadb.log /var/log/exim/mainlog /var/log/exim/mainlog-* \
          /var/log/exim/paniclog /var/log/maillog /var/log/maillog-*; do
   [ -f "$f" ] || continue
-  if [ -z "$(find "$f" -maxdepth 0 -mtime "-${ENOSPC_WINDOW_DAYS}" 2>/dev/null)" ]; then
-    echo "SKIPPED_OLD $f (last written more than ${ENOSPC_WINDOW_DAYS}d ago)"
+  if [ -z "$(find "$f" -maxdepth 0 -newermt "$ENOSPC_FILE_SINCE" 2>/dev/null)" ]; then
+    echo "SKIPPED_OLD $f (last written before ${ENOSPC_FILE_SINCE}, so it predates the incident window)"
     continue
   fi
   tool="$(enospc_tool_for "$f")"
@@ -225,7 +271,7 @@ done
 # --- BEGIN enospc classifier ---
 # prove-outage-evidence-verdict.sh extracts everything between these two markers and runs
 # it verbatim against fixture logs, so this block is the tested artefact rather than a
-# paraphrase of it. It depends only on ENOSPC_WINDOW_DAYS, enospc_files and
+# paraphrase of it. It depends only on INCIDENT_DATE, INCIDENT_PAD_DAYS, enospc_files and
 # enospc_compressed, all set above.
 enospc_reader() {
   case "$1" in
@@ -237,11 +283,15 @@ enospc_reader() {
   esac
 }
 
+# Walk forward from the start of the incident window rather than back from today, so the
+# set of accepted dates is a property of the outage and not of when this was run twice.
+window_start="$(date -d "${INCIDENT_DATE} -${INCIDENT_PAD_DAYS} days" +%Y-%m-%d)"
+window_span=$((INCIDENT_PAD_DAYS * 2 + 1))
 window_re=""
 n=0
-while [ "$n" -le "$ENOSPC_WINDOW_DAYS" ]; do
+while [ "$n" -lt "$window_span" ]; do
   for fmt in '+%Y-%m-%d' '+%b %e' '+%b %d' '+%y%m%d'; do
-    t="$(date -d "-${n} days" "$fmt" 2>/dev/null)" || t=""
+    t="$(date -d "${window_start} +${n} days" "$fmt" 2>/dev/null)" || t=""
     [ -n "$t" ] && window_re="${window_re}|${t}"
   done
   n=$((n + 1))
@@ -561,14 +611,35 @@ analyze() {
   # --- which defect fired? ---
   local claimed_clean=0 stale_dirs=0 upload_errors=0 unverified=0
   claimed_clean="$(read_section "$dir" hook_log | grep -c 'cleaned local system backup dirs' || true)"
-  stale_dirs="$(read_section "$dir" backup_listing | grep -cE '[0-9]{2}-[0-9]{2}-[0-9]{2}$' || true)"
+  # A dated directory is stale if nothing has touched it for hours, not because its name
+  # has a date in it. During a system backup today's directory is present and being
+  # written, and counting it as stale both invents a defect-2 signature and cancels the
+  # in-flight-upload guard below -- so the one capture most likely to be taken during a
+  # live backup was the one guaranteed to be misread.
+  local dated_marked=0 active_dirs=0 stale_age_known=1
+  dated_marked="$(read_section "$dir" backup_listing | grep -c '^DATED_DIR ' || true)"
+  if ((${dated_marked:-0} > 0)); then
+    stale_dirs="$(read_section "$dir" backup_listing \
+      | awk -v t="$ACTIVE_DIR_MAX_AGE_S" '/^DATED_DIR /{ split($2, a, "="); if (a[2] + 0 > t) n++ } END { print n + 0 }')"
+    active_dirs="$(read_section "$dir" backup_listing \
+      | awk -v t="$ACTIVE_DIR_MAX_AGE_S" '/^DATED_DIR /{ split($2, a, "="); if (a[2] + 0 <= t) n++ } END { print n + 0 }')"
+  else
+    # A capture from before the collector emitted ages. The name count is all there is.
+    stale_age_known=0
+    stale_dirs="$(read_section "$dir" backup_listing | grep -cE '[0-9]{2}-[0-9]{2}-[0-9]{2}$' || true)"
+  fi
   upload_errors="$(read_section "$dir" hook_log | grep -cE 'ERROR|rc=[1-9]' || true)"
   unverified="$(read_section "$dir" hook_log | grep -c 'not verified in S3' || true)"
 
   echo
   echo "-- Which defect fired? --"
   echo "  log lines claiming 'cleaned local system backup dirs': ${claimed_clean:-0}"
-  echo "  dated backup directories still present locally: ${stale_dirs:-0}"
+  if ((stale_age_known == 1)); then
+    echo "  dated backup directories left behind (idle > $((ACTIVE_DIR_MAX_AGE_S / 3600))h): ${stale_dirs:-0}"
+    echo "  dated backup directories still being written: ${active_dirs:-0}"
+  else
+    echo "  dated backup directories still present locally: ${stale_dirs:-0} (age not recorded by this capture)"
+  fi
   echo "  ERROR / non-zero rclone lines in the hook log: ${upload_errors:-0}"
   echo "  'not verified in S3' lines (only the fixed hook emits these): ${unverified:-0}"
 
@@ -636,7 +707,17 @@ analyze() {
   fi
 
   if ((backup_gb_int >= BACKUP_GB_SIGNIFICANT)) || ((share >= BACKUP_SHARE_PCT)); then
-    if ((rclone_active == 1)) && ((${stale_dirs:-0} == 0)) && ((${upload_errors:-0} == 0)); then
+    # With ages recorded, "no directory has been idle for hours" is real evidence that
+    # nothing finished badly. Without them, a dated directory could be today's in-progress
+    # one or last week's leftover, and a capture that cannot tell the difference should not
+    # be the thing that convicts the hook.
+    local no_failed_run=0
+    if ((stale_age_known == 1)); then
+      ((${stale_dirs:-0} == 0)) && no_failed_run=1
+    else
+      no_failed_run=1
+    fi
+    if ((rclone_active == 1)) && ((no_failed_run == 1)) && ((${upload_errors:-0} == 0)); then
       # Nothing here says a run finished badly: no stale dated directories, no upload
       # errors, and an upload in flight that explains the footprint.
       cause_verdict="INCONCLUSIVE"
