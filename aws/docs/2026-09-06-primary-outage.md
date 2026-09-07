@@ -380,16 +380,26 @@ If nothing newer than `2026-07-02/` appears, upload before deleting. Note the or
 `08-29-26` goes first because it holds the only recent database dump, and a lexicographic
 glob would otherwise leave it until last.
 
+Each week that verifies records its own path. The deletion step then reads that file rather
+than re-globbing, so a directory whose upload or checksum failed cannot be removed by the
+next command even if you paste both blocks in one go.
+
 ```bash
 BUCKET=s3backup:wbat-tellerstech-directadmin-backups-708113892725/server
+VERIFIED_LIST=/root/backup-weeks-verified.txt
+: >"$VERIFIED_LIST"
 
 upload_week() {
   local d="$1" stamp iso
   stamp="$(basename "$d")"                    # MM-DD-YY
   iso="20${stamp:6:2}-${stamp:0:2}-${stamp:3:2}"
-  rclone copy "$d" "${BUCKET}/${iso}/" --s3-no-check-bucket --checksum --transfers 4 &&
-    rclone check "$d" "${BUCKET}/${iso}/" --s3-no-check-bucket --checksum --one-way &&
+  if rclone copy "$d" "${BUCKET}/${iso}/" --s3-no-check-bucket --checksum --transfers 4 &&
+     rclone check "$d" "${BUCKET}/${iso}/" --s3-no-check-bucket --checksum --one-way; then
     echo "VERIFIED $d"
+    printf '%s\n' "$d" >>"$VERIFIED_LIST"
+  else
+    echo "FAILED   $d -- keeping the local copy, this one is still the only one"
+  fi
 }
 
 upload_week /backup/08-29-26                  # newest databases -- do this one first
@@ -398,13 +408,18 @@ for d in /backup/07-* /backup/08-0* /backup/08-1* /backup/08-22-26; do
 done
 ```
 
-Then delete only the directories that printed `VERIFIED`, keeping `08-29-26` on disk as
-the local copy of the most recent week:
+Now delete, keeping `08-29-26` on disk as the local copy of the most recent week. Read the
+count first: if it is lower than you expect, something above printed `FAILED` and that week
+still exists in one place only.
 
 ```bash
-for d in /backup/07-* /backup/08-0* /backup/08-1* /backup/08-22-26; do
+grep -vx /backup/08-29-26 "$VERIFIED_LIST" >/root/backup-weeks-to-delete.txt
+wc -l </root/backup-weeks-to-delete.txt        # expect 8
+
+while IFS= read -r d; do
+  echo "removing $d"
   rm -rf -- "$d"
-done
+done </root/backup-weeks-to-delete.txt
 df -h /                                        # expect ~74% used, ~52 GB reclaimed
 ```
 
