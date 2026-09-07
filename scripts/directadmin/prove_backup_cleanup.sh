@@ -656,6 +656,70 @@ grep -q "using newest dated directory .*${YESTERDAY}" "${CASE19}/da-backup-s3.lo
   || fail "the fallback should have named the dated directory it chose:"$'\n'"$(cat "${CASE19}/da-backup-s3.log")"
 echo "OK the fallback picks the dated backup and leaves everything else alone"
 
+##############################################################################
+echo "== Proof 17: a sweep must verify where the backup was actually sent =="
+##############################################################################
+# The destination is keyed on the hook-run date; the directory is named for the day the
+# backup started. resolve_system_dir exists because those differ -- a backup that starts
+# before midnight uploads to the next day's prefix. If that run's delete then fails, every
+# later sweep rebuilt the prefix from the directory name, checked a location nothing was
+# ever written to, and filed the backup as local-only: kept forever, re-alerted every run,
+# with a verified copy in S3 the whole time. A backstop that cries wolf on a backup it
+# could have confirmed is a backstop people switch off.
+
+# First: a verified upload records where it went, so the information survives a failed
+# delete. The inner directory is made unwritable so rm -rf fails while the root stays
+# writable, which is the only way to observe a record that a successful run cleans up.
+CASE20="${SANDBOX}/case20"
+fixture_20() {
+  make_system_dir "$YESTERDAY"
+  chmod 500 "${SYSTEM_ROOT}/${YESTERDAY}/mysql"
+}
+DA_BACKUP_EVENT=system run_hook case20 fixture_20
+unset DA_BACKUP_EVENT
+chmod -R u+rwX "${CASE20}/backup" 2>/dev/null || true
+
+[[ -f "${CASE20}/backup/${YESTERDAY}.s3dest" ]] \
+  || fail "a verified upload whose delete failed left no record of where it went"
+grep -q "$(date +%F)" "${CASE20}/backup/${YESTERDAY}.s3dest" \
+  || fail "the record must hold the destination this run used, not the directory's name date:"$'\n'"$(cat "${CASE20}/backup/${YESTERDAY}.s3dest")"
+echo "OK a verified upload records the destination it actually used"
+
+# Then: a later sweep trusts that record over the directory name. The stub fails any check
+# against the name-derived prefix, so the only way this directory can be reclaimed is by
+# reading the recorded one.
+CASE21="${SANDBOX}/case21"
+# Fixed stamps well away from today, so this exercises the sweep whatever date it runs on.
+# Today's directory has to exist as well: without it the fallback would adopt the backlog
+# entry as system_dir, the upload path would clean it up, and the sweep -- the thing under
+# test -- would never see it.
+STALE_STAMP="03-15-26"
+fixture_21() {
+  make_system_dir "$TODAY"
+  make_system_dir "$STALE_STAMP"
+  # Uploaded just after midnight by an earlier run, so its prefix is the following day.
+  printf 's3backup:bucket/host/2026-03-16/\n' >"${SYSTEM_ROOT}/${STALE_STAMP}.s3dest"
+  touch -t 202601010000 "${SYSTEM_ROOT}/${STALE_STAMP}"
+}
+STUB_CHECK_FAIL_MATCH="2026-03-15" DA_BACKUP_SYSTEM_KEEP_DAYS=7 \
+  DA_BACKUP_EVENT=system run_hook case21 fixture_21
+unset DA_BACKUP_SYSTEM_KEEP_DAYS DA_BACKUP_EVENT
+
+# Reached by the sweep at all -- separates "the fixture is wrong" from "the fix is missing",
+# since both would otherwise surface as the directory still being on disk.
+grep -qE "(sweeping|keeping) .*${STALE_STAMP}" "${CASE21}/da-backup-s3.log" \
+  || fail "fixture did not hold: the sweep never considered the backlog directory:"$'\n'"$(cat "${CASE21}/da-backup-s3.log")"
+grep -q "sweeping .*${STALE_STAMP}" "${CASE21}/da-backup-s3.log" \
+  || fail "the sweep checked the name-derived prefix instead of the recorded one:"$'\n'"$(cat "${CASE21}/da-backup-s3.log")"
+
+[[ ! -d "${CASE21}/backup/${STALE_STAMP}" ]] \
+  || fail "a backup verified in S3 was kept because the sweep checked the wrong prefix:"$'\n'"$(cat "${CASE21}/da-backup-s3.log")"
+[[ ! -f "${CASE21}/backup/${STALE_STAMP}.s3dest" ]] \
+  || fail "the destination record must be removed along with the directory"
+grep -q 'local-only backup' "${CASE21}/da-backup-s3.log" \
+  && fail "a backup that is in S3 must not be reported as local-only:"$'\n'"$(cat "${CASE21}/da-backup-s3.log")"
+((HOOK_RC == 0)) || fail "reclaiming a verified backup is a clean run (rc=${HOOK_RC})"
+echo "OK the sweep verifies against the recorded destination, not the name"
 
 echo
 echo "PASS: offline backup cleanup proofs"

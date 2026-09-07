@@ -446,6 +446,16 @@ upload_system() {
   fi
 
   log "OK system upload verified in S3 (${system_dir})"
+  # Record where this actually went. DEST is keyed on the hook-run date, but the directory
+  # is named for the day the backup started, and resolve_system_dir exists precisely
+  # because those differ -- a backup that starts before midnight is uploaded to the next
+  # day's prefix. If the delete below fails, every later sweep rebuilds the prefix from the
+  # directory name, checks a location nothing was ever written to, and concludes the backup
+  # is local-only: kept forever, re-alerted every run, with a verified copy sitting in S3
+  # the whole time. That is the "keep what you cannot confirm" backstop firing on a backup
+  # it could have confirmed, which trains people to ignore it.
+  printf '%s\n' "$DEST" >"${system_dir}.s3dest" 2>/dev/null \
+    || log "WARN could not record the upload destination for ${system_dir}; a later sweep will fall back to deriving it from the directory name"
   system_uploaded=1
   return 0
 }
@@ -457,6 +467,7 @@ cleanup_system_local() {
   local freed
   freed="$(size_of "$system_dir")"
   if rm -rf -- "$system_dir"; then
+    rm -f -- "${system_dir}.s3dest"
     log "cleaned ${system_dir} (${freed} reclaimed)"
   else
     log "ERROR could not remove ${system_dir} after a verified upload"
@@ -514,7 +525,11 @@ sweep_old_system_dirs() {
     [[ -n "$d" ]] || continue
     stamp="$(basename "$d")"
 
-    if ! prefix="$(s3_prefix_for_stamp "$stamp")"; then
+    # What a previous run actually uploaded to beats what the name implies. Only the
+    # cross-midnight case makes them differ, but that is the case this fallback exists for.
+    if [[ -s "${d}.s3dest" ]]; then
+      prefix="$(head -1 "${d}.s3dest")"
+    elif ! prefix="$(s3_prefix_for_stamp "$stamp")"; then
       log "WARN keeping ${d} ($(size_of "$d")): name is not an MM-DD-YY stamp, so there is no prefix to verify it against"
       unverified_dirs+=("${d} ($(size_of "$d")) -- unrecognised name")
       continue
@@ -530,7 +545,9 @@ sweep_old_system_dirs() {
 
     freed="$(size_of "$d")"
     log "sweeping ${d} (${freed}): older than ${SYSTEM_KEEP_DAYS}d and confirmed in ${prefix}"
-    if ! rm -rf -- "$d"; then
+    if rm -rf -- "$d"; then
+      rm -f -- "${d}.s3dest"
+    else
       log "ERROR could not remove ${d} after confirming it in ${prefix}; it is safe in S3 but still using local disk"
       cleanup_failures+=("${d} (${freed}) -- verified in S3 but could not be deleted")
     fi
