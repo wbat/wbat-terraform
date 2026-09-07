@@ -110,6 +110,34 @@ That `since=all` is an unbounded load of a 472 MB SQLite database
 (`oncallbrief-pipeline/data/oncallbrief.db`). It is the last line the file ever received.
 On Sep 4 and Sep 5 the same job ran on past this point and finished around 03:54.
 
+**The healthcheck's event log says the same thing from outside the host.** The `ocb run-all`
+check records a start ping and a completion ping, so it measures each run end to end without
+depending on anything the dying box managed to write:
+
+| Run | Duration |
+|---|---|
+| Aug 24 | 11 min 08 s |
+| Aug 27 | 11 min 46 s |
+| Aug 31 | 12 min 27 s |
+| Sep 3 | 13 min 58 s |
+| Sep 5 | 13 min 20 s |
+| **Sep 6** | **started 03:45, never completed** |
+
+Two things worth having. The run got about 20% slower over twelve days on a job whose work
+is supposed to be one day's items — which is what an unbounded `since=all` against a growing
+table looks like from the outside, and it means the margin was shrinking on its own rather
+than the Sep 6 run being unlucky. And Sep 6 is not a slow run or a failed run: it is a run
+that never returned, matching a log that stops mid-statement at 03:46:47.
+
+The alerting worked. The check went `up ➔ down` at 05:45, two hours after the start ping, and
+emailed. That is the mechanism the memory cap in
+[section 3](#3-memory-headroom-on-the-primary--and-why-more-swap-is-the-wrong-lever) relies on
+to tell you it killed something, which is why the token rotation there matters: a leaked ping
+URL lets anyone post the success that suppresses this email.
+
+This table is recorded here because rotating the leaked token means replacing the check, and
+the replacement starts with an empty event log.
+
 **Memory collapses in the next `sar` interval.** From `/var/log/sa/sa06`, the 03:50:01
 sample covering 03:40–03:50:
 
@@ -335,13 +363,29 @@ In order of leverage:
    `sudo systemctl show oncallbrief -p Environment` will echo the value back, so treat that
    command as equivalent to printing the secret.
 
-   **Use a freshly generated UUID here.** The URL previously in this file — the check whose
-   ping URL begins `24677487` — was committed to a public repository and must be rotated in
-   healthchecks.io before this unit is installed. Removing it from the working tree did not
-   unpublish it; it is still in this branch's history. A ping URL is a write capability, so
-   anyone holding it can post a success and suppress the missed-run alert that this whole
-   step depends on to notice a killed job. Rotating is a one-click "revoke and regenerate"
-   on the check's own page, and the old string is inert the moment you do.
+   **Use the URL of a replacement check here.** The URL previously in this file — the
+   `ocb run-all` check, ping URL beginning `24677487` — was committed to a public
+   repository. Removing it from the working tree did not unpublish it; it is still in this
+   branch's history. A ping URL is a write capability, so anyone holding it can post a
+   success and suppress the missed-run alert that this whole step depends on to notice a
+   killed job.
+
+   A check's UUID is immutable and healthchecks.io has no regenerate action, so rotating
+   means replacing the check. **Create a Copy…** on the check's details page carries over
+   the name, tags, description, schedule, filtering rules and notification methods, and
+   issues a new ping URL:
+
+   1. **Create a Copy…** on `ocb run-all`. Confirm the copy's period is 1 day and its grace
+      is 2 hours, since those are what turn a killed run into an email.
+   2. Put the copy's URL in `/etc/oncallbrief.env` and start the timer.
+   3. Wait for one real run to report OK on the copy — or
+      `curl -fsS "$RUN_ALL_HEALTHCHECK_URL"` by hand — before going further. Deleting the
+      old check first would leave a window with no alerting at all on this job.
+   4. **Delete the old check.** Until it exists, the leaked URL still reaches something.
+
+   The copy starts with an empty event log, so the old check's history goes with it. That
+   history is evidence for this incident — see the runtime trend below — so capture
+   anything you want to keep before step 4.
 
    ```ini
    # /etc/systemd/system/oncallbrief.timer
