@@ -310,8 +310,38 @@ In order of leverage:
    MemoryAccounting=yes
    MemoryMax=1200M
    MemorySwapMax=0
-   ExecStart=/bin/bash -lc 'cd /home/tellerstec/public_html/wp-content/plugins/tellerstech-landing && RUN_ALL_HEALTHCHECK_URL=<keep the value already in the crontab> python3 oncallbrief-pipeline/run_all.py >> /home/tellerstec/logs/oncallbrief.log 2>&1'
+   EnvironmentFile=/etc/oncallbrief.env
+   ExecStart=/bin/bash -lc 'cd /home/tellerstec/public_html/wp-content/plugins/tellerstech-landing && python3 oncallbrief-pipeline/run_all.py >> /home/tellerstec/logs/oncallbrief.log 2>&1'
    ```
+
+   The ping URL goes in `/etc/oncallbrief.env`, never in the unit and never in this repo:
+
+   ```bash
+   sudo install -m 0600 -o root -g root /dev/null /etc/oncallbrief.env
+   sudo tee /etc/oncallbrief.env >/dev/null <<'EOF'
+   RUN_ALL_HEALTHCHECK_URL=https://hc-ping.com/<new-uuid>
+   EOF
+   ```
+
+   Two reasons it is a separate file rather than a value in the unit. Unit files under
+   `/etc/systemd/system` are world-readable, and `systemctl cat`/`show` will print them for
+   any local user. And an inline `VAR=value python3 ...` inside `bash -lc` puts the URL in
+   the process command line, where `ps aux` exposes it to every account on a shared hosting
+   box for the length of the run. systemd reads `EnvironmentFile` as root before dropping to
+   `User=`, so a 0600 root-owned file works while staying out of both. The variable then
+   lives only in the process environment, and `/proc/<pid>/environ` is readable just by the
+   process owner and root.
+
+   `sudo systemctl show oncallbrief -p Environment` will echo the value back, so treat that
+   command as equivalent to printing the secret.
+
+   **Use a freshly generated UUID here.** The URL previously in this file — the check whose
+   ping URL begins `24677487` — was committed to a public repository and must be rotated in
+   healthchecks.io before this unit is installed. Removing it from the working tree did not
+   unpublish it; it is still in this branch's history. A ping URL is a write capability, so
+   anyone holding it can post a success and suppress the missed-run alert that this whole
+   step depends on to notice a killed job. Rotating is a one-click "revoke and regenerate"
+   on the check's own page, and the old string is inert the moment you do.
 
    ```ini
    # /etc/systemd/system/oncallbrief.timer

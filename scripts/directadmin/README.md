@@ -265,7 +265,7 @@ it never leaves a verified copy on disk. Age is not treated as evidence that a b
 safe to delete — even the old-directory sweep checks S3 first, because on the primary the
 directories it would have swept were the only copy. See
 [`aws/docs/2026-09-06-primary-outage.md`](../../aws/docs/2026-09-06-primary-outage.md) for
-what was actually broken on that host, and `prove_backup_cleanup.sh` for the fifteen
+what was actually broken on that host, and `prove_backup_cleanup.sh` for the sixteen
 behaviours that are now pinned.
 
 `system_backup_post.sh` execs `all_backups_post.sh --event=system`, and that flag is load
