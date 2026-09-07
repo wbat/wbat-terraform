@@ -216,6 +216,11 @@ admin_uploaded=0
 admin_list=""
 admin_count=0
 
+# Backups that reached S3 but could not be removed locally. Separate from the upload
+# failures below because the fix differs -- these are safe to delete by hand -- but they
+# are reported just as loudly, since a failed delete leaves the volume filling.
+cleanup_failures=()
+
 upload_admin() {
   [[ -d "$ADMIN_DIR" ]] || {
     log "skip admin: ${ADMIN_DIR} does not exist"
@@ -262,11 +267,13 @@ upload_admin() {
 cleanup_admin_local() {
   ((admin_uploaded == 1)) || return 0
 
-  local f removed=0
+  local f removed=0 kept=0
   while IFS= read -r f; do
     [[ -n "$f" ]] || continue
     if rm -f -- "${ADMIN_DIR}/${f}" 2>/dev/null; then
       removed=$((removed + 1))
+    else
+      kept=$((kept + 1))
     fi
   done <"$admin_list"
 
@@ -276,6 +283,14 @@ cleanup_admin_local() {
   find "$ADMIN_DIR" -mindepth 1 -depth -type d -empty ! -name '.*' -delete 2>/dev/null
 
   log "cleaned ${removed} verified file(s) from ${ADMIN_DIR}"
+
+  # A delete that fails leaves an archive that is already in S3 occupying local disk.
+  # Skipping it silently is how a run could leave the volume filling and still exit 0
+  # reporting "backup upload and local cleanup complete".
+  if ((kept > 0)); then
+    log "ERROR could not remove ${kept} verified file(s) from ${ADMIN_DIR}"
+    cleanup_failures+=("${kept} verified file(s) under ${ADMIN_DIR} ($(size_of "$ADMIN_DIR") still on disk)")
+  fi
 }
 
 system_dir=""
@@ -337,6 +352,7 @@ cleanup_system_local() {
     log "cleaned ${system_dir} (${freed} reclaimed)"
   else
     log "ERROR could not remove ${system_dir} after a verified upload"
+    cleanup_failures+=("${system_dir} (${freed}) -- verified in S3 but could not be deleted")
   fi
 }
 
@@ -405,14 +421,34 @@ used_pct="$(disk_used_pct "$SYSTEM_ROOT")"
 used_pct="${used_pct:-0}"
 log "finished (${SYSTEM_ROOT}: $(disk_summary "$SYSTEM_ROOT"))"
 
-if ((${#failures[@]} > 0)); then
-  log "ERROR ${#failures[@]} upload(s) failed; local backups were kept"
-  alert "DirectAdmin backup upload FAILED on ${HOST} (disk ${used_pct}% used)" \
-    "Backups on ${HOST} were not uploaded to S3, so they are still on the local disk and will be retried by the next run. Two consecutive failures put the root volume at risk.
-
-Not uploaded:
+if ((${#failures[@]} > 0)) || ((${#cleanup_failures[@]} > 0)); then
+  # Both kinds of failure leave backups on local disk, which is the condition that ends in
+  # a full volume, so both mail. They are listed separately because the remedies differ:
+  # an upload retries on the next run, whereas a verified-but-undeletable copy needs a
+  # human to remove it (a read-only remount, an immutable attribute, or an I/O error).
+  detail=""
+  subject_what="upload"
+  if ((${#failures[@]} > 0)); then
+    log "ERROR ${#failures[@]} upload(s) failed; local backups were kept"
+    detail+="Not uploaded to S3, still on local disk, will be retried by the next run:
 $(printf '  - %s\n' "${failures[@]}")
+"
+  fi
+  if ((${#cleanup_failures[@]} > 0)); then
+    log "ERROR ${#cleanup_failures[@]} local cleanup(s) failed after a verified upload"
+    if ((${#failures[@]} > 0)); then
+      subject_what="upload and local cleanup"
+    else
+      subject_what="local cleanup"
+    fi
+    detail+="Uploaded and verified in S3, but the local copy could NOT be removed. These are safe to delete by hand; find out what blocked the delete (read-only filesystem, chattr +i, I/O error):
+$(printf '  - %s\n' "${cleanup_failures[@]}")
+"
+  fi
+  alert "DirectAdmin backup ${subject_what} FAILED on ${HOST} (disk ${used_pct}% used)" \
+    "Backups on ${HOST} are still occupying the local disk after this run. Two consecutive failures put the root volume at risk.
 
+${detail}
 Disk: $(disk_summary "$SYSTEM_ROOT")
 Local backup usage:
 $(du -sh "$ADMIN_DIR" "$SYSTEM_ROOT" 2>/dev/null | sed 's/^/  /')
@@ -447,7 +483,7 @@ if ((used_pct >= ALERT_USED_PCT)); then
   # going somewhere this hook does not manage. Worth a mail before it becomes an outage.
   log "WARN ${SYSTEM_ROOT} is ${used_pct}% used after a clean run"
   alert "Disk still ${used_pct}% used after a clean backup run on ${HOST}" \
-    "Every backup uploaded and its local copy was removed, yet ${SYSTEM_ROOT} is ${used_pct}% used. Something outside the backup hook is filling this volume.
+    "Every backup uploaded, and every local copy this hook manages was removed -- a failed delete exits earlier with its own mail, so reaching this alert means cleanup genuinely succeeded. ${SYSTEM_ROOT} is nonetheless ${used_pct}% used, so something outside the backup hook is filling this volume.
 
 Disk: $(disk_summary "$SYSTEM_ROOT")
 Largest directories under /:

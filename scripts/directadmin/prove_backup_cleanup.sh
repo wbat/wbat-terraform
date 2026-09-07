@@ -4,8 +4,8 @@
 # mail are stubbed and every path is redirected into a temp sandbox.
 #
 # Each proof below is a failure mode that actually happened or was one transient error
-# away from happening (see aws/docs/2026-09-06-primary-outage.md). All eight fail against
-# the pre-2026-09-06 hook, with two wrinkles worth stating:
+# away from happening (see aws/docs/2026-09-06-primary-outage.md). All nine fail against
+# the pre-2026-09-06 hook, with three wrinkles worth stating:
 #
 #   - Proof 1's "keep the data" half passed there, but only because `set -e` aborted the
 #     run before cleanup could delete anything. It failed the half that matters for an
@@ -14,6 +14,9 @@
 #     (proof 7) is what first points a working age sweep at real data, and on the primary
 #     that data was never in S3. Both proofs have been checked against the behaviour they
 #     describe, so neither can pass vacuously.
+#   - Proof 9 also fails against the fix. Every earlier proof is about which files survive;
+#     this one is about whether anyone is told when they survive by accident, which the
+#     rewrite still got wrong: a failed delete was skipped without being counted.
 #
 # Usage (from repo root):
 #   ./scripts/directadmin/prove_backup_cleanup.sh
@@ -29,7 +32,10 @@ if [[ ! -x "$HOOK" ]]; then
 fi
 
 SANDBOX="$(mktemp -d)"
-trap 'rm -rf "$SANDBOX"' EXIT
+# Proof 9 drops the write bit on a directory to make rm fail, and rm -rf cannot remove a
+# file from a directory it cannot write to either. Restore permissions first so a failing
+# assertion still cleans up after itself.
+trap 'chmod -R u+rwX "$SANDBOX" 2>/dev/null || true; rm -rf "$SANDBOX"' EXIT
 
 # Stub rclone: records its arguments and returns whatever the proof asked for, so a
 # failing upload and an upload that fails verification can be told apart.
@@ -313,6 +319,40 @@ grep -qi 'local-only system backups' "${CASE8}/mail.out" \
   || fail "no alert for a local-only backup the sweep had to keep"
 ((HOOK_RC == 0)) || fail "keeping an unverified directory must not fail the run (rc=${HOOK_RC})"
 echo "OK the sweep deletes only what S3 confirms, and reports what it kept"
+
+##############################################################################
+echo "== Proof 9: a verified upload whose local delete fails must not report success =="
+##############################################################################
+# The quiet half of "fail loudly". A read-only remount, an immutable attribute or an I/O
+# error can make rm fail after the upload has already been verified, so the archive stays
+# on disk and keeps filling the volume. The hook counted only successful deletes, recorded
+# nothing, exited 0, and logged "backup upload and local cleanup complete". The single
+# alert that could still have fired was the disk-usage one -- whose body asserted that
+# every local copy had been removed, pointing the reader away from the real cause.
+CASE9="${SANDBOX}/case9"
+fixture_9() {
+  make_admin_archive user1.tar.zst
+  make_system_dir "$TODAY"
+  # Deleting a file needs write permission on its directory, so dropping the write bit
+  # makes rm fail without root and without a genuinely read-only mount.
+  chmod 500 "$ADMIN_DIR"
+}
+run_hook case9 fixture_9
+chmod 700 "${CASE9}/admin_backups"
+
+[[ -f "${CASE9}/admin_backups/user1.tar.zst" ]] \
+  || fail "fixture did not hold: the archive was deleted after all, so this proves nothing"
+((HOOK_RC != 0)) \
+  || fail "hook exited 0 with a verified backup still on disk -- exactly the silent failure"
+grep -q 'backup local cleanup FAILED' "${CASE9}/mail.out" \
+  || fail "a failed delete must mail, and must name cleanup rather than upload:"$'\n'"$(cat "${CASE9}/mail.out")"
+grep -q 'could NOT be removed' "${CASE9}/mail.out" \
+  || fail "the alert must name the leftover so a human can remove it"
+grep -q 'ERROR could not remove 1 verified file(s)' "${CASE9}/da-backup-s3.log" \
+  || fail "the failed delete was not logged as an error"
+[[ ! -d "${CASE9}/backup/${TODAY}" ]] \
+  || fail "an admin cleanup failure blocked the system cleanup; the two must stay independent"
+echo "OK an undeletable verified backup fails the run and names itself in the alert"
 
 echo
 echo "PASS: offline backup cleanup proofs"
