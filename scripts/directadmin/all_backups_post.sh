@@ -361,10 +361,20 @@ resolve_system_dir() {
 
 # Newest mtime anywhere under a directory, as an age in seconds. Used to decide whether a
 # system backup has stopped being written to.
+# Prints the age in seconds of the most recently modified thing under dir. Returns
+# non-zero if the traversal did not complete, in which case the printed age means nothing:
+# the newest entry may be one of the ones find never reached. Piping straight into sort
+# would discard that status, which is how the answer would end up being drawn from
+# whatever subset happened to be readable -- and an old-looking subset is exactly what
+# tells the caller the directory is safe to delete.
 newest_mtime_age() {
-  local dir="$1" newest now
+  local dir="$1" newest now stamps find_rc=0
   now="$(date +%s)"
-  newest="$(find "$dir" -newermt "@0" -printf '%T@\n' 2>/dev/null | sort -n | tail -1 | cut -d. -f1)"
+  stamps="$(find "$dir" -newermt "@0" -printf '%T@\n' 2>/dev/null)" || find_rc=$?
+  ((find_rc == 0)) || return 1
+  newest="$(printf '%s\n' "$stamps" | sort -n | tail -1 | cut -d. -f1)"
+  # Nothing there at all: treat as just-touched rather than ancient, so an empty or
+  # unreadable-but-traversable directory is deferred instead of collected.
   [[ -n "$newest" ]] || {
     printf '%d' 0
     return 0
@@ -390,8 +400,18 @@ upload_system() {
   # The system event is DirectAdmin saying the write finished, so it proceeds. Every other
   # caller has to see the directory hold still first.
   if [[ "$EVENT" != "system" ]]; then
-    local age
-    age="$(newest_mtime_age "$system_dir")"
+    local age quiesce_rc=0
+    age="$(newest_mtime_age "$system_dir")" || quiesce_rc=$?
+    if ((quiesce_rc != 0)); then
+      # The guard is only as good as the scan behind it. An unreadable subtree or an I/O
+      # error part-way through leaves find reporting the mtimes it did reach, and if those
+      # are old enough the directory looks finished -- so the run would upload a fraction
+      # of an active backup, verify that fraction against itself, and delete the tree.
+      # Not knowing whether a backup is still being written is a reason to leave it alone.
+      system_deferred="${system_dir} (could not determine whether it is still being written)"
+      log "NOTE deferring ${system_dir}: could not scan it to see whether the system backup is still writing (unreadable subtree or I/O error). Leaving it for the system hook or a later run."
+      return 0
+    fi
     if ((age < SYSTEM_QUIESCE_SEC)); then
       system_deferred="${system_dir} (last written ${age}s ago)"
       log "NOTE deferring ${system_dir}: modified ${age}s ago and this is the ${EVENT} event, so the system backup may still be writing it. Leaving it for the system hook or a later run."

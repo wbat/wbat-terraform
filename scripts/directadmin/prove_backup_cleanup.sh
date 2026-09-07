@@ -31,6 +31,16 @@ if [[ ! -x "$HOOK" ]]; then
   exit 1
 fi
 
+# Several proofs create an unreadable directory to make find or rm fail. Root ignores those
+# bits, so under root those proofs would exercise the happy path and still print OK --
+# which is the exact failure mode this suite exists to catch, committed by the suite
+# itself. Refuse rather than quietly cover less.
+if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+  echo "ERROR: run this as an unprivileged user. Root bypasses the permission bits that" >&2
+  echo "       proofs 12, 14 and 15 rely on, so they would pass without testing anything." >&2
+  exit 1
+fi
+
 SANDBOX="$(mktemp -d)"
 # Proof 9 drops the write bit on a directory to make rm fail, and rm -rf cannot remove a
 # file from a directory it cannot write to either. Restore permissions first so a failing
@@ -501,6 +511,34 @@ unset DA_BACKUP_EVENT
   || fail "a settled directory was deferred forever; the admin event must still clear a backlog"
 ((HOOK_RC == 0)) || fail "clearing a settled directory must not fail the run (rc=${HOOK_RC})"
 echo "OK a directory that has stopped changing is still collected by the admin event"
+
+# The guard is only as good as the scan behind it, and the scan is a find that can fail
+# partway. An unreadable subtree leaves it reporting the mtimes it did reach; if those are
+# old the directory looks finished, and the run collects and deletes a backup that is
+# still being written -- the round-5 hazard reached through a different door. The mtimes
+# here are deliberately ancient so that ignoring find's status is the difference between
+# deferring and deleting.
+CASE18="${SANDBOX}/case18"
+fixture_18() {
+  make_system_dir "$TODAY"
+  mkdir -p "${SYSTEM_ROOT}/${TODAY}/locked"
+  find "${SYSTEM_ROOT}/${TODAY}" -exec touch -t 202601010000 {} +
+  touch -t 202601010000 "${SYSTEM_ROOT}/${TODAY}"
+  chmod 000 "${SYSTEM_ROOT}/${TODAY}/locked"
+}
+DA_BACKUP_EVENT=admin run_hook case18 fixture_18
+unset DA_BACKUP_EVENT
+chmod -R u+rwX "${CASE18}/backup" 2>/dev/null || true
+
+[[ -d "${CASE18}/backup/${TODAY}" ]] \
+  || fail "a directory whose quiescence could not be established was collected and deleted anyway"
+((HOOK_RC == 0)) \
+  || fail "deferring an unscannable directory is normal operation, not a failure (rc=${HOOK_RC})"
+grep -q 'could not scan it' "${CASE18}/da-backup-s3.log" \
+  || fail "the reason for the deferral must be logged:"$'\n'"$(cat "${CASE18}/da-backup-s3.log")"
+grep -q 'left in place' "${CASE18}/da-backup-s3.log" \
+  || fail "the completion line must not claim cleanup was complete when a directory was skipped"
+echo "OK an age that could not be established defers instead of authorising a delete"
 
 ##############################################################################
 echo "== Proof 13: backups under a root this run ignores must reach a person =="
