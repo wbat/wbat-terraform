@@ -383,6 +383,34 @@ audit_fail2ban() {
   fi
 }
 
+# True unless this host is demonstrably nginx-only, which is a stronger claim
+# than "the nginx binary exists". DirectAdmin's nginx_apache mode runs nginx as
+# a reverse proxy with Apache still serving, so nginx is installed, Apache
+# writes the logs, and suppressing the Apache finding there would drop a real
+# unscanned password path.
+apache_serves_requests() {
+  local opts="${HOST_AUDIT_CB_OPTIONS:-/usr/local/directadmin/custombuild/options.conf}"
+  local mode=""
+  [ -r "$opts" ] && mode="$(sed -n 's/^webserver=//p' "$opts" | tr -d ' \r' | head -1)"
+
+  case "$mode" in
+    nginx) return 1 ;;
+    # nginx_apache, apache, litespeed and openlitespeed all serve through
+    # something that writes Apache-format access logs.
+    ?*) return 0 ;;
+  esac
+
+  # No CustomBuild answer. Look for Apache itself: a running httpd, or an
+  # installed one. Absence of all of it is real evidence that nothing writes
+  # Apache logs, not a guess -- so it is treated as such.
+  [ -n "${HOST_AUDIT_APACHE_EVIDENCE:-}" ] && return "$((1 - HOST_AUDIT_APACHE_EVIDENCE))"
+  pgrep -x httpd >/dev/null 2>&1 && return 0
+  pgrep -x apache2 >/dev/null 2>&1 && return 0
+  [ -d /etc/httpd ] && return 0
+  [ -d /etc/apache2 ] && return 0
+  return 1
+}
+
 # --- DirectAdmin -------------------------------------------------------------
 audit_directadmin() {
   local conf="${HOST_AUDIT_DA_CONF:-/usr/local/directadmin/conf/directadmin.conf}"
@@ -429,9 +457,13 @@ audit_directadmin() {
     report WARN "da/brute-force" "brute_force_log_scanner not set (build default applies); keys present:$(printf '%s' "$kv" | cut -d= -f1 | paste -sd' ' -)"
   fi
 
-  # Apache log scanning is not a finding on an nginx host -- there are no Apache
-  # logs to scan. Drop it rather than spend an operator's attention on it.
-  if [ -n "$disabled" ] && { have nginx || grep -qE '^nginx=1' "$conf" 2>/dev/null; }; then
+  # Apache log scanning is only a non-finding where Apache genuinely does not
+  # serve requests. `have nginx` does not establish that: DirectAdmin's
+  # nginx_apache mode runs nginx as a reverse proxy in front of Apache, so the
+  # nginx binary is present, Apache serves, and Apache logs are exactly what
+  # this scanner would read. Ask CustomBuild which server is configured, and
+  # keep the finding whenever the answer is anything other than nginx alone.
+  if [ -n "$disabled" ] && ! apache_serves_requests; then
     disabled="$(printf '%s' "$disabled" | tr ' ' '\n' | grep -v '^brute_force_scan_apache_logs$' | paste -sd' ' -)"
   fi
   [ -z "${disabled// /}" ] \
@@ -562,10 +594,20 @@ audit_ssm() {
     report FAIL "ssm/agent" "amazon-ssm-agent not installed -- there is no out-of-band path, so an SSH or firewall mistake has no rollback. Install it first: dnf install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm && systemctl enable --now amazon-ssm-agent"
     return
   fi
+  # systemd is not the only way this agent gets supervised, and the unit is not
+  # always discoverable under the name you expect. A live process is the fact
+  # that matters, so accept either -- reporting "installed but not running" for
+  # an agent the control plane can see is the false negative this avoids.
+  local running=""
   if systemctl is-active --quiet amazon-ssm-agent 2>/dev/null; then
-    report OK "ssm/agent" "local agent process is running (says nothing about control-plane reachability -- see ssm/reachable)"
+    running="systemd unit active"
+  elif pgrep -f '[a]mazon-ssm-agent' >/dev/null 2>&1; then
+    running="process running (no active systemd unit by that name)"
+  fi
+  if [ -n "$running" ]; then
+    report OK "ssm/agent" "local agent is up -- $running (says nothing about control-plane reachability, see ssm/reachable)"
   else
-    report FAIL "ssm/agent" "installed but not running -- restore it before tightening SSH"
+    report FAIL "ssm/agent" "installed but no running agent found -- restore it before tightening SSH"
     return
   fi
 

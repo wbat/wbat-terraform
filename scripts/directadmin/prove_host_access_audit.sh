@@ -307,4 +307,66 @@ out="$(HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_DA_CONF="$TMP/da.nginx"
   || { echo "FAIL: apache log scanning should not be a finding on nginx" >&2; exit 1; }
 echo "OK the scanner's own state is the verdict"
 
-echo "PASS: host access audit proofs (16 cases)"
+echo "== Case 17: nginx in front of Apache still needs Apache logs scanned =="
+# DirectAdmin's nginx_apache mode runs nginx as a reverse proxy and Apache still
+# serves, so the nginx binary is present and Apache logs are real. Treating
+# "nginx exists" as "Apache is absent" would drop a genuine finding.
+printf 'brute_force_log_scanner=1\nbrute_force_scan_apache_logs=0\nnginx=1\n' >"$TMP/da.nginx"
+printf 'webserver=nginx_apache\n' >"$TMP/cb.hybrid"
+out="$(HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_DA_CONF="$TMP/da.nginx" \
+  HOST_AUDIT_CB_OPTIONS="$TMP/cb.hybrid" bash "$AUDIT" --json 2>/dev/null || true)"
+[ "$(printf '%s' "$out" | verdict_for da/brute-force-disabled)" = "WARN" ] \
+  || { echo "FAIL: unscanned Apache logs dropped on a hybrid host" >&2; exit 1; }
+
+printf 'webserver=nginx\n' >"$TMP/cb.nginx"
+out="$(HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_DA_CONF="$TMP/da.nginx" \
+  HOST_AUDIT_CB_OPTIONS="$TMP/cb.nginx" bash "$AUDIT" --json 2>/dev/null || true)"
+[ "$(printf '%s' "$out" | verdict_for da/brute-force-disabled)" = "MISSING" ] \
+  || { echo "FAIL: nginx-only host should not warn about Apache logs" >&2; exit 1; }
+
+# With no CustomBuild answer, Apache's own presence decides. Installed or
+# running Apache keeps the finding even though nginx is also there.
+out="$(HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_DA_CONF="$TMP/da.nginx" \
+  HOST_AUDIT_CB_OPTIONS="$TMP/absent" HOST_AUDIT_APACHE_EVIDENCE=1 \
+  bash "$AUDIT" --json 2>/dev/null || true)"
+[ "$(printf '%s' "$out" | verdict_for da/brute-force-disabled)" = "WARN" ] \
+  || { echo "FAIL: Apache present with no CustomBuild answer should keep the finding" >&2; exit 1; }
+
+out="$(HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_DA_CONF="$TMP/da.nginx" \
+  HOST_AUDIT_CB_OPTIONS="$TMP/absent" HOST_AUDIT_APACHE_EVIDENCE=0 \
+  bash "$AUDIT" --json 2>/dev/null || true)"
+[ "$(printf '%s' "$out" | verdict_for da/brute-force-disabled)" = "MISSING" ] \
+  || { echo "FAIL: no Apache anywhere is real evidence, not a guess" >&2; exit 1; }
+echo "OK the web server mode decides; without one, Apache's own presence does"
+
+echo "== Case 18: real lfd config, with the _PERM siblings present =="
+# Verbatim shape from server.wbat.net. LF_SSHD_PERM must not be mistaken for
+# LF_SSHD, and every threshold here is set and non-zero.
+cat >"$TMP/csf.real" <<'EOF'
+LF_SSHD = "5"
+LF_SSHD_PERM = "1"
+LF_FTPD = "10"
+LF_FTPD_PERM = "1"
+LF_SMTPAUTH = "5"
+LF_SMTPAUTH_PERM = "1"
+LF_POP3D = "10"
+LF_POP3D_PERM = "1"
+LF_IMAPD = "10"
+LF_IMAPD_PERM = "1"
+LF_DIRECTADMIN = "5"
+LF_DIRECTADMIN_PERM = "1"
+TCP_IN = "35000:35999,20,21,22,25,53,80,110,143,443,465,587,993,995,2222"
+EOF
+out="$(csf_run "$TMP/csf.real" 1 "21,22,25,110,143,465,587,993,995,2222,3306,4190")"
+[ "$(printf '%s' "$out" | verdict_for ratelimit/lfd-coverage)" = "OK" ] \
+  || { echo "FAIL: a fully configured real lfd was not accepted" >&2; exit 1; }
+printf '%s' "$out" | grep -q 'LF_SSHD=5' \
+  || { echo "FAIL: LF_SSHD value misparsed (likely confused with LF_SSHD_PERM)" >&2; exit 1; }
+# 3306 is bound but absent from that TCP_IN, and 2222 is bound and present.
+[ "$(printf '%s' "$out" | verdict_for exposure/datastore)" = "WARN" ] \
+  || { echo "FAIL: 3306 bound-but-firewalled misclassified" >&2; exit 1; }
+[ "$(printf '%s' "$out" | verdict_for exposure/da-panel)" = "WARN" ] \
+  || { echo "FAIL: 2222 reachable via TCP_IN not surfaced" >&2; exit 1; }
+echo "OK the live host's configuration is classified correctly end to end"
+
+echo "PASS: host access audit proofs (18 cases)"
