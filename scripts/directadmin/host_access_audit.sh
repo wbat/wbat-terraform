@@ -225,11 +225,88 @@ audit_ssh_match() {
   esac
 }
 
-# --- fail2ban ----------------------------------------------------------------
+# --- Rate limiting -----------------------------------------------------------
+# Two engines do this job and a host should run exactly one. fail2ban is the
+# general answer; CSF's lfd is the one this stack actually ships, and on a
+# DirectAdmin box lfd is usually what is there.
+#
+# They must not both be installed -- each writes its own iptables rules, and two
+# daemons unblocking each other's bans is worse than either alone. So the check
+# is "is something rate-limiting password guessing", not "is fail2ban present".
+# Demanding fail2ban on a CSF host would push an operator into installing the
+# conflicting one.
+audit_rate_limit() {
+  local has_f2b=0 has_lfd=0
+  have fail2ban-client && has_f2b=1
+  { have csf || [ -r "${HOST_AUDIT_CSF_CONF:-/etc/csf/csf.conf}" ]; } && has_lfd=1
+
+  if [ "$has_f2b" -eq 1 ] && [ "$has_lfd" -eq 1 ]; then
+    report WARN "ratelimit/engine" "both fail2ban and CSF/lfd are installed -- they manage iptables independently and will undo each other's bans; run one"
+  fi
+
+  if [ "$has_f2b" -eq 1 ]; then
+    audit_fail2ban
+    return
+  fi
+  if [ "$has_lfd" -eq 1 ]; then
+    audit_lfd
+    return
+  fi
+  report FAIL "ratelimit/engine" "neither fail2ban nor CSF/lfd is installed -- nothing rate-limits password guessing"
+}
+
+# CSF's login failure daemon. Each LF_* setting is a failure threshold for one
+# service, and 0 means that service is not watched at all -- so, as with
+# DirectAdmin's own keys, presence of the setting says nothing. The services
+# that matter here are the password paths the disclosed account names reach:
+# SSH, DirectAdmin on 2222, mail and FTP.
+audit_lfd() {
+  local conf="${HOST_AUDIT_CSF_CONF:-/etc/csf/csf.conf}"
+
+  if [ -n "${HOST_AUDIT_LFD_ACTIVE:-}" ]; then
+    if [ "$HOST_AUDIT_LFD_ACTIVE" = "1" ]; then
+      report OK "ratelimit/lfd" "CSF lfd active"
+    else
+      report FAIL "ratelimit/lfd" "CSF is installed but lfd is not running -- nothing acts on login failures"
+      return
+    fi
+  elif systemctl is-active --quiet lfd 2>/dev/null; then
+    report OK "ratelimit/lfd" "CSF lfd active"
+  else
+    report FAIL "ratelimit/lfd" "CSF is installed but lfd is not running -- nothing acts on login failures"
+    return
+  fi
+
+  if [ ! -r "$conf" ]; then
+    report SKIP "ratelimit/lfd-config" "cannot read $conf (need root)"
+    return
+  fi
+
+  local svc key val off="" on="" missing=""
+  for svc in SSHD DIRECTADMIN SMTPAUTH POP3D IMAPD FTPD; do
+    key="LF_${svc}"
+    val="$(sed -n "s/^${key}[[:space:]]*=[[:space:]]*\"\{0,1\}\([0-9]*\)\"\{0,1\}.*/\1/p" "$conf" | head -1)"
+    if [ -z "$val" ]; then
+      missing="$missing ${key}"
+    elif [ "$val" = "0" ]; then
+      off="$off ${key}"
+    else
+      on="$on ${key}=${val}"
+    fi
+  done
+
+  if [ -n "$off" ]; then
+    report FAIL "ratelimit/lfd-coverage" "lfd is not watching:${off} -- those password paths are unmetered"
+  elif [ -n "$missing" ]; then
+    report WARN "ratelimit/lfd-coverage" "not set, so CSF defaults apply:${missing}${on:+ (set:$on)}"
+  else
+    report OK "ratelimit/lfd-coverage" "thresholds set for every password path:${on}"
+  fi
+}
+
 # Running is not the same as working. A jail watching a logpath that does not
 # exist on this distro reports "active" forever and bans nothing, which is worse
-# than no fail2ban because the dashboard looks green. Total bans is the cheapest
-# evidence that a jail is actually reading real logs.
+# than no fail2ban because the dashboard looks green.
 audit_fail2ban() {
   if ! have fail2ban-client; then
     report FAIL "fail2ban/installed" "not installed -- nothing rate-limits password guessing"
@@ -342,30 +419,92 @@ audit_directadmin() {
     return
   fi
 
-  if [ -n "$disabled" ]; then
-    report WARN "da/brute-force" "set but explicitly disabled:${disabled}"
-  elif [ "$scanner" = "1" ]; then
+  # The scanner's own state is the verdict. Reporting a disabled key instead
+  # lets an irrelevant one mask the answer -- which is what happened on the
+  # first real run: brute_force_scan_apache_logs=0 was surfaced as the finding,
+  # and whether the scanner itself was on went unsaid.
+  if [ "$scanner" = "1" ]; then
     report OK "da/brute-force" "brute_force_log_scanner=1${thresholds:+, thresholds:$thresholds}"
   else
     report WARN "da/brute-force" "brute_force_log_scanner not set (build default applies); keys present:$(printf '%s' "$kv" | cut -d= -f1 | paste -sd' ' -)"
   fi
+
+  # Apache log scanning is not a finding on an nginx host -- there are no Apache
+  # logs to scan. Drop it rather than spend an operator's attention on it.
+  if [ -n "$disabled" ] && { have nginx || grep -qE '^nginx=1' "$conf" 2>/dev/null; }; then
+    disabled="$(printf '%s' "$disabled" | tr ' ' '\n' | grep -v '^brute_force_scan_apache_logs$' | paste -sd' ' -)"
+  fi
+  [ -z "${disabled// /}" ] \
+    || report WARN "da/brute-force-disabled" "set to 0, so present in the config but doing nothing:${disabled}"
 }
 
 # --- What is actually reachable ----------------------------------------------
 # Ground truth. Config files describe intent; the listening socket and the
 # firewall decide what an attacker can reach.
 audit_exposure() {
-  if ! have ss; then
+  if ! have ss && [ -z "${HOST_AUDIT_LISTENERS:-}" ]; then
     report SKIP "exposure/listeners" "ss not available"
     return
   fi
   local open
-  open="$(ss -lnt 2>/dev/null | awk 'NR>1 {print $4}' | grep -E '^(0\.0\.0\.0|\[::\]|\*):' | sed 's/.*://' | sort -un | paste -sd, -)"
-  if [ -n "$open" ]; then
-    report OK "exposure/listeners" "world-bound ports: $open"
-  else
+  # Test hook: a comma-separated port list stands in for the live socket table.
+  open="${HOST_AUDIT_LISTENERS:-$(ss -lnt 2>/dev/null | awk 'NR>1 {print $4}' | grep -E '^(0\.0\.0\.0|\[::\]|\*):' | sed 's/.*://' | sort -un | paste -sd, -)}"
+  if [ -z "$open" ]; then
     report SKIP "exposure/listeners" "could not enumerate listeners"
+    return
   fi
+  report OK "exposure/listeners" "world-bound ports: $open"
+
+  # Listing the ports is not judging them. A bound port is only reachable if the
+  # firewall passes it, so read CSF's ingress allowlist and say which of the two
+  # is true -- "bound and allowed through" and "bound but firewalled" need
+  # different responses, and collapsing them either cries wolf or misses a live
+  # exposure.
+  local csf_conf="${HOST_AUDIT_CSF_CONF:-/etc/csf/csf.conf}" tcp_in="" fw_known=0
+  if [ -r "$csf_conf" ]; then
+    tcp_in="$(sed -n 's/^TCP_IN[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$csf_conf" | head -1 | tr -d ' ')"
+    [ -n "$tcp_in" ] && fw_known=1
+  fi
+
+  # Nothing outside the box should ever reach these. A password path on a
+  # database is not rate-limited by lfd or fail2ban, and a success is the whole
+  # dataset rather than one account.
+  local port label exposed="" firewalled=""
+  for port in 3306:mysql 5432:postgres 6379:redis 11211:memcached 27017:mongodb 9200:elasticsearch; do
+    label="${port#*:}"
+    port="${port%%:*}"
+    case ",$open," in
+      *",$port,"*) ;;
+      *) continue ;;
+    esac
+    if [ "$fw_known" -eq 1 ] && ! printf ',%s,' "$tcp_in" | grep -q ",$port,"; then
+      firewalled="$firewalled ${label}/${port}"
+    else
+      exposed="$exposed ${label}/${port}"
+    fi
+  done
+
+  if [ -n "$exposed" ]; then
+    if [ "$fw_known" -eq 1 ]; then
+      report FAIL "exposure/datastore" "reachable from the internet (bound to all interfaces and allowed by TCP_IN):${exposed} -- bind to 127.0.0.1 or remove from TCP_IN"
+    else
+      report FAIL "exposure/datastore" "bound to all interfaces:${exposed} -- could not read a firewall allowlist to rule out internet reachability; bind to 127.0.0.1"
+    fi
+  fi
+  if [ -n "$firewalled" ]; then
+    report WARN "exposure/datastore" "bound to all interfaces but not in TCP_IN:${firewalled} -- firewalled today, exposed the moment CSF is stopped or flushed; prefer binding to 127.0.0.1"
+  fi
+  [ -n "$exposed$firewalled" ] || report OK "exposure/datastore" "no database ports bound to all interfaces"
+
+  # Plaintext credential paths. Their TLS equivalents (465/993/995, or FTP over
+  # TLS) exist on this stack, so these are usually legacy compatibility.
+  local plain=""
+  for port in 21:ftp 110:pop3 143:imap; do
+    label="${port#*:}"
+    port="${port%%:*}"
+    case ",$open," in *",$port,"*) plain="$plain ${label}/${port}" ;; esac
+  done
+  [ -z "$plain" ] || report WARN "exposure/plaintext-auth" "accepts credentials without implicit TLS:${plain} -- confirm STARTTLS is mandatory, or close in favour of 465/993/995"
 
   case ",$open," in
     *,2222,*) report WARN "exposure/da-panel" "DirectAdmin 2222 is bound to all interfaces; restrict it to known source addresses at the security group or host firewall" ;;
@@ -410,8 +549,17 @@ audit_accounts() {
 # strength of that has no way back in, so local liveness and control-plane
 # reachability are reported as two separate facts.
 audit_ssm() {
-  if ! systemctl list-unit-files 2>/dev/null | grep -q amazon-ssm-agent; then
-    report WARN "ssm/agent" "amazon-ssm-agent not installed -- no out-of-band path; do NOT tighten SSH without another way in"
+  # Look in several places before concluding it is absent. A false negative here
+  # is expensive in both directions: it either sends someone to install an agent
+  # that is already there, or -- if the rest of the audit is clean -- it is the
+  # one thing standing between them and an SSH change with no way back.
+  local installed=0
+  systemctl list-unit-files 2>/dev/null | grep -q amazon-ssm-agent && installed=1
+  [ -x /usr/bin/amazon-ssm-agent ] && installed=1
+  [ -x /snap/bin/amazon-ssm-agent ] && installed=1
+  [ -d /var/lib/amazon/ssm ] && installed=1
+  if [ "$installed" -eq 0 ]; then
+    report FAIL "ssm/agent" "amazon-ssm-agent not installed -- there is no out-of-band path, so an SSH or firewall mistake has no rollback. Install it first: dnf install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm && systemctl enable --now amazon-ssm-agent"
     return
   fi
   if systemctl is-active --quiet amazon-ssm-agent 2>/dev/null; then
@@ -457,7 +605,7 @@ audit_ssm() {
 audit_ssm
 audit_ssh
 audit_ssh_match
-audit_fail2ban
+audit_rate_limit
 audit_directadmin
 audit_exposure
 audit_accounts

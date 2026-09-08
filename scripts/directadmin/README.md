@@ -415,9 +415,16 @@ Where a clean verdict would be easy but wrong, it does the harder thing:
   re-enables passwords is invisible to it. The audit re-resolves the config per
   connection context with `sshd -T -C` and names the account, and says plainly that
   address-keyed `Match` blocks cannot be exhausted by probing.
-- fail2ban is judged per jail. A busy sshd jail would otherwise carry a summed ban
-  count well clear of zero and vouch for a DirectAdmin or mail jail watching a
-  logpath that does not exist on this build.
+- Rate limiting is judged by whether *something* limits it. CSF's lfd and fail2ban
+  are alternatives, and a DirectAdmin box normally ships lfd; demanding fail2ban would
+  push an operator into running two iptables managers that undo each other's bans.
+  Whichever is present is then checked by value — an `LF_DIRECTADMIN=0` is a service
+  nobody is watching, and fail2ban is judged per jail, since a busy sshd jail would
+  otherwise carry a summed ban count well clear of zero and vouch for a mail jail
+  watching a logpath that does not exist on this build.
+- Bound ports are judged against CSF's `TCP_IN` rather than just listed. A datastore
+  on `0.0.0.0` is a finding — nothing rate-limits MySQL, and a success there is the
+  whole dataset — and "reachable now" is separated from "firewalled until CSF stops".
 - DirectAdmin settings are read by value. `brute_force_log_scanner=0` is a key that
   is present and a scanner that is off.
 - A running `amazon-ssm-agent` is reported as a running process, not as a recovery
@@ -433,9 +440,11 @@ in, is in [aws/docs/host-access-hardening.md](../../aws/docs/host-access-hardeni
 ./scripts/directadmin/prove_host_access_audit.sh
 ```
 
-Ten cases, every one of them a way an audit can look green while a password path
-stays open. The motivating case is `PasswordAuthentication no` with PAM
+Sixteen cases, every one of them a way this audit can mislead: a password path left
+open while the report reads green, or a false alarm that sends an operator to install
+something harmful. The motivating case is `PasswordAuthentication no` with PAM
 keyboard-interactive still enabled: what most hardening checklists stop short of,
 and it leaves the box brute-forceable while the config reads as hardened. The rest
 cover `Match` blocks, skips that must not read as passes, settings that are present
-but disabled, and one fail2ban jail masking another.
+but disabled, one fail2ban jail masking another, CSF/lfd counting as the rate limiter
+it is, and MySQL bound to every interface.

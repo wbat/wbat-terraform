@@ -226,4 +226,85 @@ printf '%s' "$out" | grep -q 'zero bans ever recorded for: directadmin' \
   || { echo "FAIL: expected the quiet jail named, not an aggregate" >&2; exit 1; }
 echo "OK each jail is judged on its own logpath and ban count"
 
-echo "PASS: host access audit proofs (10 cases)"
+echo "== Case 11: CSF/lfd is a rate limiter, not an absence of one =="
+# The shape of the real primary: CSF with lfd, no fail2ban. Demanding fail2ban
+# here reported "nothing rate-limits password guessing" and would have pushed an
+# operator into installing a second iptables manager alongside CSF.
+cat >"$TMP/csf.conf" <<'EOF'
+TCP_IN = "20,21,22,25,80,110,143,443,465,587,993,995,2222"
+LF_SSHD = "5"
+LF_DIRECTADMIN = "5"
+LF_SMTPAUTH = "5"
+LF_POP3D = "10"
+LF_IMAPD = "10"
+LF_FTPD = "10"
+EOF
+csf_run() {
+  env -i PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" \
+    HOST_AUDIT_SSHD_CONFIG="$TMP/sshd_config.plain" \
+    HOST_AUDIT_CSF_CONF="${1:-$TMP/csf.conf}" \
+    HOST_AUDIT_LFD_ACTIVE="${2:-1}" \
+    HOST_AUDIT_LISTENERS="${3:-22,25,2222}" \
+    bash "$AUDIT" --json 2>/dev/null || true
+}
+out="$(csf_run)"
+[ "$(printf '%s' "$out" | verdict_for ratelimit/lfd)" = "OK" ] \
+  || { echo "FAIL: active lfd not recognised as a rate limiter" >&2; exit 1; }
+[ "$(printf '%s' "$out" | verdict_for ratelimit/lfd-coverage)" = "OK" ] \
+  || { echo "FAIL: fully configured lfd thresholds not accepted" >&2; exit 1; }
+[ "$(printf '%s' "$out" | verdict_for fail2ban/installed)" = "MISSING" ] \
+  || { echo "FAIL: still demanding fail2ban on a CSF host" >&2; exit 1; }
+echo "OK CSF/lfd satisfies the rate-limiting requirement"
+
+echo "== Case 12: an lfd threshold of 0 is a service nobody is watching =="
+sed 's/^LF_DIRECTADMIN = "5"/LF_DIRECTADMIN = "0"/' "$TMP/csf.conf" >"$TMP/csf.lf-off"
+out="$(csf_run "$TMP/csf.lf-off")"
+[ "$(printf '%s' "$out" | verdict_for ratelimit/lfd-coverage)" = "FAIL" ] \
+  || { echo "FAIL: LF_DIRECTADMIN=0 accepted as coverage" >&2; exit 1; }
+printf '%s' "$out" | grep -q 'LF_DIRECTADMIN' \
+  || { echo "FAIL: the unwatched service was not named" >&2; exit 1; }
+echo "OK a zero threshold is reported as unmetered, not as configured"
+
+echo "== Case 13: lfd installed but not running =="
+out="$(csf_run "$TMP/csf.conf" 0)"
+[ "$(printf '%s' "$out" | verdict_for ratelimit/lfd)" = "FAIL" ] \
+  || { echo "FAIL: stopped lfd reported as protection" >&2; exit 1; }
+echo "OK CSF present with lfd stopped is a failure, not a pass"
+
+echo "== Case 14: MySQL bound to every interface must not read as OK =="
+# The first real run listed 3306 among "world-bound ports" and reported OK,
+# because only 2222 was ever special-cased. A datastore has no lfd or fail2ban
+# in front of it and a success there is the whole dataset.
+out="$(csf_run "$TMP/csf.conf" 1 "22,2222,3306")"
+[ "$(printf '%s' "$out" | verdict_for exposure/datastore)" = "WARN" ] \
+  || { echo "FAIL: 3306 bound but firewalled should warn" >&2; exit 1; }
+printf '%s' "$out" | grep -q 'mysql/3306' \
+  || { echo "FAIL: the datastore port was not named" >&2; exit 1; }
+
+sed 's/2222"/2222,3306"/' "$TMP/csf.conf" >"$TMP/csf.mysql-open"
+out="$(csf_run "$TMP/csf.mysql-open" 1 "22,2222,3306")"
+[ "$(printf '%s' "$out" | verdict_for exposure/datastore)" = "FAIL" ] \
+  || { echo "FAIL: 3306 bound AND allowed by TCP_IN must fail" >&2; exit 1; }
+echo "OK bound-and-allowed fails, bound-but-firewalled warns, and they are distinguished"
+
+echo "== Case 15: plaintext credential ports are surfaced =="
+out="$(csf_run "$TMP/csf.conf" 1 "21,22,110,143,993,995")"
+[ "$(printf '%s' "$out" | verdict_for exposure/plaintext-auth)" = "WARN" ] \
+  || { echo "FAIL: plaintext auth ports not surfaced" >&2; exit 1; }
+echo "OK ftp/pop3/imap without implicit TLS are reported"
+
+echo "== Case 16: an irrelevant disabled DA key must not mask the scanner =="
+# First real run: brute_force_scan_apache_logs=0 became the finding, and whether
+# the scanner itself was enabled went unreported. On an nginx host there are no
+# Apache logs to scan, so it is not a finding at all.
+printf 'brute_force_log_scanner=1\nbrute_force_scan_apache_logs=0\nnginx=1\n' >"$TMP/da.nginx"
+out="$(HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_DA_CONF="$TMP/da.nginx" \
+  bash "$AUDIT" --json 2>/dev/null || true)"
+[ "$(printf '%s' "$out" | verdict_for da/brute-force)" = "OK" ] \
+  || { echo "FAIL: enabled scanner masked by an irrelevant disabled key" >&2; exit 1; }
+[ "$(printf '%s' "$out" | verdict_for da/brute-force-disabled)" = "MISSING" ] \
+  || { echo "FAIL: apache log scanning should not be a finding on nginx" >&2; exit 1; }
+echo "OK the scanner's own state is the verdict"
+
+echo "PASS: host access audit proofs (16 cases)"
