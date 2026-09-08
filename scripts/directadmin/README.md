@@ -541,6 +541,12 @@ Where a clean verdict would be easy but wrong, it does the harder thing:
   that fails is a skip, never an empty rule set, because a denied
   `DescribeSecurityGroups` read as "no rule allows 2222" is an all-clear on the
   most important question here.
+- Shell accounts are counted, and so are the ones that already have an
+  `authorized_keys` file, with the number of *distinct* keys across them. One key
+  everywhere is something that templated them at once — `/etc/skel`, or a migration
+  that rsynced `/home` — while a key per account is that many provisioning events.
+  Names are never printed: they are public already, so reprinting them adds exposure
+  without information.
 - A running `amazon-ssm-agent` is reported as a running process, not as a recovery
   path. Only `PingStatus: Online` from the control plane means a session can
   actually be opened, and that is a separate check.
@@ -554,7 +560,7 @@ in, is in [aws/docs/host-access-hardening.md](../../aws/docs/host-access-hardeni
 ./scripts/directadmin/prove_host_access_audit.sh
 ```
 
-Twenty-one cases, every one of them a way this audit can mislead: a password path left
+Twenty-two cases, every one of them a way this audit can mislead: a password path left
 open while the report reads green, or a false alarm that sends an operator to install
 something harmful. The motivating case is `PasswordAuthentication no` with PAM
 keyboard-interactive still enabled: what most hardening checklists stop short of,

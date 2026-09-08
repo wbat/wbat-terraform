@@ -391,8 +391,50 @@ sudo awk -F: '$3>=500 && $7 !~ /(nologin|false)$/ {print $1, $6}' /etc/passwd \
       "$h"; done
 ```
 
-An account showing `has-key` that you did not put a key on is the finding, not
-the warning — treat it as a possible compromise rather than untidiness.
+On the primary, **12 of the 14 accounts already have one.** The escalation is
+not hypothetical there; it is a path that is already built and only needs a
+private key. `accounts/authorized-keys` in the audit reports this as counts.
+
+### Triage before you conclude anything
+
+Twelve accounts with keys is not twelve incidents. The question is how many
+*distinct* keys there are, because that separates one event from twelve:
+
+```bash
+for h in /home/*; do
+  f="$h/.ssh/authorized_keys"
+  [ -s "$f" ] || continue
+  ssh-keygen -l -f "$f" 2>/dev/null \
+    | awk -v u="${h##*/}" '{printf "%-40s %-16s %s\n", $2, u, $NF}'
+done | sort
+```
+
+- **One fingerprint repeated across every account** means something templated
+  them at once, and there are two likely culprits on this host. Check
+  `/etc/skel/.ssh/authorized_keys` — if a key sits there, every DirectAdmin
+  account creation has been copying it — and consider the volume-shrink
+  migration, which rsynced `/home` wholesale. Neither is a compromise, but a
+  single key that opens twelve accounts is still worth removing from the eleven
+  that do not need it.
+- **A fingerprint you do not recognise** is the finding. Treat it as a possible
+  compromise rather than untidiness: note the file's mtime against your
+  DirectAdmin and web logs for that account, and do not delete it before you
+  have looked.
+
+`ssh-keygen -l` also prints the comment field, which usually names the key's
+origin, and mtimes tell you whether these arrived together or one at a time:
+
+```bash
+stat -c '%y  %n' /home/*/.ssh/authorized_keys 2>/dev/null | sort
+ls -la /etc/skel/.ssh/ 2>/dev/null
+```
+
+Identical mtimes point at a bulk copy; a lone recent one on a site account, on
+a host where you have not provisioned SSH access, points somewhere worse.
+
+Whichever it turns out to be, the allowlist below is the control. It makes both
+a planted key and an over-distributed one inert, without needing to work out
+which accounts' keys are safe to delete first.
 
 ### Applying it without locking yourself out
 
