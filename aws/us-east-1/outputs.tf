@@ -141,3 +141,8 @@ output "kms_key_ebs_arn" {
   value       = module.kms.kms_key-ebs-arn
   description = "ARN of the CMK the root volumes are encrypted with."
 }
+
+output "da_panel_allowed_sources" {
+  description = "Sources Terraform allows to reach the DirectAdmin panel on 2222."
+  value       = module.sg.da_panel_allowed_sources
+}
