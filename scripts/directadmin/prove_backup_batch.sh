@@ -194,6 +194,7 @@ set_excludes() {
 # about it runs against whatever the script itself believes.
 run_batch() {
   local bound=() envs=()
+  lock_is_free_or_report
   [[ -n "${RUN_TIMEOUT:-}" ]] && bound=(timeout "$RUN_TIMEOUT")
   envs=(
     "PATH=${SANDBOX}/bin:$PATH"
@@ -229,12 +230,44 @@ run_batch() {
 # exits 0 having printed nothing, which would read here as a formatting failure. This is
 # the harness's problem rather than the script's: proof 10 is where holding the lock is the
 # behaviour under test.
+# Budgeted from the watchdog interval the runs are given, in tenths of a second, because
+# that interval is exactly how long the leftover sleep can go on holding the descriptor.
+# A fixed budget is a coupling nobody states: it is correct at the interval the suite
+# happens to use and becomes too short, on the slower machine only, the day a proof raises
+# it. Three seconds on top is for everything else between the exit and the next start.
 wait_for_lock() {
-  local _
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  local waited=0 budget=$(( ${WATCH_INTERVAL:-1} * 10 + 30 ))
+  while ((waited < budget)); do
     flock -n "${CASE}/batch.lock" -c true 2>/dev/null && return 0
-    sleep 0.2
+    sleep 0.1
+    waited=$((waited + 1))
   done
+  return 1
+}
+
+# run_batch waits for it rather than each proof remembering to, because losing this race
+# does not look like a race. The run takes the "another run holds it" branch, exits 0
+# having archived nothing, and every assertion about what it should have done then fails
+# with no hint that it never ran -- which is how CI failed proof 3e while the same suite
+# passed locally three times in a row. Whether the previous run's leftover sleep is still
+# alive when the next one starts is a matter of scheduling, so it fails on the slower
+# machine and nowhere else.
+#
+# Proof 10 is the exception, because there the held lock is the behaviour under test.
+#
+# Reported through a file rather than the failure counter, because run_batch is called
+# inside a command substitution: its stdout is the exit code the caller reads, and any
+# increment it made to `fail` would belong to the subshell and die with it. The summary
+# reads this file, so a race that survives the wait still fails the suite instead of
+# reappearing later as an unexplained assertion failure.
+LOCK_RACES="${SANDBOX}/lock-races"
+: >"$LOCK_RACES"
+
+lock_is_free_or_report() {
+  [[ -n "${EXPECT_LOCK_HELD:-}" ]] && return 0
+  wait_for_lock && return 0
+  printf '%s\n' "${CASE##*/}" >>"$LOCK_RACES"
+  printf '  harness: %s was never released by the previous run\n' "${CASE}/batch.lock" >&2
   return 1
 }
 
@@ -371,7 +404,6 @@ assert "exit 0 once the exclusion is in place" "[[ '$rc' == 0 ]]"
 assert "the same account, the same free space, and now it is archived" "grep -qx mostlybackups '$STUB_DA_CALLS'"
 assert "the log shows what was taken off rather than quietly using a smaller number" "grep -q 'less .* GB excluded' '${CASE}/batch.log'"
 
-assert "the lock from the run above has been released" "wait_for_lock"
 RESERVE_GB=0
 rc="$(run_batch --list)"
 unset RESERVE_GB
@@ -755,6 +787,12 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
 done
 assert "the proof's own stand-in holder took the lock" "(( held == 1 ))"
 
+# The one case that means to run against a held lock, so it opts out of the harness wait
+# that every other case relies on. Without this the two runs below would each stall for
+# the length of the wait and then be reported as harness races, which is the opposite of
+# what they are testing.
+EXPECT_LOCK_HELD=1
+
 printf '%s\n' "$(date +%s)" >"${CASE}/batch.lock.started"
 rc="$(run_batch)"
 assert "exit 0 for an overlap of seconds" "[[ '$rc' == 0 ]]"
@@ -772,6 +810,7 @@ assert "the mail says no account was backed up" "grep -q 'has not released it' '
 assert "it still archives nothing" "[[ ! -s '$STUB_DA_CALLS' ]]"
 kill "$holder" 2>/dev/null
 wait "$holder" 2>/dev/null
+unset EXPECT_LOCK_HELD
 
 # ---------------------------------------------------------------------------
 echo
@@ -1068,10 +1107,13 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   sleep 0.2
 done
 printf '%s\n' "$(($(date +%s) - 200000))" >"${CASE}/batch.lock.started"
+# Deliberately held, exactly as in proof 10.
+EXPECT_LOCK_HELD=1
 SCRIPT_SAVE="$SCRIPT"
 SCRIPT="$NV"
 nv_rc="$(run_batch)"
 SCRIPT="$SCRIPT_SAVE"
+unset EXPECT_LOCK_HELD
 kill "$holder" 2>/dev/null
 wait "$holder" 2>/dev/null
 nv_check "a holder stuck since yesterday is skipped as if it were an overlap" \
@@ -1108,6 +1150,14 @@ nv_check "a typo in --user= reports a successful run that backed up nothing" \
   "[[ '$nv_rc' == 0 && ! -s '$STUB_DA_CALLS' && ! -s '$STUB_MAIL' ]]"
 
 echo
+if [[ -s "$LOCK_RACES" ]]; then
+  echo "Harness races (a run started while the previous one still held the lock)"
+  while IFS= read -r raced_case; do
+    bad "harness: ${raced_case} started a run against a held lock, so its assertions proved nothing"
+  done <"$LOCK_RACES"
+  echo
+fi
+
 echo "----------------------------------------"
 printf 'passed %d, failed %d\n' "$pass" "$fail"
 ((fail == 0)) || exit 1
