@@ -14,29 +14,31 @@ A username is only half a credential, and the half that matters is guarded by
 authentication, not by secrecy. Several of these names appear in email addresses
 anyway, so they were never really private.
 
-Three changes make the disclosure inert:
+Four changes make the disclosure inert:
 
 1. **Key-only SSH** — no password path to guess against.
 2. **A rate limiter that actually bans** — CSF's lfd here, fail2ban elsewhere;
    covers every remaining password path, chiefly DirectAdmin, mail, and FTP,
    which cannot go key-only.
 3. **A restricted 2222** — takes the DirectAdmin panel off the open internet.
-
-Steps 1–3 are done. Two findings remain, and neither is about guessing a name:
-
 4. **[An SSH allowlist](#4-limit-ssh-to-the-accounts-that-need-it)** — with
-   passwords already off, the risk is not guessing. Site PHP can write its own
-   owner's `~/.ssh/authorized_keys`, so any of the 14 shell accounts is a route
-   from a compromised website to durable interactive SSH. This is the largest
-   item left.
-5. **A datastore on a public interface** — not about the names at all, but it
-   shows up in the same audit. Neither `lfd` nor `fail2ban` sits in front of
-   MySQL, and a success there is the whole dataset rather than one account. See
-   [Bound is not the same as reachable](#bound-is-not-the-same-as-reachable).
+   passwords already off, the risk was never guessing. Site PHP can write its
+   own owner's `~/.ssh/authorized_keys`, so every shell account was a route from
+   a compromised website to durable interactive SSH.
 
-The plaintext mail and FTP ports are the remaining password surface now that
-SSH and 2222 are closed — see
-[The plaintext mail and FTP ports are now the last password path](#the-plaintext-mail-and-ftp-ports-are-now-the-last-password-path).
+**All four are done.** What is left is not about the disclosed names at all:
+
+5. **Two keys with a blast radius the allowlist does not shrink** — one private
+   key is installed on every account on the box, including one the allowlist
+   admits, so it still opens a session. See
+   [What is left after the allowlist](#what-is-left-after-the-allowlist).
+6. **A datastore on a public interface** — neither `lfd` nor `fail2ban` sits in
+   front of MySQL, and a success there is the whole dataset rather than one
+   account. See
+   [Bound is not the same as reachable](#bound-is-not-the-same-as-reachable).
+7. **Plaintext mail and FTP** — the only remaining place a disclosed account
+   name can be tried with a password, now that SSH and 2222 are closed. See
+   [The plaintext mail and FTP ports are now the last password path](#the-plaintext-mail-and-ftp-ports-are-now-the-last-password-path).
 
 ## Measure first
 
@@ -376,8 +378,16 @@ only to an authenticated AWS principal.
 
 ## 4. Limit SSH to the accounts that need it
 
-With passwords off and 2222 closed, this is the largest remaining item, and the
-audit's one-line `ssh/allowlist` warning undersells it. The problem is not brute
+**Applied.** `AllowGroups sshusers` is in
+`/etc/ssh/sshd_config.d/20-allowgroups.conf`, the group holds `tellerstec` and
+`ec2-user`, and it was verified in both directions: `tellerstec` logs in, a site
+account presenting the same key is refused with *"not allowed because none of
+user's groups are listed in AllowGroups"* in `/var/log/secure`. That refusal is
+the whole point of the control, and it happened before the key was even
+considered. The rest of this section is why, and how to do it again.
+
+With passwords off and 2222 closed, this was the largest remaining item, and the
+audit's one-line `ssh/allowlist` warning undersold it. The problem is not brute
 force — key-only SSH is not brute-forceable. It is that **a DirectAdmin home
 directory is writable by that site's own PHP.** A compromised site can append a
 key to its owner's `~/.ssh/authorized_keys`, and `sshd` will honour it: the file
@@ -385,9 +395,9 @@ is owned by the right user with sane permissions, which is all `StrictModes`
 asks. A web compromise then becomes an interactive shell that survives cleaning
 up the website, and nothing in the audit's other checks would notice.
 
-This host has 14 accounts with a login shell and no allowlist, so every one of
-them is that path today. An allowlist closes it by refusing the account at
-authentication time whether or not a key was planted.
+This host had 14 accounts with a login shell and no allowlist, so every one of
+them was that path. An allowlist closes it by refusing the account at
+authentication time, whether or not a key was planted.
 
 See which accounts could be used this way. Note the `sudo` on the file test and
 the absence of a shell filter — both matter, for reasons the next paragraph
@@ -401,11 +411,11 @@ sudo awk -F: '$3>=500 {print $1, $6, $7}' /etc/passwd \
     done
 ```
 
-On the primary, **13 accounts already have one.** The escalation is not
+On the primary, **14 accounts already have one.** The escalation was not
 hypothetical there; it is a path that is already built and only needs a private
 key. `accounts/authorized-keys` in the audit reports this as counts.
 
-Filtering by login shell would have said 12 and been wrong. DirectAdmin's
+Filtering by login shell would have said 13 and been wrong. DirectAdmin's
 `admin` holds two keys and has no login shell, so it is invisible to a
 shell-filtered scan — and `nologin` blocks only the interactive session, not
 `ssh -N -L` port forwarding or `sftp` where the subsystem is enabled. That is
@@ -413,8 +423,8 @@ why the shell is *printed* here rather than used to exclude anything.
 
 ### Triage before you conclude anything
 
-Twelve accounts with keys is not twelve incidents. The question is how many
-*distinct* keys there are, because that separates one event from twelve:
+Fourteen accounts with keys is not fourteen incidents. The question is how many
+*distinct* keys there are, because that separates one event from fourteen:
 
 `ssh-keygen -l` prints `bits fingerprint comment (TYPE)`, so the comment is the
 middle of the line, not the last field — and the comment is usually the only
@@ -476,11 +486,19 @@ Two details worth knowing:
 - The DSA key on one account is inert — OpenSSH disabled DSA by default in 7.0
   and removed it in 9.8 — so it is dead weight rather than a risk.
 
-The allowlist below is the control either way. It makes a planted key and an
-over-shared key inert in one directive, without first having to work out which
-of the six are safe to delete. Deleting keys is per-account, needs a decision
-each time, and is easy to get wrong; `AllowGroups` is one line with a known
-rollback and a confirmed SSM path behind it. Do it in that order.
+The allowlist below is the control either way, and it comes first: it makes a
+planted key inert in one directive, without having to work out which of the six
+are safe to delete. Deleting keys is per-account, needs a decision each time,
+and is easy to get wrong; `AllowGroups` is one line with a known rollback and a
+confirmed SSM path behind it.
+
+What it does **not** do is shrink the blast radius of the widest key, and that
+distinction is worth holding onto — it is the difference between the box being
+fixed and the noisy part of the problem being fixed. The key on all 14 accounts
+is also on `tellerstec`, which the allowlist admits, so that private key still
+opens a session. Twelve of the fourteen files stopped being credentials; the one
+that mattered most did not. See
+[What is left after the allowlist](#what-is-left-after-the-allowlist).
 
 ### Applying it without locking yourself out
 
@@ -527,10 +545,43 @@ access through the panel, it must also be in `sshusers`, or the panel will
 appear to grant access that `sshd` then refuses. That is a confusing failure to
 debug later, so it is worth a note wherever account provisioning is documented.
 
-`PermitRootLogin without-password` is the other SSH warning, and it is a smaller
-one — root has no password path, so this only matters if a root key leaks. Set it
-to `no` in the same drop-in once you have confirmed nothing automated logs in as
-root: `sudo grep -c . /root/.ssh/authorized_keys` and a look at `last root`.
+`PermitRootLogin without-password` was the other SSH warning, and the allowlist
+has already answered it: `root` is not in `sshusers`, and `sshd` checks the
+allowlist before it consults `PermitRootLogin`, so no root session authenticates
+regardless of what that setting says. The audit reports it `OK` for that reason
+rather than because the setting changed.
+
+Set it to `no` in the same drop-in anyway, once you have confirmed nothing
+automated logs in as root — `sudo grep -c . /root/.ssh/authorized_keys` and a
+look at `last root`. The two settings are coupled in a way that is easy to trip
+over later: putting `root` in `sshusers` for one afternoon's convenience
+re-opens key-based root login with no other change and nothing to notice it.
+
+### What is left after the allowlist
+
+The allowlist ends the "any compromised site becomes a shell" problem. It does
+not end the key problem, and the audit now says so in one line:
+
+> The most widely installed key is also on an admitted account, so its reach is
+> not neutralised: one leaked private key still opens a session.
+
+That is `WBAT.pem`, the EC2 key pair, installed on all 14 accounts and on
+`tellerstec`. Anyone holding that file gets an allowed session. Two things
+follow, in this order:
+
+1. **Give the operator accounts their own keys.** Generate a per-operator
+   `ed25519` key, add it to `tellerstec` and `ec2-user`, confirm a login with
+   it, and only then remove the shared key from those two accounts. Do that
+   before step 2, so the shared key stops being the thing you depend on.
+2. **Then remove it from the twelve accounts it has no business on.** Those
+   files authenticate nothing while the allowlist stands, which is exactly why
+   this is cleanup rather than an incident — but they are also what makes
+   removing the allowlist a silent re-opening of 12 access paths, and someone
+   will remove it eventually.
+
+Keep the `ec2-user` copy last: it is the key pair AWS itself associates with the
+instance, and it is the path that survives a `sshd_config` mistake made before
+you have checked SSM.
 
 ## Bound is not the same as reachable
 
@@ -624,6 +675,22 @@ privilege:
 `sshd -T -C`; on this host it reports `OK` with no `Match` blocks. Address-keyed
 blocks cannot be enumerated by probing, so if it warns `ssh/match-coverage`,
 read those blocks by hand.
+
+### What a run looks like today
+
+Three `WARN`s and the two expected skips. Anything else is new and worth
+reading:
+
+| Finding | Where it is answered |
+|---------|---------------------|
+| `accounts/authorized-keys` | [What is left after the allowlist](#what-is-left-after-the-allowlist) — the shared key, not the file count |
+| `exposure/datastore` | [Bound is not the same as reachable](#bound-is-not-the-same-as-reachable) — bind MySQL to loopback |
+| `exposure/plaintext-auth` | [The plaintext mail and FTP ports…](#the-plaintext-mail-and-ftp-ports-are-now-the-last-password-path) — make TLS mandatory first |
+
+`ssh/root` and `ssh/allowlist` both report `OK` now, and `ssh/root` does so
+because of the allowlist rather than because `PermitRootLogin` changed. If the
+allowlist is ever removed, expect both to move together — that coupling is the
+one to notice, because the second one moving is easy to read as unrelated.
 
 Re-run after any DirectAdmin update — `update_post` hooks are the usual way an
 `sshd_config` or jail change gets quietly reverted.

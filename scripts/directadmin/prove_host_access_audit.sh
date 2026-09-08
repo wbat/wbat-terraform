@@ -13,6 +13,12 @@
 # switched off, and case 10 that one busy fail2ban jail cannot vouch for a
 # broken one.
 #
+# Cases 23-24 are the mirror image, and they arrived later because the failure
+# is quieter: an audit that keeps reporting a finding after the control is in
+# place asks for work already done, and an operator who is told that twice stops
+# reading the report. They assert both directions, since the cost of getting
+# this wrong the other way is the audit vouching for access it never checked.
+#
 # Usage (from repo root):
 #   ./scripts/directadmin/prove_host_access_audit.sh
 
@@ -584,9 +590,20 @@ printf '%s\n' "$K1" >"$TMP/homes/opsuser/.ssh/authorized_keys"
 acct_passwd "opsuser:x:1001:1001::${TMP}/homes/opsuser:/bin/bash
 daemonx:x:1002:1002::${TMP}/homes/daemon:/sbin/nologin
 "
+# No allowlist, which is the state this case is about: with one in force the
+# question stops being how many files exist and becomes how many of them can
+# still authenticate, which is case 23.
+cat >"$TMP/no-allowlist" <<'EOF'
+port 22
+passwordauthentication no
+kbdinteractiveauthentication no
+usepam yes
+permitrootlogin no
+EOF
+
 acct_run() {
   env -i PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-    HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_SSHD_CONFIG="$TMP/sshd_config.plain" \
+    HOST_AUDIT_SSHD_T_FILE="$TMP/no-allowlist" HOST_AUDIT_SSHD_CONFIG="$TMP/sshd_config.plain" \
     HOST_AUDIT_PASSWD="$TMP/passwd.accts" HOST_AUDIT_LISTENERS="22" \
     HOST_AUDIT_CSF_CONF="$TMP/csf.conf" HOST_AUDIT_LFD_ACTIVE=1 \
     HOST_AUDIT_INSTANCE_ID="i-000000000000000" \
@@ -680,4 +697,222 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 echo "OK installed keys are counted, de-duplicated, never named, and never guessed"
 
-echo "PASS: host access audit proofs (22 cases)"
+echo "== Case 23: after an allowlist, most of those keys authenticate nothing =="
+# The regression this case exists for: the primary applied `AllowGroups
+# sshusers` and the audit went on reporting all 14 key files as "a working
+# access path today", telling the operator to apply the control they had just
+# applied. A finding whose remedy is already in place is how an audit trains
+# someone to stop reading it.
+#
+# Both directions matter. Calling a refused key live is noise; calling a live
+# key inert would be the audit vouching for access it never checked.
+mkdir -p "$TMP/homes/ops2/.ssh"
+printf '%s\n' "$K1" >"$TMP/homes/opsuser/.ssh/authorized_keys"
+printf '%s\n' "$K1" >"$TMP/homes/site1/.ssh/authorized_keys"
+printf '%s\n' "$K1" >"$TMP/homes/site2/.ssh/authorized_keys"
+acct_passwd "opsuser:x:1001:1001::${TMP}/homes/opsuser:/bin/bash
+site1:x:1003:1003::${TMP}/homes/site1:/bin/bash
+site2:x:1004:1004::${TMP}/homes/site2:/bin/bash
+"
+cat >"$TMP/user-groups" <<'EOF'
+opsuser:opsuser,sshusers
+site1:site1
+site2:site2
+root:root
+EOF
+
+allow_run() {
+  env -i PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    HOST_AUDIT_SSHD_T_FILE="${1:-$TMP/hardened}" HOST_AUDIT_SSHD_CONFIG="$TMP/sshd_config.plain" \
+    HOST_AUDIT_PASSWD="$TMP/passwd.accts" HOST_AUDIT_LISTENERS="22" \
+    HOST_AUDIT_USER_GROUPS_FILE="$TMP/user-groups" \
+    HOST_AUDIT_CSF_CONF="$TMP/csf.conf" HOST_AUDIT_LFD_ACTIVE=1 \
+    HOST_AUDIT_INSTANCE_ID="i-000000000000000" \
+    bash "$AUDIT" --json 2>/dev/null || true
+}
+
+out="$(allow_run)"
+printf '%s' "$out" | grep -q 'admits 1 of them, so 2 cannot authenticate today' \
+  || { echo "FAIL: refused accounts still counted as live access paths" >&2; exit 1; }
+printf '%s' "$out" | grep -q 'latent rather than live' \
+  || { echo "FAIL: the allowlist should reclassify those keys, not ignore them" >&2; exit 1; }
+
+# The part an allowlist does not fix, and the part that is easiest to lose in
+# the reclassification: one key on every account, including an admitted one,
+# is still one private key that opens a session.
+printf '%s' "$out" | grep -q 'most widely installed key is also on an admitted account' \
+  || { echo "FAIL: a shared key on an admitted account must stay a live finding" >&2; exit 1; }
+[ "$(printf '%s' "$out" | verdict_for accounts/authorized-keys)" = "WARN" ] \
+  || { echo "FAIL: a live shared key is a finding whatever the allowlist says" >&2; exit 1; }
+
+# Move the shared key off the admitted account: the reach caveat must go with
+# it, because now no admitted account holds it.
+printf '%s\n' "$K2" >"$TMP/homes/opsuser/.ssh/authorized_keys"
+printf '%s' "$(allow_run)" | grep -q 'most widely installed key is also on an admitted account' \
+  && { echo "FAIL: caveat fired for a key no admitted account holds" >&2; exit 1; }
+
+# And an allowlist that admits nobody holding a key means no installed key
+# authenticates anything -- the one shape that earns an OK here.
+cat >"$TMP/user-groups" <<'EOF'
+opsuser:opsuser
+site1:site1
+site2:site2
+root:root
+EOF
+[ "$(allow_run | verdict_for accounts/authorized-keys)" = "OK" ] \
+  || { echo "FAIL: keys nobody may authenticate with should not read as exposure" >&2; exit 1; }
+
+# The unsafe direction: an allowlist that refuses nobody is not protection, and
+# must not be reported as if it were.
+cat >"$TMP/user-groups" <<'EOF'
+opsuser:opsuser,sshusers
+site1:site1,sshusers
+site2:site2,sshusers
+root:root
+EOF
+out="$(allow_run)"
+[ "$(printf '%s' "$out" | verdict_for accounts/authorized-keys)" = "WARN" ] \
+  || { echo "FAIL: an allowlist admitting every key holder is not an all-clear" >&2; exit 1; }
+printf '%s' "$out" | grep -q 'not narrowing anything here' \
+  || { echo "FAIL: an allowlist that refuses nobody should be named as such" >&2; exit 1; }
+
+# Unresolvable membership is not a refusal. Guessing here would hand out the
+# same false all-clear the unreadable-home case already covers.
+cat >"$TMP/user-groups" <<'EOF'
+root:root
+EOF
+out="$(allow_run)"
+[ "$(printf '%s' "$out" | verdict_for accounts/authorized-keys)" = "WARN" ] \
+  || { echo "FAIL: unresolved membership must not clear the finding" >&2; exit 1; }
+printf '%s' "$out" | grep -q 'could not be resolved' \
+  || { echo "FAIL: unresolved membership should be stated" >&2; exit 1; }
+echo "OK installed keys are judged against what the allowlist actually admits"
+
+echo "== Case 24: PermitRootLogin against an allowlist that excludes root =="
+# sshd consults PermitRootLogin only for a connection the allowlist already let
+# through, so `without-password` plus an AllowGroups without root is not a way
+# in. Warning about it is a finding on a session that cannot happen -- and the
+# coupling runs the other way too, so the reverse must still warn.
+cat >"$TMP/root-key-only" <<'EOF'
+port 22
+passwordauthentication no
+kbdinteractiveauthentication no
+usepam yes
+permitrootlogin without-password
+allowgroups sshusers
+EOF
+cat >"$TMP/user-groups" <<'EOF'
+opsuser:opsuser,sshusers
+site1:site1
+site2:site2
+root:root
+EOF
+out="$(allow_run "$TMP/root-key-only")"
+[ "$(printf '%s' "$out" | verdict_for ssh/root)" = "OK" ] \
+  || { echo "FAIL: root cannot authenticate at all here; this is not a finding" >&2; exit 1; }
+printf '%s' "$out" | grep -q 'prefer PermitRootLogin no as well' \
+  || { echo "FAIL: the re-open-by-group-membership coupling should be stated" >&2; exit 1; }
+
+# Put root in the allowed group and the same PermitRootLogin is live again.
+cat >"$TMP/user-groups" <<'EOF'
+opsuser:opsuser,sshusers
+site1:site1
+site2:site2
+root:root,sshusers
+EOF
+out="$(allow_run "$TMP/root-key-only")"
+[ "$(printf '%s' "$out" | verdict_for ssh/root)" = "WARN" ] \
+  || { echo "FAIL: root in the allowed group makes PermitRootLogin live" >&2; exit 1; }
+printf '%s' "$out" | grep -q 'admits root' \
+  || { echo "FAIL: should name the allowlist as the reason this is live" >&2; exit 1; }
+
+# With no allowlist there is nothing to weigh it against, and the original
+# warning stands.
+[ "$(run "$TMP/passwords-open" | verdict_for ssh/root)" = "WARN" ] \
+  || { echo "FAIL: key-only root with no allowlist is still a finding" >&2; exit 1; }
+echo "OK root login is judged on whether a root session can authenticate at all"
+
+echo "== Case 25: AllowUsers wildcards must not expand against the filesystem =="
+# OpenSSH permits `*` and `?` in AllowUsers (sshd_config(5)). The matcher used
+# to iterate `for pat in $SSH_ALLOW_USERS` with pathname expansion on, so a
+# pattern like `user*` run from a directory containing `userjunk` became the
+# pathname `userjunk` before the case comparison -- and two key-bearing accounts
+# that the pattern admits were reported as refused. That is a false all-clear
+# on the check that says whether an installed key still authenticates.
+mkdir -p "$TMP/homes/user01/.ssh" "$TMP/homes/user02/.ssh" "$TMP/globcwd"
+printf '%s\n' "$K1" >"$TMP/homes/user01/.ssh/authorized_keys"
+printf '%s\n' "$K1" >"$TMP/homes/user02/.ssh/authorized_keys"
+# The pathname that would steal the pattern under an expanding for-loop.
+touch "$TMP/globcwd/userjunk"
+acct_passwd "user01:x:1101:1101::${TMP}/homes/user01:/bin/bash
+user02:x:1102:1102::${TMP}/homes/user02:/bin/bash
+"
+cat >"$TMP/user-groups" <<'EOF'
+user01:user01
+user02:user02
+root:root
+EOF
+cat >"$TMP/allow-wildcard" <<'EOF'
+port 22
+passwordauthentication no
+kbdinteractiveauthentication no
+usepam yes
+permitrootlogin no
+allowusers user*
+EOF
+# cwd is the trap: without set -f the pattern expands here before matching.
+out="$(
+  cd "$TMP/globcwd" &&
+    env -i PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+      HOST_AUDIT_SSHD_T_FILE="$TMP/allow-wildcard" HOST_AUDIT_SSHD_CONFIG="$TMP/sshd_config.plain" \
+      HOST_AUDIT_PASSWD="$TMP/passwd.accts" HOST_AUDIT_LISTENERS="22" \
+      HOST_AUDIT_USER_GROUPS_FILE="$TMP/user-groups" \
+      HOST_AUDIT_CSF_CONF="$TMP/csf.conf" HOST_AUDIT_LFD_ACTIVE=1 \
+      HOST_AUDIT_INSTANCE_ID="i-000000000000000" \
+      bash "$AUDIT" --json 2>/dev/null || true
+)"
+[ "$(printf '%s' "$out" | verdict_for accounts/authorized-keys)" = "WARN" ] \
+  || { echo "FAIL: AllowUsers user* must still admit user01/user02 when cwd has userjunk" >&2; exit 1; }
+printf '%s' "$out" | grep -q 'not narrowing anything here\|admits 2 of them' \
+  || { echo "FAIL: both wildcard matches should still count as live" >&2; exit 1; }
+# And the pattern itself must still match -- a set -f that also broke case
+# matching would refuse everyone and look like the bug from the other side.
+printf '%s' "$out" | grep -q 'admits none of them' \
+  && { echo "FAIL: set -f must not stop the wildcard matching the account name" >&2; exit 1; }
+echo "OK AllowUsers wildcards match account names, not pathnames in cwd"
+
+echo "== Case 26: every fingerprint tied for widest reach must be tested =="
+# Two keys on the same number of accounts, one only on refused accounts and one
+# on an admitted account. Taking `head -1` after sorting by count keeps an
+# arbitrary member of the tie; if that member is the refused-only key, the
+# live one is never checked against fps_live and the reach caveat is silently
+# dropped. Preserve and test every fingerprint at the maximum count.
+mkdir -p "$TMP/homes/site3/.ssh"
+printf '%s\n' "$K2" >"$TMP/homes/opsuser/.ssh/authorized_keys"   # admitted
+printf '%s\n' "$K1" >"$TMP/homes/site1/.ssh/authorized_keys"     # refused
+printf '%s\n' "$K1" >"$TMP/homes/site2/.ssh/authorized_keys"     # refused
+printf '%s\n' "$K2" >"$TMP/homes/site3/.ssh/authorized_keys"     # refused
+acct_passwd "opsuser:x:1001:1001::${TMP}/homes/opsuser:/bin/bash
+site1:x:1003:1003::${TMP}/homes/site1:/bin/bash
+site2:x:1004:1004::${TMP}/homes/site2:/bin/bash
+site3:x:1005:1005::${TMP}/homes/site3:/bin/bash
+"
+cat >"$TMP/user-groups" <<'EOF'
+opsuser:opsuser,sshusers
+site1:site1
+site2:site2
+site3:site3
+root:root
+EOF
+# Both keys are on exactly 2 accounts. K1 is refused-only; K2 is on the
+# admitted opsuser. Either one could be head -1 depending on fingerprint order.
+out="$(allow_run)"
+printf '%s' "$out" | grep -q 'most widely installed of which is on 2 of them' \
+  || { echo "FAIL: tied keys should both count as widest" >&2; exit 1; }
+printf '%s' "$out" | grep -q 'most widely installed key is also on an admitted account' \
+  || { echo "FAIL: a tied live key must not be silenced by a tied refused-only peer" >&2; exit 1; }
+[ "$(printf '%s' "$out" | verdict_for accounts/authorized-keys)" = "WARN" ] \
+  || { echo "FAIL: a live shared key among a tie is still a finding" >&2; exit 1; }
+echo "OK every fingerprint at the maximum reach is tested, not just one of a tie"
+
+echo "PASS: host access audit proofs (26 cases)"
