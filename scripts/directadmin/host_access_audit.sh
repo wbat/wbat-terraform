@@ -89,6 +89,78 @@ sshd_bin() {
   fi
 }
 
+# The effective allowlist, filled in by audit_ssh from `sshd -T` so the checks
+# that follow can ask what it admits rather than only whether one exists.
+SSH_ALLOW_USERS=""
+SSH_ALLOW_GROUPS=""
+SSH_ALLOW_RESOLVED=0
+
+user_groups() {
+  local u="$1"
+  if [ -n "${HOST_AUDIT_USER_GROUPS_FILE:-}" ]; then
+    # Test hook: `user:group1,group2` per line, standing in for `id -nG`, whose
+    # answers come from the real passwd database and cannot be faked.
+    awk -F: -v u="$u" '$1==u {gsub(/,/, " ", $2); print $2; found=1} END {exit !found}' \
+      "$HOST_AUDIT_USER_GROUPS_FILE" 2>/dev/null
+    return
+  fi
+  id -nG "$u" 2>/dev/null
+}
+
+# 0 = the allowlist admits this account, 1 = it refuses, 2 = cannot tell.
+#
+# AllowUsers and AllowGroups are conjunctive in sshd(8): with both set, an
+# account must match a name *and* be in a group. Wildcards are honoured, but a
+# `user@host` form or a `!` negation cannot be decided from a name alone, so
+# those are reported as undecided rather than guessed at.
+#
+# DenyUsers/DenyGroups are deliberately not consulted. They only ever narrow the
+# admitted set, so ignoring them can call a denied account admitted -- which
+# overstates exposure. The opposite mistake, calling a live account refused, is
+# the one that would tell an operator a working key is inert.
+ssh_admits() {
+  local u="$1"
+  [ "$SSH_ALLOW_RESOLVED" -eq 1 ] || return 2
+
+  # OpenSSH permits `*` and `?` in AllowUsers/AllowGroups
+  # (sshd_config(5)). An unquoted `for pat in $SSH_ALLOW_USERS` expands those
+  # against the working directory before the case comparison, so `AllowUsers
+  # user*` run from a directory containing `userjunk` iterates the pathname
+  # instead of the pattern and reports two key-bearing matches as refused -- a
+  # false all-clear. Matching runs in a subshell with pathname expansion off;
+  # the unquoted `$pat` in `case` is still what makes the wildcard match.
+  # (No `local` here: a bare subshell is not a function, and the subshell
+  # already keeps these assignments out of the caller's environment.)
+  (
+    set -f
+    pat= g= ok= groups=
+    if [ -n "$SSH_ALLOW_USERS" ]; then
+      ok=1
+      for pat in $SSH_ALLOW_USERS; do
+        case "$pat" in *'!'* | *@*) exit 2 ;; esac
+        # shellcheck disable=SC2254 # unquoted on purpose: sshd honours wildcards
+        case "$u" in $pat) ok=0 ;; esac
+      done
+      [ "$ok" -eq 0 ] || exit 1
+    fi
+
+    if [ -n "$SSH_ALLOW_GROUPS" ]; then
+      groups="$(user_groups "$u")" || exit 2
+      [ -n "$groups" ] || exit 2
+      ok=1
+      for pat in $SSH_ALLOW_GROUPS; do
+        case "$pat" in *'!'*) exit 2 ;; esac
+        for g in $groups; do
+          # shellcheck disable=SC2254 # unquoted on purpose: sshd honours wildcards
+          case "$g" in $pat) ok=0 ;; esac
+        done
+      done
+      [ "$ok" -eq 0 ] || exit 1
+    fi
+    exit 0
+  )
+}
+
 # Effective config for one connection context, or empty if it cannot be taken.
 sshd_dump_for() {
   local ctx="$1" bin who
@@ -118,13 +190,24 @@ audit_ssh() {
     return
   fi
 
-  local pw kbd pam root_login port allow
+  local pw kbd pam root_login port allow admits=0 root_gate=""
   pw="$(printf '%s\n' "$dump" | awk '$1=="passwordauthentication"{print $2}')"
   kbd="$(printf '%s\n' "$dump" | awk '$1=="kbdinteractiveauthentication"{print $2}')"
   pam="$(printf '%s\n' "$dump" | awk '$1=="usepam"{print $2}')"
   root_login="$(printf '%s\n' "$dump" | awk '$1=="permitrootlogin"{print $2}')"
   port="$(printf '%s\n' "$dump" | awk '$1=="port"{print $2}' | paste -sd, -)"
-  allow="$(printf '%s\n' "$dump" | awk '$1=="allowusers"||$1=="allowgroups"{print $1"="$2}' | paste -sd' ' -)"
+  # Every value, not just the first: `allowgroups sshusers admins` reported as
+  # `allowgroups=sshusers` understates who may log in, in the one check whose
+  # job is to say exactly that.
+  allow="$(printf '%s\n' "$dump" |
+    awk '$1=="allowusers"||$1=="allowgroups"{
+      v=""; for (i=2; i<=NF; i++) v = v (v ? "," : "") $i; print $1"="v}' | paste -sd' ' -)"
+
+  SSH_ALLOW_USERS="$(printf '%s\n' "$dump" |
+    awk '$1=="allowusers"{for (i=2; i<=NF; i++) print $i}' | paste -sd' ' -)"
+  SSH_ALLOW_GROUPS="$(printf '%s\n' "$dump" |
+    awk '$1=="allowgroups"{for (i=2; i<=NF; i++) print $i}' | paste -sd' ' -)"
+  SSH_ALLOW_RESOLVED=1
 
   if [ "$pw" = "no" ]; then
     report OK "ssh/password" "PasswordAuthentication no (base config; see ssh/match)"
@@ -141,9 +224,30 @@ audit_ssh() {
     report OK "ssh/kbd-interactive" "KbdInteractiveAuthentication ${kbd:-no}, UsePAM ${pam:-unknown}"
   fi
 
+  # PermitRootLogin is only reached for a connection the allowlist has already
+  # let through, so an allowlist that does not name root closes root login on
+  # its own. Warning anyway would be a finding about a session that cannot
+  # happen -- but the two settings are coupled, and adding root to the allowed
+  # group re-opens key-based root login with no other change, so say that here
+  # rather than leaving it to be rediscovered.
+  if [ -n "$allow" ]; then
+    ssh_admits root || admits=$?
+    case "$admits" in
+      0) root_gate=", and $allow admits root" ;;
+      1) root_gate="" ;;
+      *) root_gate=", and whether $allow admits root could not be resolved" ;;
+    esac
+  fi
+
   case "$root_login" in
     no | forced-commands-only) report OK "ssh/root" "PermitRootLogin $root_login" ;;
-    prohibit-password | without-password) report WARN "ssh/root" "PermitRootLogin $root_login -- key-only root; prefer no" ;;
+    prohibit-password | without-password)
+      if [ "$admits" -eq 1 ]; then
+        report OK "ssh/root" "PermitRootLogin $root_login, but $allow does not admit root, so no root session authenticates -- putting root in that group would re-open key-based root login with no other change, so prefer PermitRootLogin no as well"
+      else
+        report WARN "ssh/root" "PermitRootLogin $root_login -- key-only root${root_gate}; prefer no"
+      fi
+      ;;
     *) report FAIL "ssh/root" "PermitRootLogin ${root_login:-unknown}" ;;
   esac
 
@@ -663,8 +767,15 @@ audit_accounts() {
   # shell-filtered scan omitted it entirely. A nologin shell blocks the
   # interactive session and nothing else: `ssh -N -L` port forwarding and, where
   # the subsystem is enabled, sftp both still work with that key.
-  local with_keys=0 nologin_keys=0 unreadable=0 fps="" home shell akf
-  while IFS=: read -r _ _ uid _ _ home shell; do
+  #
+  # Whether a file is a credential or dead weight is the allowlist's answer, not
+  # this loop's, so each holder is put to ssh_admits. Without that, the primary
+  # kept being told that all 14 of its key files were "a working access path
+  # today" after AllowGroups had made 12 of them unusable -- a finding whose
+  # remedy was the change that had already been made.
+  local with_keys=0 nologin_keys=0 unreadable=0 fps="" fps_live="" home shell akf
+  local live=0 refused=0 unresolved=0 name adm acct_fps
+  while IFS=: read -r name _ uid _ _ home shell; do
     case "$uid" in '' | *[!0-9]*) continue ;; esac
     [ "$uid" -ge 500 ] || continue
     # A `.ssh` is mode 700 and a DirectAdmin home is 711, so an unprivileged
@@ -681,12 +792,32 @@ audit_accounts() {
     akf="${home}/.ssh/authorized_keys"
     [ -s "$akf" ] || continue
     with_keys=$((with_keys + 1))
-    case "$shell" in
-      *nologin | *false | *sync | *shutdown | *halt) nologin_keys=$((nologin_keys + 1)) ;;
+
+    adm=0
+    ssh_admits "$name" || adm=$?
+    case "$adm" in
+      0) live=$((live + 1)) ;;
+      1) refused=$((refused + 1)) ;;
+      *) unresolved=$((unresolved + 1)) ;;
     esac
+
+    # Only for accounts the allowlist has not already refused: where it has,
+    # `nologin` is a second lock on a door sshd never opens, and reporting it
+    # spends the operator's attention on the wrong account.
+    if [ "$adm" -ne 1 ]; then
+      case "$shell" in
+        *nologin | *false | *sync | *shutdown | *halt) nologin_keys=$((nologin_keys + 1)) ;;
+      esac
+    fi
+
     if have ssh-keygen; then
-      fps="${fps}$(ssh-keygen -l -f "$akf" 2>/dev/null | awk '{print $2}' | sort -u)
+      acct_fps="$(ssh-keygen -l -f "$akf" 2>/dev/null | awk '{print $2}' | sort -u)"
+      fps="${fps}${acct_fps}
 "
+      if [ "$adm" -eq 0 ]; then
+        fps_live="${fps_live}${acct_fps}
+"
+      fi
     fi
   done <"$passwd"
 
@@ -706,23 +837,86 @@ audit_accounts() {
   # Six keys across fourteen accounts sounds unremarkable until one of the six
   # is installed on all fourteen, at which case that single private key is the
   # whole box and its blast radius is what needs managing, not the file count.
-  local detail="" distinct widest
+  local detail="" distinct widest widest_fps shared_on_live=0 fp
   if [ -n "${fps//[[:space:]]/}" ]; then
-    distinct="$(printf '%s' "$fps" | grep -c . || true)"
     distinct="$(printf '%s' "$fps" | sort -u | grep -c . || true)"
+    # Every fingerprint that ties for the maximum count, not just the first
+    # of them. `head -1` after `sort -rn` is arbitrary among ties, and testing
+    # only that one against fps_live can miss: a tied fingerprint that sits
+    # only on refused accounts would silence the warning while another with
+    # the same reach sits on an admitted one.
     widest="$(printf '%s' "$fps" | grep . | sort | uniq -c | sort -rn | awk 'NR==1 {print $1}')"
+    widest_fps="$(printf '%s' "$fps" | grep . | sort | uniq -c |
+      awk -v w="${widest:-0}" '$1 == w {print $2}')"
     detail=", ${distinct} distinct key(s), the most widely installed of which is on ${widest:-?} of them"
   fi
 
   local nologin_note=""
-  [ "$nologin_keys" -eq 0 ] \
-    || nologin_note=" ${nologin_keys} of them have no login shell, which blocks the interactive session but not port forwarding or sftp."
+  if [ "$nologin_keys" -eq 1 ]; then
+    nologin_note=" 1 of them has no login shell, which blocks the interactive session but not port forwarding or sftp."
+  elif [ "$nologin_keys" -gt 1 ]; then
+    nologin_note=" ${nologin_keys} of them have no login shell, which blocks the interactive session but not port forwarding or sftp."
+  fi
 
   if [ "$with_keys" -le 1 ] && [ "${widest:-1}" -le 1 ]; then
     report OK "accounts/authorized-keys" "${with_keys} account has an authorized_keys file${detail}"
-  else
-    report WARN "accounts/authorized-keys" "${with_keys} account(s) already hold an authorized_keys file${detail} -- each is a working access path today, a key on more than one account means one private key opens all of them, and on a DirectAdmin host the site's own PHP can add to its owner's file.${nologin_note} ssh/allowlist is what makes a planted or over-shared key inert"
+    return
   fi
+
+  # No allowlist: every file is a way in, the count is the finding, and the
+  # allowlist is the remedy to point at.
+  if [ -z "$SSH_ALLOW_USERS$SSH_ALLOW_GROUPS" ]; then
+    report WARN "accounts/authorized-keys" "${with_keys} account(s) already hold an authorized_keys file${detail} -- each is a working access path today, a key on more than one account means one private key opens all of them, and on a DirectAdmin host the site's own PHP can add to its owner's file.${nologin_note} ssh/allowlist is what makes a planted or over-shared key inert"
+    return
+  fi
+
+  # An allowlist exists but refuses nobody who holds a key, which is the shape
+  # that reads as protection and is not: it is worth distinguishing from having
+  # no allowlist, because the fix is to narrow the one that is there.
+  if [ "$refused" -eq 0 ] && [ "$live" -gt 0 ]; then
+    report WARN "accounts/authorized-keys" "${with_keys} account(s) hold an authorized_keys file${detail}, and the SSH allowlist admits ${live} of them -- it is not narrowing anything here, so each key is a working access path today and a key on more than one account means one private key opens all of them.${nologin_note}"
+    return
+  fi
+
+  if [ "$refused" -eq 0 ]; then
+    report WARN "accounts/authorized-keys" "${with_keys} account(s) hold an authorized_keys file${detail} -- an allowlist is set but whether it admits these accounts could not be resolved, so treat each as a working access path.${nologin_note}"
+    return
+  fi
+
+  local gate=" The SSH allowlist admits ${live} of them, so ${refused} cannot authenticate today -- those keys are latent rather than live, and adding one of those accounts to the allowlist makes its key live again with no other change."
+  [ "$unresolved" -eq 0 ] \
+    || gate="${gate} ${unresolved} could not be resolved either way."
+
+  # Every key refused is the good case, and it is reachable: it is what an
+  # allowlist naming only accounts that carry no key looks like.
+  if [ "$live" -eq 0 ] && [ "$unresolved" -eq 0 ]; then
+    report OK "accounts/authorized-keys" "${with_keys} account(s) hold an authorized_keys file${detail}, and the SSH allowlist admits none of them -- no installed key authenticates an SSH session today"
+    return
+  fi
+
+  # The distinction the counts hide. An allowlist makes a planted key inert, but
+  # it does nothing about a key that is on an admitted account *and* on a dozen
+  # others: that private key still opens a session, and its reach is what a leak
+  # costs. On the primary this is the EC2 key pair, copied to every account and
+  # left on the operator's. Every fingerprint that ties for the maximum count
+  # is tested -- picking one of a tie at random is how a refused-only fingerprint
+  # would silence the warning while an equally widespread live one stayed quiet.
+  if [ -n "${widest_fps:-}" ] && [ "${widest:-1}" -gt 1 ]; then
+    while IFS= read -r fp; do
+      [ -n "$fp" ] || continue
+      if printf '%s' "$fps_live" | grep -qxF "$fp"; then
+        shared_on_live=1
+        break
+      fi
+    done <<EOF
+${widest_fps}
+EOF
+    if [ "$shared_on_live" -eq 1 ]; then
+      gate="${gate} The most widely installed key is also on an admitted account, so its reach is not neutralised: one leaked private key still opens a session."
+    fi
+  fi
+
+  report WARN "accounts/authorized-keys" "${with_keys} account(s) hold an authorized_keys file${detail}.${gate}${nologin_note}"
 }
 
 # --- SSM out-of-band path ----------------------------------------------------

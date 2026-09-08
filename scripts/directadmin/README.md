@@ -629,6 +629,18 @@ Where a clean verdict would be easy but wrong, it does the harder thing:
   without information. Run unprivileged, the scan skips rather than reporting a
   clean sweep: a mode-700 `.ssh` makes an unreadable key indistinguishable from an
   absent one, and "no account has a key" is the wrong way to be wrong here.
+- Those key files are then judged against the allowlist, because whether one is a
+  credential or dead weight is `AllowUsers`/`AllowGroups`'s answer rather than the
+  file system's. Every holder is resolved through the same conjunctive rules sshd
+  applies, so the report separates the keys that authenticate a session today from
+  the ones an allowlist has made latent — and names what an allowlist does *not*
+  fix, which is a key that is on an admitted account and a dozen others at once.
+  Membership that cannot be resolved counts as neither.
+- `PermitRootLogin` is read the same way. sshd consults it only for a connection the
+  allowlist already admitted, so `without-password` with no root in the allowed group
+  is not a way in, and warning about it would be a finding on a session that cannot
+  happen. The coupling is stated instead: adding root to that group re-opens
+  key-based root login with no other change.
 - A running `amazon-ssm-agent` is reported as a running process, not as a recovery
   path. Only `PingStatus: Online` from the control plane means a session can
   actually be opened, and that is a separate check.
@@ -642,7 +654,7 @@ in, is in [aws/docs/host-access-hardening.md](../../aws/docs/host-access-hardeni
 ./scripts/directadmin/prove_host_access_audit.sh
 ```
 
-Twenty-two cases, every one of them a way this audit can mislead: a password path left
+Twenty-six cases, every one of them a way this audit can mislead: a password path left
 open while the report reads green, or a false alarm that sends an operator to install
 something harmful. The motivating case is `PasswordAuthentication no` with PAM
 keyboard-interactive still enabled: what most hardening checklists stop short of,
@@ -662,3 +674,21 @@ string from the script and evaluates it with the same engine the AWS CLI uses ag
 recorded `describe-security-groups` shapes. Reverting the query to the old one fails
 seven of its eight assertions; the eighth is the genuinely-closed group, which is
 empty either way, and that is precisely why the bug was invisible.
+
+Cases 23 and 24 come from the opposite failure. After `AllowGroups sshusers` landed on
+the primary, the audit kept reporting all fourteen key files as "a working access path
+today" and kept warning about a root login the allowlist already refused — findings
+whose remedy was the change that had just been made. An audit that asks for work
+already done is how an operator learns to stop reading it. Both cases assert the
+reverse direction just as hard, because calling a live key inert would be the audit
+vouching for access it never checked: an allowlist that refuses nobody, a shared key
+still sitting on an admitted account, and group membership that cannot be resolved all
+have to keep warning.
+
+Cases 25 and 26 close two quieter ways the same reclassification can still lie.
+Case 25 is a working-directory trap: OpenSSH permits `*` in `AllowUsers`, and an
+unquoted `for` over that pattern expands against cwd before the match, so
+`AllowUsers user*` run next to a file named `userjunk` reported the matching
+accounts as refused. Case 26 is a tie: two fingerprints at the same maximum reach,
+one only on refused accounts and one on an admitted account — keeping only
+`head -1` of that tie can silence the live one.
