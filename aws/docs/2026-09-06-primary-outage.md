@@ -25,8 +25,9 @@ back](#is-what-is-already-in-s3-readable-a-read-back-of-every-archive-2026-09-08
 that are. Only one of the 22 is the newest object in the bucket for its account, and that
 one is the `tellerstec` fragment already known about and already renamed. What is still
 outstanding is in
-[the order below](#do-it-in-this-order) and in [Still open](#still-open); nothing from the
-batching work is on the host yet.
+[the order below](#do-it-in-this-order) and in [Still open](#still-open). The batching work
+is now deployed and scheduled; what remains is a disk decision for the two accounts it
+cannot reach.
 
 ## Do it in this order
 
@@ -56,11 +57,12 @@ step 6 exists to stop DirectAdmin's own schedule racing it.
 |---|--------|-----------|--------|----------|
 | 1 | [Cap the nightly cron job](#3-memory-headroom-on-the-primary--and-why-more-swap-is-the-wrong-lever) | none | done 2026-09-07 | The job runs at 03:45 daily and has come close every night for a week. Costs nothing and needs no disk. |
 | 2 | [Upload the old `/backup` weeks, verify, then delete](#recovering-space-safely) | **frees ~52 GB** | done 2026-09-07 | `rclone` streams to S3 without staging locally, so this works at 99%. Takes the volume to ~74% and gets the newest database dump off-host in the same pass. |
-| 3 | [Deploy the fixed tooling](#state-of-the-host-as-of-2026-09-07-2130-edt): merge, then `install_da_vhost_listen.sh --install` and `--verify` | negligible | done for #120's tooling; **re-run after #122 merges** | Nothing else uploads or cleans up, and the installed hook was hand-edited. Also installs `da-backup-batch.sh` and its cron, which is why step 6 has to happen alongside it. |
+| 3 | [Deploy the fixed tooling](#state-of-the-host-as-of-2026-09-07-2130-edt): merge, then `install_da_vhost_listen.sh --install` and `--verify` | negligible | done 2026-09-08, at #122 | Nothing else uploads or cleans up, and the installed hook was hand-edited. Also installs `da-backup-batch.sh` and its cron, which is why step 6 had to happen alongside it. |
 | 4 | [Smoke-test DirectAdmin with one small account](#1-prove-the-backup-engine-works-without-filling-the-disk-cli) | kilobytes | done 2026-09-07 | Proves engine → hook → S3 → cleanup end to end for almost no space. |
 | 5 | [Diagnose `Not implemented`](#2-find-out-what-not-implemented-refers-to-cli) | none | not done, and optional | Read-only, and no longer on the critical path — step 7 does not go through the task queue. |
-| 6 | [Delete DirectAdmin's schedule](#3-delete-directadmins-backup-schedule--this-one-needs-the-panel) (panel) | — | **not done** | It still fires at 05:00 every day. Repairing it would restore a full all-users run, which no longer fits. |
-| 7 | [Let the per-account batch run take over](#per-account-backups-da_backup_batchsh) | largest single account, not the sum | **not scheduled** | Installed by step 3. Eleven of the thirteen accounts fit; the other two need a disk decision, not a schedule. |
+| 6 | [Delete DirectAdmin's schedule](#3-delete-directadmins-backup-schedule) | — | done 2026-09-08 | Removed from the stored job list, not the panel — see the section for why that turned out to be possible. Repairing it would have restored a full all-users run, which no longer fits. |
+| 7 | [Let the per-account batch run take over](#per-account-backups-da_backup_batchsh) | largest single account, not the sum | scheduled 2026-09-08, first automatic run 2026-09-09 01:00 EDT | Installed by step 3. Eleven of the thirteen accounts fit and now run nightly. `tellerstec` does not fit for a reason that turned out to be fixable and free — see step 8 — and `teller` needs a disk decision. |
+| 8 | [Prune `tellerstec`'s Installatron backups](#why-tellerstec-stopped-fitting-and-why-that-is-the-cheapest-thing-here) | **frees ~29 GB, and stops ~2.6 GB/day of growth** | **not done** | The largest single reclaim left, and the only item here with a deadline: at the observed rate the volume fills in roughly three weeks on its own, regardless of backups. Doing it also makes `tellerstec` fit again. |
 
 ### State of the host, read 2026-09-07 05:02 UTC
 
@@ -366,8 +368,8 @@ not go through the task queue at all, and on 2026-09-07 it archived and uploaded
 accounts with `Not implemented` still failing every morning. Repairing the stored job is
 therefore not a prerequisite for having backups — see
 [the batching section](#per-account-backups-da_backup_batchsh) — and the stored job is now
-something to [delete](#3-delete-directadmins-backup-schedule--this-one-needs-the-panel)
-rather than repair. Corroborating:
+something to [delete](#3-delete-directadmins-backup-schedule) rather than repair, which
+was done on 2026-09-08. Corroborating:
 `/home/admin_backups` is empty with mtime 2026-07-02, `/var/log/da-backup-s3.log` has not
 been written since 2026-07-02 05:52, and S3 confirms it:
 
@@ -1017,8 +1019,8 @@ fix would not otherwise have been running.
 Note what `--install` now covers. As well as the two hooks and the disk guard, it installs
 `da-backup-batch.sh` and `/etc/cron.d/da-backup-batch`, so running it schedules account
 backups at 01:00. That is the intended outcome, but it means DirectAdmin's own schedule
-should be [deleted](#3-delete-directadmins-backup-schedule--this-one-needs-the-panel) in the
-same sitting rather than afterwards.
+should be [deleted](#3-delete-directadmins-backup-schedule) in the same sitting rather than
+afterwards. Both were done together on 2026-09-08.
 
 ## DirectAdmin remediation — what to run, and what needs the panel
 
@@ -1308,10 +1310,62 @@ other two.** Those two hold 87.4 GiB of the 114 GiB of homes on the host — a f
 to resemble `teller`'s peak above and is not related to it. Lowering the ratio would not help: the gate would
 stop skipping them, the floor would kill them mid-run, and — before the sentinel fix —
 each kill would publish another fragment to S3. This is a disk problem now, not a
-scheduling one. The options are to give `/home/admin_backups` its own volume, to grow the
-root volume (200 GB now, 71% used), or to accept that the two largest accounts are backed
-up by something other than DirectAdmin. It needs a decision; nothing in this repo makes
-one.
+scheduling one — but only half of it is a disk *purchase*, which the next section is about.
+
+### Why `tellerstec` stopped fitting, and why that is the cheapest thing here
+
+Measured 2026-09-08, prompted by a review question about the retention arithmetic. Two
+figures in this document did not reconcile, and chasing the discrepancy was more useful
+than settling it: `tellerstec` archived to **7.7 GiB** on 2026-07-02, and the fragment its
+killed run left on 2026-09-07 was already **20.0 GiB** before it was cut short. An account
+does not triple in two months by accident.
+
+It did not. Of its 34 GB home, **29 GB is `application_backups`** and 5.0 GB is everything
+else — the domains, the mail, the actual site:
+
+```
+/home/tellerstec/application_backups   30G     29 files
+/home/tellerstec/domains              4.3G
+everything else                       ~700M
+```
+
+Those files are Installatron's own application backups, driven by `/etc/cron.d/installatron`,
+about 1.1 GB per app per run for two apps, with no retention limit in evidence. 28.70 GiB
+of the 28.87 GiB total arrived **since 2026-08-28**; the remaining 0.17 GiB is a single
+file from 2024-12-08. That is roughly **2.6 GB a day**, still accumulating.
+
+Three consequences, in order of how soon they matter.
+
+**The volume fills on its own.** 59 GB free against 2.6 GB/day is about three weeks, with
+no backup involved. Everything else in this document is about a disk that filled once;
+this is a disk scheduled to fill again, and it is the only item here with a deadline.
+
+**It is why `tellerstec` no longer fits.** `.tar.gz` files do not compress, so 29 GB of
+them passes through `zstd` essentially unchanged and lands in the account archive at close
+to full size. 7.7 GiB in July plus ~29 GB of incompressible additions is the ~32 GiB the
+2026-09-07 fragment was heading for, and 200% of that is the ~64 GiB peak the gate now
+refuses. Prune them and the account archives to roughly what it did in July, needing about
+16 GiB of peak space against 59.8 GiB free — a comfortable fit, with no new volume.
+
+**It is a backup of a backup.** Every one of those files is an Installatron archive of a
+site that DirectAdmin is also archiving. Backing them up to S3 stores the same content
+twice, and at ~$2.55 per nightly GiB per month at steady state, that redundancy alone is
+about **$74/month** of the $230 figure in [Still open](#still-open).
+
+`teller` is the opposite case and worth stating so the two are not treated alike. Its 55 GB
+is 45 GB of `domains`, 4.0 GB of `Maildir` and 4.5 GB of `imap`, with 35.94 GiB across
+53,591 files already in compressed formats — real content, mostly media, with no
+application backups at all. Nothing to prune. That one is a genuine disk decision.
+
+What to do about it is a judgement call this document does not make, but the options are
+not equivalent. Deleting the old archives reclaims the 29 GB once and it returns in eleven
+days. Capping Installatron's retention is the fix that holds, and is configured per
+installation in its panel rather than on the filesystem. Excluding `application_backups`
+from the DirectAdmin account backup is worth doing either way — DirectAdmin supports
+per-user exclusions and none is configured here — because backing up a backup is waste
+even when it fits. Before deleting anything, confirm with the account owner that
+Installatron's copies are not the intended restore path for those two apps; the account
+backup is not a substitute if it has been excluding them.
 
 ### 2. Find out what `Not implemented` refers to (CLI)
 
@@ -1337,7 +1391,7 @@ Two known causes of task-queue failures worth ruling out while you are in there:
 stopped tolerating it), and a `directadmin.conf` edited on Windows so every value has
 `\r` appended.
 
-### 3. Delete DirectAdmin's backup schedule — this one needs the panel
+### 3. Delete DirectAdmin's backup schedule
 
 An earlier revision of this section said to recreate this job, and the step above it in
 [the order](#do-it-in-this-order) still pointed here to say so. That was written before
@@ -1354,16 +1408,38 @@ full all-users backup at 05:00 the next morning without having asked for one. An
 run that overruns into 05:00 would find DirectAdmin starting a second backup into the same
 staging directory, contending for the same hook lock.
 
-Delete it at **Admin Level → Admin Backup/Transfer → Schedule**. There is no documented
-CLI command to create, edit *or remove* a scheduled backup: the task queue accepts
-`action=backup` for a one-off run and `admin-backup` runs one immediately, but the cron
-entry itself is owned by the GUI wizard. `CMD_API_ADMIN_BACKUP` is the scriptable
-equivalent; DirectAdmin does not document its full parameter list and suggests running DA
-in debug mode to capture what the GUI sends, so the panel is genuinely the lower-risk path
-here.
+**Done 2026-09-08 01:15 EDT, and not through the panel.** An earlier revision of this
+section said the panel was the only way, on the grounds that there is no documented CLI
+command to create, edit or remove a scheduled backup — the task queue accepts
+`action=backup` for a one-off and `admin-backup` runs one immediately, but the wizard owns
+the cron entry, and `CMD_API_ADMIN_BACKUP`'s parameter list is undocumented enough that
+DirectAdmin's own advice is to run the panel in debug mode and capture what it sends.
+
+That reasoning was about the *API*, and it skipped the simpler question of where the
+schedule is actually stored. It is a plain file,
+`/usr/local/directadmin/data/admin/backup_crons.list`, one URL-encoded job per line, read
+by `dataskq` on each pass rather than held in memory — which is why the panel leaves a
+`.bak-<timestamp>` beside it when it writes. There was exactly one job in it:
+
+```
+1=…&dayofmonth=*&dayofweek=*&hour=5&minute=0&owner=admin&type=admin&when=cron&who=all
+```
+
+So the deletion is a file edit that follows the panel's own convention, keeping the
+`diradmin:diradmin` ownership and `600` mode DirectAdmin writes:
+
+```bash
+F=/usr/local/directadmin/data/admin/backup_crons.list
+cp -a "$F" "${F}.bak-agent-$(date +%Y%m%d%H%M%S)"   # same pattern the panel uses
+: > "$F"                                            # one job, so empty is correct
+chown diradmin:diradmin "$F" && chmod 600 "$F"
+```
+
+Emptying rather than deleting the file matters: DirectAdmin expects the path to exist, and
+an empty list is what the panel itself produces when you remove the last schedule.
 
 Confirm it is gone from the stored job list and from the daily log, rather than trusting
-the panel's success message:
+either the panel's success message or the edit above:
 
 ```bash
 cat /usr/local/directadmin/data/admin/backup_crons.list     # id=1 should no longer be here
@@ -1703,29 +1779,34 @@ under [the first real run](#the-first-real-run-2026-09-07-2215-edt). The state l
 - `/home/admin_backups` empty, `/` at 71% used with 60 GB free, unchanged from before the
   run.
 - The truncated object renamed to `…tar.zst.TRUNCATED-DO-NOT-RESTORE`.
-- **Nothing scheduled, and nothing from #122 is on the host.** `/root/wbat-terraform` is
-  still at #120, which is what the deploy above brought it to; `--verify` passing on
-  eleven managed paths is a statement about #120's tooling, not this one's.
-  `/etc/cron.d/da-backup-batch` is not installed, and the temporary copy of the script
-  used for the supervised run has been removed from `/root`. The two fixes that came out
-  of the run **have to be deployed together**: the batch script's watchdog writes
-  `/run/da-backup-abort` before it signals anything, and it is `all_backups_post.sh` that
-  reads the sentinel and refuses to upload. Install one without the other and a floor
-  breach either publishes another fragment to S3 (batch without hook) or leaves a partial
-  archive on disk with nothing to remove it (hook without batch). Once #122 merges:
+- **Deployed and scheduled, 2026-09-08 01:13–01:16 EDT.** `/root/wbat-terraform` is at
+  `7e3d2c2` (#122), and `--verify` passes on all thirteen managed paths rather than the
+  eleven #120 had. `/etc/cron.d/da-backup-batch` is installed and runs at 01:00 daily;
+  DirectAdmin's own 05:00 schedule is
+  [gone](#3-delete-directadmins-backup-schedule). The temporary copy of the script used
+  for the supervised run had already been removed from `/root`.
 
-  ```bash
-  cd /root/wbat-terraform && git fetch origin && git merge --ff-only origin/main
-  sudo ./scripts/directadmin/install_da_vhost_listen.sh --install
-  ./scripts/directadmin/install_da_vhost_listen.sh --verify   # thirteen paths, not eleven
-  ```
-
-  `--install` is also what creates the 01:00 cron entry, so DirectAdmin's own schedule
-  should be [deleted](#3-delete-directadmins-backup-schedule--this-one-needs-the-panel) in
-  the same sitting. Until all of that happens, account backups are not happening on a
-  schedule.
-- `tellerstec` and `teller` have no current backup and will not get one from this tooling
-  without more disk.
+  The two fixes that came out of the run **had to be deployed together**, and were: the
+  batch script's watchdog writes `/run/da-backup-abort` before it signals anything, and it
+  is `all_backups_post.sh` that reads the sentinel and refuses to upload. Installing one
+  without the other means a floor breach either publishes another fragment to S3 (batch
+  without hook) or leaves a partial archive on disk with nothing to remove it (hook
+  without batch). A single `--install` covers both.
+- **The deployed chain was proved end to end** at 01:16 EDT with `--user=wbat`, the
+  smallest account with real content: archived to `user.admin.wbat.tar.zst`, read back
+  through `zstd -dc | tar -tf` by the hook before upload, copied to `server/2026-09-08/`,
+  `rclone check` clean, local copy removed, five seconds, no sentinel left behind. This is
+  the first run in which the integrity check was in the path.
+- **The corrected sizing changed which accounts fit**, and it is worth recording the
+  before-and-after because the old numbers are what the 2026-09-07 alert emails contain.
+  Under the old model `tellerstec` estimated at 33.4 GB and was attempted; under the
+  measured 200% model it needs about 66.8 GB of peak space and `teller` about 108.1 GB,
+  against 59.8 GB free. Eleven accounts fit, two do not, and the gate now refuses them up
+  front rather than discovering it at the floor.
+- `tellerstec` and `teller` therefore have no current backup and will not get one from
+  this tooling without more disk. Their most recent readable archives are from
+  2026-07-02 and were confirmed whole by the read-back sweep, so they are stale rather
+  than missing.
 
 ## Re-running the evidence capture
 
@@ -1777,14 +1858,49 @@ could not be read, so it can gate a restore decision. Results of the first run a
   four and a half hours during this outage with no notification. That is a metric EC2
   emits for free, needs no agent, and would have caught this — the cheapest available
   improvement, and it belongs in Terraform.
-- **The two largest accounts cannot be backed up on this volume.** `tellerstec` needs
-  about 64 GiB of peak local space and `teller` about 87 GiB, against 59.8 GiB free, and
-  the reason is DirectAdmin's own behaviour rather than anything schedulable — it holds
-  the assembled parts of a backup and the archive built from them on disk at the same
-  time. The other twelve accounts fit comfortably. Deciding this needs a person: a
-  dedicated volume for `/home/admin_backups`, a bigger root volume (200 GB, 71% used), or
-  a different mechanism for those two accounts. Measurements are under
-  [the first real run](#the-first-real-run-2026-09-07-2215-edt).
+- **The two largest accounts cannot be backed up on this volume, but only one of them is
+  really a disk problem.** `tellerstec` needs about 64 GiB of peak local space and
+  `teller` about 87 GiB, against 59.8 GiB free, because DirectAdmin holds the assembled
+  parts of a backup and the archive built from them on disk at the same time. The other
+  eleven fit comfortably and now run nightly. The two are not the same case, though, and
+  treating them as one is what made this look like a hardware purchase:
+  [`tellerstec` is 85% backups of itself](#why-tellerstec-stopped-fitting-and-why-that-is-the-cheapest-thing-here),
+  and pruning them costs nothing and has to happen anyway. Only `teller` — 55 GB of real
+  mail, media and web content, 43.4 GiB archived — genuinely needs more room. For that
+  one, the root volume is a 200 GB `gp3` at 71% used, so at $0.08/GB-month:
+
+  | Option | Change | Cost | Covers |
+  |---|---|---|---|
+  | Dedicated volume for `/home/admin_backups` | new 100 GB `gp3`, mounted, `local_path` unchanged | ~$8/mo | `teller`, and staging stops competing with `/` entirely, which is the failure this whole document is about |
+  | Grow the root volume | 200 GB → 300 GB | ~$8/mo | `teller`, but keeps staging and live data on one volume, so a runaway backup can still threaten the host |
+  | Do neither, keep `teller` on July's archive | free | Nothing. Its last backup is whole but ages a day every day |
+
+  At the same price the dedicated volume is the better of the two, because it also removes
+  the coupling. One thing changes with it: the floor and the reserve then apply to *that*
+  filesystem, and 8 GB against 100 GB is not the same proposition as 8 GB against 200 GB.
+  That is a mount rather than a code change — `da_backup_batch.sh` reads `df` for the
+  staging path — but it wants a `--dry-run` before the first real run.
+
+  **The storage cost is the part most likely to change the answer, and it is not small.**
+  Under the bucket's lifecycle — Standard for 30 days, `STANDARD_IA` to 90, `GLACIER_IR`
+  to 365, then expiry — a nightly GiB settles at roughly $2.55/month once a full year has
+  accumulated. So:
+
+  | Nightly set | Per night | Steady state | Cost |
+  |---|---|---|---|
+  | The eleven that fit today | 14.96 GiB | ~4.9 TB | ~$38/mo |
+  | All thirteen, `tellerstec` as it is now | ~90.4 GiB | ~30 TB | **~$230/mo** |
+  | All thirteen, `tellerstec` pruned | ~66 GiB | ~22 TB | ~$168/mo |
+  | Eleven + pruned `tellerstec` nightly, `teller` weekly | ~29 GiB | ~9.7 TB | ~$74/mo |
+
+  An earlier revision of this section put the all-thirteen figure at 66 GiB, reasoning from
+  the 2026-07-02 full run, which really was 66.055 GiB. That is now wrong, and the reason
+  it is wrong is the same finding as above: in July `tellerstec` archived to 7.7 GiB, and
+  today it would archive to about 32 GiB. Reasoning from the last complete run is only safe
+  while nothing has changed underneath it. The last line of the table is the one worth
+  considering: if `teller` does not need daily granularity, a weekly `--user=` run gets
+  most of the protection for a third of the cost of doing everything nightly. Per-account
+  sizes are under [the first real run](#the-first-real-run-2026-09-07-2215-edt).
 - **Restore has never been rehearsed** — though the archives have now been read.
   [The 2026-09-08 sweep](#is-what-is-already-in-s3-readable-a-read-back-of-every-archive-2026-09-08)
   read every compressed object in the bucket and settled the readability half of this:
@@ -1797,16 +1913,15 @@ could not be read, so it can gate a restore decision. Results of the first run a
   sub-megabyte accounts (`test2`, `brian2`, `aubrey`) into a scratch account. The change
   from before is that a rehearsal now starts from an archive known to be whole, so a
   failure would be attributable to the restore path rather than to the backup.
-- **The sweep has no trigger yet, and gets one with #122.**
+- **The sweep now has a trigger, and it has not yet been exercised.**
   `sweep_old_system_dirs` in `all_backups_post.sh` is what keeps `/backup` from
   accumulating, and the hook only runs when DirectAdmin fires a backup event. That is why
-  the two directories left there on 2026-09-07 had to be verified and removed by hand. It
-  is no longer true that no such event happens — the supervised batch run fired the hook
-  twelve times — but nothing is *scheduled*, so nothing sweeps on its own today, while the
-  weekly `sysbk` run restored in step 4 adds about 7.4 GB every Saturday. Installing
-  `/etc/cron.d/da-backup-batch` fixes this as a side effect: each nightly run fires the
-  hook, which uploads the week and then sweeps what it can confirm. Worth checking after
-  the first Saturday that follows the deploy, because it is the first time that path runs
-  against a directory it did not create.
+  the two directories left there on 2026-09-07 had to be verified and removed by hand.
+  `/etc/cron.d/da-backup-batch` was installed on 2026-09-08 and fixes this as a side
+  effect: each nightly run fires the hook, which uploads the week and then sweeps what it
+  can confirm. What is still unverified is the sweep itself. The weekly `sysbk` run
+  restored in step 4 adds about 7.4 GB every Saturday, and **the first Saturday after the
+  deploy is 2026-09-12** — worth watching, because it is the first time that path runs
+  against a directory the hook did not create.
 - **`/usr/local/sbin/migrate-backups-to-s3.sh` and `verify-backups-s3.sh`** exist on the
   host, are not in this repository, and were not examined.
