@@ -996,15 +996,29 @@ This is also the cleanest diagnostic split available:
 - **It fails the same way** → the fault is in DirectAdmin itself, and step 2's debug
   output is what to send to DA support.
 
-**On the eventual full run.** `all_backups_post.sh` is DirectAdmin's *all backups*
-hook — it fires once, after every account has been archived, so peak local usage is the
-sum of all archives at once (~45 GB, dominated by `teller` at 43.4 GB). Step 2 of the
-order above leaves roughly 52 GB free, which covers it but not comfortably. Two ways to
-avoid needing that headroom at all, neither implemented here: back up a few accounts at a
-time with repeated `--user=` runs, letting the hook clear each batch; or move the upload to
-DirectAdmin's per-user `user_backup_post.sh` hook so each archive is uploaded and deleted
-as it is produced, which would cap peak usage at the largest single account instead of the
-sum. The second is the better answer if `teller` keeps growing.
+**On the eventual full run — it no longer fits.** `all_backups_post.sh` is DirectAdmin's
+*all backups* hook. It fires once, after every account has been archived, so peak local
+usage is the sum of all archives at once. The last full run that completed, on 2026-07-02,
+put **66.055 GiB across 13 objects** into S3, and the accounts have grown since (`teller`
+alone is now 55 GB of the 114 GB under `/home`). The cleanup in step 2 of the order above,
+plus the `/backup` reclaim on 2026-09-07, leaves **60 GB free**. A full run therefore
+needs more space than the volume has, and
+would drive it to 100% before the hook ever gets to upload anything — the outage this
+document exists to prevent.
+
+So do not schedule a full local run on this volume. Pick one of:
+
+- **Batch it.** Repeated `--user=` runs, a few accounts at a time, letting the hook upload
+  and clear each batch before the next. Peak usage becomes the largest batch.
+- **Move the upload per-user.** DirectAdmin's `user_backup_post.sh` hook fires after each
+  account, so each archive is uploaded and deleted as it is produced. Peak usage becomes
+  the largest single account — 43.4 GB for `teller` at the last measurement, still large
+  but survivable. This is the better answer if `teller` keeps growing.
+- **Give it somewhere else to write.** A separate EBS volume mounted at
+  `/home/admin_backups` decouples backup staging from the root filesystem entirely.
+
+None of these are implemented. Until one is, the daily job failing is arguably protecting
+the host.
 
 ### 2. Find out what `Not implemented` refers to (CLI)
 
@@ -1087,6 +1101,83 @@ Note that step 3 makes this partly redundant: admin backups include databases, s
 they work again the system backup matters mainly for server configuration. Both are worth
 having, but fix the admin backup first.
 
+## State of the host as of 2026-09-07 21:30 EDT
+
+Merging the fixes in this repository does not change the host — there is no deploy
+pipeline. The following was applied over SSM after #120 merged, and verified read-only
+afterwards.
+
+**The pipeline fix is live and matches what is now on `main` of the website repository.**
+`store.py` and `ingest.py` under
+`/home/tellerstec/public_html/wp-content/plugins/tellerstech-landing/oncallbrief-pipeline/`
+hash `0dcf0b08…` and `9d4fa5cd…`, byte-identical to the files merged as
+TellersTechOrg/tellerstech-website#1393, and `tests/test_dedupe_backlog.py` is present.
+That directory is not a git checkout, so deploys there are manual copies; the merge
+matters because the next manual copy now carries the fix instead of reverting it.
+
+**The timer has not yet run the fixed code.** `oncallbrief.service` still records
+`Result=oom-kill` from Sep 7 03:45 — the last time it fired, which was before the query
+fix was deployed. The verification run that measured 667 MB was a separate transient unit,
+so the scheduled path itself is unproven. Sep 8 03:45 EDT is the first timer run under the
+fix; the things to check afterwards are `systemctl show oncallbrief.service -p Result`,
+whether the healthcheck went green, and whether `sar -S` shows any swap at all around
+03:45.
+
+**The ops tooling was five commits stale, and two pieces had never been installed.** The
+checkout at `/root/wbat-terraform` was at #112, which predates the backup hooks being
+managed at all. `--verify` reported both hooks `STALE` and the disk guard, its cron entry,
+and the logrotate config all `MISSING (never installed)`. Every P1 and P2 fixed across
+#114 through #119 — the quiescence deferral, verified-before-delete, the recorded S3
+destination sidecar, the `find` status checks — was sitting in git and not running. After
+`git merge --ff-only origin/main` and `install_da_vhost_listen.sh --install`, `--verify`
+passes on all eleven managed paths. Rollback copies of the previous hooks and of root's
+crontab are in `/root/da-ops-rollback-20260907-212741/`.
+
+**The disk guard works, and its first run was a true positive.** It reported `/` at 74%
+with 52.4 GB free and inodes at 1%, then flagged swap: 17% in use at the time, but
+**peaking at 74% at 03:50 today** — the moment the memory-capped pipeline run was
+OOM-killed. It mailed `brianateller@gmail.com`. That alert should stop appearing once a
+run completes without swapping; if it recurs after a clean run, something else is
+thrashing.
+
+**Step 4 above is done.** Root's crontab now reads `0 5 * * 6 /usr/local/sysbk/sysbk -q`
+instead of `/usr/local/directadmin/shared/sysbk.sh -q`. The cron log makes the difference
+unambiguous: the Aug 15, 22 and 29 runs of the old script each took about 22 minutes, and
+`/backup/08-29-26` holds 5.6 GB of `custom/` and 1.9 GB of `mysql/` including a 1.08 GB
+`full-mysql.tar.gz`. The Sep 5 run of the replacement started and ended in the same second
+and produced a single 55 KB `sysbk-09-05-26.tar.zst` containing `/etc/nginx`, `/etc/httpd`,
+`/var/named` and `/etc/named.conf`. Next run is Saturday 05:00; expect gigabytes and a
+`mysql/` directory.
+
+Worth being precise about why the replacement is empty rather than broken:
+`/usr/local/directadmin/shared/sysbk.sh` *can* dump databases — it calls `mysqldump` — but
+it sources `/usr/local/directadmin/data/admin/sysbk.conf`, and on this host that file
+still contains legacy SysBK-1.0 configuration (`MYSQL_BK="1"`, `CUSTOM_BK="1"` and so on).
+The variable names do not match what DirectAdmin's script reads, so it silently did the
+handful of paths whose defaults happened to line up and skipped everything else.
+
+**Admin backups have been failing every day for two months, silently.** This sharpens the
+"newest backup is 2026-07-02" note below into something with a mechanism.
+`/var/log/directadmin/system.log*` shows `Running Backup: type=admin owner=admin id=1` at
+05:00 every single day from Aug 17 through Sep 7 without a gap, so the schedule is intact
+and firing. But `/home/admin_backups` is empty and its own mtime is **Jul 2 05:52**, and
+`/var/log/da-backup-s3.log` has not been written since the same minute. The engine is not
+merely producing incomplete archives — it is not creating a file at all, and the hook has
+had nothing to fire on since July. Nothing alerts on this: DirectAdmin logged no error,
+raised no ticket, and the daily failure is invisible from the panel.
+
+Do not simply re-enable or recreate the job. As the arithmetic in step 1 now shows, a
+successful full run needs 66+ GiB of local staging against 60 GB free, so "fixing" the
+trigger without first changing where the archives are written would fill the volume at
+05:00 the next morning.
+
+**`/backup` is empty again, and 7.4 GB came back.** `09-05-26` and `08-29-26` were the
+last two directories left there. Both were verified against S3 with
+`rclone check --checksum --one-way` — 2 and 136 files respectively, zero differences —
+and only then deleted. The volume went from 74% to **71% used, 60 GB free**. Note that the
+weekly `sysbk` run restored in step 4 writes roughly 7.4 GB every Saturday, and nothing
+currently sweeps it: see the last point under "Still open".
+
 ## Re-running the evidence capture
 
 [`collect-outage-evidence.sh`](collect-outage-evidence.sh) collects everything above
@@ -1114,9 +1205,9 @@ files at all.
   occurrence answerable.
 - **No CloudWatch disk or memory alarm exists.** The only alarms in this account are the
   two billing alarms in [`billing-alarms.tf`](../global/cloudwatch/billing-alarms.tf).
-  [`da_disk_guard.sh`](../../scripts/directadmin/da_disk_guard.sh) added here covers disk,
-  inodes, and memory, but it is hourly cron on the host — exactly what a thrashing box
-  cannot run. It reads `sar` history specifically so it can report a spike it slept
+  [`da_disk_guard.sh`](../../scripts/directadmin/da_disk_guard.sh), installed on the host
+  on 2026-09-07, covers disk, inodes, and memory, but it is hourly cron on the host —
+  exactly what a thrashing box cannot run. It reads `sar` history specifically so it can report a spike it slept
   through, but that is after the fact. An alarm that can page during the event needs the
   CloudWatch agent publishing `disk_used_percent` and `mem_used_percent`, plus
   `aws_cloudwatch_metric_alarm` resources beside the billing alarms.
@@ -1125,6 +1216,15 @@ files at all.
   emits for free, needs no agent, and would have caught this — the cheapest available
   improvement, and it belongs in Terraform.
 - **Restore has never been rehearsed**, and the bucket's newest primary backup is from
-  2026-07-02. Whatever is restorable today is over two months stale.
+  2026-07-02. Whatever is restorable today is over two months stale. The daily admin
+  backup has been starting on schedule and producing nothing that whole time; see the
+  2026-09-07 state section above for the evidence and for why re-enabling it as-is would
+  fill the volume.
+- **The sweep has no trigger.** `sweep_old_system_dirs` in `all_backups_post.sh` is what
+  is supposed to keep `/backup` from accumulating, but the hook only runs when
+  DirectAdmin fires a backup event — which, per the point above, has not happened since
+  July. The two directories left there on 2026-09-07 had to be verified and removed by
+  hand. Until admin backups work, nothing sweeps `/backup` on its own, and the weekly
+  `sysbk` run restored in step 4 will start adding about 7.4 GB every Saturday.
 - **`/usr/local/sbin/migrate-backups-to-s3.sh` and `verify-backups-s3.sh`** exist on the
   host, are not in this repository, and were not examined.
