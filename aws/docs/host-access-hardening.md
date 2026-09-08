@@ -17,24 +17,45 @@ anyway, so they were never really private.
 Three changes make the disclosure inert:
 
 1. **Key-only SSH** — no password path to guess against.
-2. **A fail2ban that actually bans** — rate-limits every remaining password
-   path, chiefly DirectAdmin, mail, and FTP, which cannot go key-only.
+2. **A rate limiter that actually bans** — CSF's lfd here, fail2ban elsewhere;
+   covers every remaining password path, chiefly DirectAdmin, mail, and FTP,
+   which cannot go key-only.
 3. **A restricted 2222** — takes the DirectAdmin panel off the open internet.
+
+A fourth is not about the names at all but shows up in the same audit: no
+datastore should be listening on a public interface. `lfd` and `fail2ban` do not
+sit in front of MySQL, and a success there is the whole dataset rather than one
+account. See [Bound is not the same as reachable](#bound-is-not-the-same-as-reachable).
 
 ## Measure first
 
 ```bash
-sudo /usr/local/sbin/host-access-audit.sh          # or run from the repo
+# The audit is installed with the rest of the host tooling, so pull and install
+# first -- an audit predating the checks it is trusted to make is the one kind
+# of stale copy that actively misleads.
+cd /root/wbat-terraform && git pull
+sudo ./scripts/directadmin/install_da_vhost_listen.sh --install
+
+sudo /usr/local/sbin/host-access-audit.sh          # read-only posture report
 sudo /usr/local/sbin/host-access-audit.sh --json   # for automation
 ```
 
 Read-only: it never edits a config, restarts a service, or touches a firewall.
 Do not skip it — the steps below are written against what it reports, and
-several of them are no-ops or actively wrong depending on the baseline. In
-particular, `fail2ban/effective` reporting zero bans on an internet-facing host
-almost always means a jail is watching a logpath that does not exist on this
-distro, which is a different problem from fail2ban being absent and has a
-different fix.
+several of them are no-ops or actively wrong depending on the baseline. Two
+readings in particular are not what they first look like:
+
+- `exposure/da-panel` is a statement of fact, not a verdict: 2222 bound and
+  passed by `TCP_IN` only means the host accepts the connection. Whether
+  anything can reach it is `exposure/da-panel-sg`, which asks EC2 — and usually
+  skips, because the instance profile cannot describe security groups. Run the
+  command it prints from a workstation.
+- `ratelimit/lfd-coverage` failing names services whose lfd threshold is `0`.
+  That is a service nobody is watching, not a missing tool, and installing
+  fail2ban would make it worse rather than better.
+- `fail2ban/effective` reporting zero bans for a jail on an internet-facing
+  host almost always means it is watching a logpath that does not exist on this
+  distro — a different problem from fail2ban being absent, with a different fix.
 
 ## The safety net: SSM is not on the path you are about to break
 
@@ -95,15 +116,51 @@ took rather than assuming the file was read.
 
 Rollback: delete the drop-in, `sshd -t`, reload.
 
-## 2. fail2ban that demonstrably bans
+## 2. A rate limiter that demonstrably bans
 
 DirectAdmin, mail, and FTP all accept passwords by design and cannot be made
 key-only, so this is what protects them.
+
+**Check which engine this host already runs before installing anything.** Two
+tools do this job and the box should have exactly one:
+
+```bash
+sudo systemctl is-active lfd        # CSF's login failure daemon
+sudo systemctl is-active fail2ban
+```
+
+CSF/lfd is what a DirectAdmin build normally ships, and it is what
+`server.wbat.net` runs. **Do not add fail2ban next to it.** Both write their own
+iptables rules from their own state, so they unblock each other's bans and you
+end up with less protection than either alone, plus a firewall nobody can
+reason about. If `lfd` is active, skip the install and go to the CSF section
+below.
+
+<details>
+<summary>If neither is present, and you are choosing fail2ban</summary>
 
 ```bash
 sudo dnf install -y fail2ban
 sudo systemctl enable --now fail2ban
 ```
+
+</details>
+
+### CSF/lfd
+
+lfd's per-service thresholds live in `/etc/csf/csf.conf`. A setting of `0`
+disables watching for that service entirely, so read the values, not the keys:
+
+```bash
+sudo grep -E '^LF_(SSHD|DIRECTADMIN|SMTPAUTH|POP3D|IMAPD|FTPD)' /etc/csf/csf.conf
+```
+
+Every one of those should be a small non-zero number — they map exactly onto the
+password paths the published account names can reach. `LF_DIRECTADMIN=0` in
+particular means the 2222 panel is unmetered, which is the highest-value target
+on the box.
+
+After any change: `sudo csf -r` to reload.
 
 DirectAdmin ships log scanning that writes to `/var/log/directadmin/security.log`
 and can feed a jail. Enable DA's own scanner too — it catches panel, FTP, and
@@ -187,6 +244,25 @@ The empty default is load-bearing. With no entries, no operator rule is
 created and nothing changes, so a missing variable cannot lock anyone out by
 omission.
 
+### State as of the last apply
+
+2222 is **closed to the internet**. The world-open rule was revoked and
+`da-panel.tf` applied, and `da_panel_allowed_cidrs` is currently empty, so the
+only rules on 2222 are the two server EIPs and the group self-reference. Panel
+access is therefore by SSM port-forward only, which is the end state described
+below rather than a gap to fix.
+
+Verified from outside AWS, from a host on no allowlist: 2222 and 3306 both
+time out while 443 answers. The timeout rather than a refusal is the tell — a
+security group drops, where a host firewall rejecting or a closed port returns
+`RST` immediately. Port 22 also times out from there, which is worth knowing
+because CSF's `TCP_IN` does allow 22: SSH is restricted at the security group,
+not by the host, so a broken allowlist entry cannot be worked around by
+falling back to SSH from an arbitrary address. SSM remains the path that does
+not depend on any of this.
+
+The procedure below is kept for the next time these rules change.
+
 ### The order that avoids locking yourself out
 
 Adding these rules **does not close 2222**. The existing `0.0.0.0/0` rule was
@@ -212,9 +288,16 @@ terraform output da_panel_allowed_sources
 ```bash
 aws ec2 describe-security-groups --profile wbat --region us-east-1 \
   --group-ids sg-0e674f4e2937c6392 \
-  --query "SecurityGroups[].IpPermissions[?FromPort==\`2222\`].[IpRanges[].[CidrIp,Description]]" \
+  --query "SecurityGroups[].IpPermissions[?IpProtocol=='-1' || (FromPort<=\`2222\` && ToPort>=\`2222\`)][].[IpRanges[].[CidrIp,Description], Ipv6Ranges[].[CidrIpv6,Description], UserIdGroupPairs[].[GroupId,Description]][][]" \
   --output text
 ```
+
+Three details in that filter are load-bearing, and each one is a way for an
+open 2222 to look closed: the `[]` after the filter (without it the projection
+stays nested per security group and a trailing `.IpRanges[].CidrIp` evaluates to
+nothing at all), the IPv6 and group-reference columns, and matching a *range*
+containing 2222 plus `-1` all-traffic rules, which carry no `FromPort`.
+`exposure/da-panel-sg` in the audit asks the same question with the same filter.
 
 4. **Then revoke the world-open rule**, and keep the command that puts it back
    in your shell history before you run it:
@@ -272,6 +355,42 @@ at the next provisioning event.
 
 That is the better end state: 2222 closed to the internet entirely, reachable
 only to an authenticated AWS principal.
+
+## Bound is not the same as reachable
+
+The audit lists every port bound to `0.0.0.0`, then judges them against CSF's
+`TCP_IN`. Those are two different facts and they call for different responses:
+
+```bash
+sudo ss -lntp | grep '0\.0\.0\.0'          # what is listening on every interface
+sudo grep -E '^(TCP_IN|TCP6_IN)' /etc/csf/csf.conf   # what CSF lets in
+```
+
+A port that is bound **and** in `TCP_IN` is reachable from the internet right
+now. A port that is bound but absent from `TCP_IN` is firewalled today and
+exposed the moment CSF is stopped, flushed, or reinstalled — which happens
+during maintenance, and it is not a state you want a database in.
+
+`3306` is the one to care about on this host. Neither lfd nor fail2ban rate
+limits MySQL, and a compromise there is every site's data rather than one
+account. If nothing connects to MySQL over the network — and on a single-box
+DirectAdmin build nothing does, since PHP talks to it over localhost — bind it
+to loopback:
+
+```ini
+# /etc/my.cnf, under [mysqld]
+bind-address = 127.0.0.1
+```
+
+Then `systemctl restart mysqld` (or `mariadb`) and re-run the audit;
+`exposure/datastore` should go to `OK`. Restarting the database drops open
+connections, so treat it as a brief maintenance window rather than a live edit.
+
+The plaintext mail and FTP ports (`21`, `110`, `143`) are a lower-grade version
+of the same question: they accept credentials without implicit TLS, and their
+TLS-native equivalents (`465`, `993`, `995`) are already open. Closing them is a
+client-compatibility decision, not a technical one, so the audit warns rather
+than failing.
 
 ## Verify
 

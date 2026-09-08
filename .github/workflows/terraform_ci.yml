@@ -57,6 +57,14 @@ jobs:
         run: bash ./scripts/directadmin/prove_install_verify.sh
       - name: Offline disk evidence verdict proof
         run: ./aws/docs/prove-outage-evidence-verdict.sh
+      # jmespath is installed explicitly rather than relied on from the runner's
+      # awscli: one case evaluates the audit's own security-group query, and it
+      # has to be the same engine the CLI uses for the result to mean anything.
+      - name: Offline host access audit proof
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet --disable-pip-version-check jmespath
+          ./scripts/directadmin/prove_host_access_audit.sh
 
   validate:
     name: Validate (${{ matrix.workspaces }})
