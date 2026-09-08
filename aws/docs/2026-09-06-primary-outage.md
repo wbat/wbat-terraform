@@ -973,14 +973,24 @@ That is enough headroom for the DirectAdmin steps. Then deploy the fixed tooling
 does not recur:
 
 ```bash
-cd /root/wbat-terraform && git pull
+cd /root/wbat-terraform && git fetch origin && git merge --ff-only origin/main
 sudo ./scripts/directadmin/install_da_vhost_listen.sh --install
 ./scripts/directadmin/install_da_vhost_listen.sh --verify
 /usr/local/sbin/da-disk-guard.sh --report
 ```
 
+`--ff-only` rather than `git pull`: the host checkout is a deploy target, not a place to
+resolve a merge. If it will not fast-forward, something has been edited on the box and that
+is the thing to find out about — which is the same failure `--verify` catches downstream.
+
 `--verify` matters: the primary's hook was hand-edited and matched no commit, so a merged
 fix would not otherwise have been running.
+
+Note what `--install` now covers. As well as the two hooks and the disk guard, it installs
+`da-backup-batch.sh` and `/etc/cron.d/da-backup-batch`, so running it schedules account
+backups at 01:00. That is the intended outcome, but it means DirectAdmin's own schedule
+should be [deleted](#3-delete-directadmins-backup-schedule--this-one-needs-the-panel) in the
+same sitting rather than afterwards.
 
 ## DirectAdmin remediation — what to run, and what needs the panel
 
@@ -1212,14 +1222,28 @@ the in-flight figure.
 
 On the corrected model, with 59.8 GiB free:
 
-| Account | Home | Peak needed | Verdict |
-| --- | --- | --- | --- |
-| tellerstec | 33.4 GiB | ~64 GiB | does not fit |
-| teller | 54.0 GiB | ~87 GiB | does not fit |
+| Account | Home | Archive | Peak needed | Verdict |
+| --- | --- | --- | --- | --- |
+| tellerstec | 33.4 GiB | ~32 GiB (inferred) | ~64 GiB | does not fit |
+| teller | 54.0 GiB | 43.4 GiB (measured) | ~87 GiB | does not fit |
 
-`teller`'s figure is consistent with its July archive of 43.4 GB. Together they are 87.4
-GiB of the 114 GiB of homes on the host, so **per-account batching gets twelve of fourteen
-accounts and cannot get the other two.** Lowering the ratio would not help: the gate would
+Both peaks are twice the archive, which is the model the `wbatnet` measurement above
+establishes. Only one of the two archive figures is measured: `teller`'s July object,
+`server/2026-07-02/user.wbatnet.teller.tar.zst`, is 46,585,095,564 bytes — 43.4 GiB, not
+43.4 GB, and the distinction matters because it is doubled to reach the peak.
+`tellerstec`'s is inferred from the killed run, which had 51.8 GiB on the volume and a
+20.02 GiB outer archive written when the floor stopped it; that leaves about 31.8 GiB of
+assembled parts, and an outer archive of roughly the same size again.
+
+The gate itself uses neither figure, because when it runs the archive does not exist yet.
+It estimates from the home directory — 100% of home for the archive, taken twice over —
+which comes out at 66.8 GiB for `tellerstec` and 108 GiB for `teller`. Both are larger than
+the table, so the gate skips both accounts a fortiori. The table is the honest lower bound;
+the gate is deliberately more pessimistic than it.
+
+Either way **per-account batching gets twelve of fourteen accounts and cannot get the other
+two.** Those two hold 87.4 GiB of the 114 GiB of homes on the host — a figure that happens
+to resemble `teller`'s peak above and is not related to it. Lowering the ratio would not help: the gate would
 stop skipping them, the floor would kill them mid-run, and — before the sentinel fix —
 each kill would publish another fragment to S3. This is a disk problem now, not a
 scheduling one. The options are to give `/home/admin_backups` its own volume, to grow the
@@ -1418,13 +1442,27 @@ under [the first real run](#the-first-real-run-2026-09-07-2215-edt). The state l
 - `/home/admin_backups` empty, `/` at 71% used with 60 GB free, unchanged from before the
   run.
 - The truncated object renamed to `…tar.zst.TRUNCATED-DO-NOT-RESTORE`.
-- **Nothing scheduled.** `/etc/cron.d/da-backup-batch` is not installed, and the
-  temporary copy of the script used for the supervised run has been removed from
-  `/root`. The fixes for what the run found are on the `da_backup_batch.sh` branch and are
-  not on the host — the batch script and the upload hook have to be installed together,
-  because the sentinel is written by one and honoured by the other. Until
-  `install_da_vhost_listen.sh --install` is re-run after that merges, account backups are
-  still not happening on a schedule.
+- **Nothing scheduled, and nothing from #122 is on the host.** `/root/wbat-terraform` is
+  still at #120, which is what the deploy above brought it to; `--verify` passing on
+  eleven managed paths is a statement about #120's tooling, not this one's.
+  `/etc/cron.d/da-backup-batch` is not installed, and the temporary copy of the script
+  used for the supervised run has been removed from `/root`. The two fixes that came out
+  of the run **have to be deployed together**: the batch script's watchdog writes
+  `/run/da-backup-abort` before it signals anything, and it is `all_backups_post.sh` that
+  reads the sentinel and refuses to upload. Install one without the other and a floor
+  breach either publishes another fragment to S3 (batch without hook) or leaves a partial
+  archive on disk with nothing to remove it (hook without batch). Once #122 merges:
+
+  ```bash
+  cd /root/wbat-terraform && git fetch origin && git merge --ff-only origin/main
+  sudo ./scripts/directadmin/install_da_vhost_listen.sh --install
+  ./scripts/directadmin/install_da_vhost_listen.sh --verify   # thirteen paths, not eleven
+  ```
+
+  `--install` is also what creates the 01:00 cron entry, so DirectAdmin's own schedule
+  should be [deleted](#3-delete-directadmins-backup-schedule--this-one-needs-the-panel) in
+  the same sitting. Until all of that happens, account backups are not happening on a
+  schedule.
 - `tellerstec` and `teller` have no current backup and will not get one from this tooling
   without more disk.
 
