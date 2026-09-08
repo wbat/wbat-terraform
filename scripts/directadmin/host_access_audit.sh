@@ -152,7 +152,12 @@ audit_ssh() {
   if [ -n "$allow" ]; then
     report OK "ssh/allowlist" "$allow"
   else
-    report WARN "ssh/allowlist" "no AllowUsers/AllowGroups -- every account with a shell can attempt SSH"
+    # Worth spelling out, because with passwords already off this reads as
+    # cosmetic and is not: a DirectAdmin home directory is writable by that
+    # site's own PHP, so a web compromise can append to ~/.ssh/authorized_keys
+    # and convert itself into interactive SSH that survives cleaning the site.
+    # An allowlist refuses the account whether or not a key was planted.
+    report WARN "ssh/allowlist" "no AllowUsers/AllowGroups -- every account with a shell may attempt SSH, and site PHP can write its own owner's ~/.ssh/authorized_keys, so a compromised site can promote itself to durable shell access"
   fi
 }
 
