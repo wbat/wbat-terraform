@@ -223,6 +223,21 @@ run_batch() {
   echo $?
 }
 
+# A run's watchdog leaves a `sleep` of up to one WATCH_INTERVAL behind it, and that sleep
+# inherited the lock file descriptor, so an invocation started in the same instant as the
+# previous one finished can find the lock still held -- and a --list that loses that race
+# exits 0 having printed nothing, which would read here as a formatting failure. This is
+# the harness's problem rather than the script's: proof 10 is where holding the lock is the
+# behaviour under test.
+wait_for_lock() {
+  local _
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    flock -n "${CASE}/batch.lock" -c true 2>/dev/null && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
 echo "Proving da_backup_batch.sh against the ways it could refill the disk"
 echo
 
@@ -356,6 +371,7 @@ assert "exit 0 once the exclusion is in place" "[[ '$rc' == 0 ]]"
 assert "the same account, the same free space, and now it is archived" "grep -qx mostlybackups '$STUB_DA_CALLS'"
 assert "the log shows what was taken off rather than quietly using a smaller number" "grep -q 'less .* GB excluded' '${CASE}/batch.log'"
 
+assert "the lock from the run above has been released" "wait_for_lock"
 RESERVE_GB=0
 rc="$(run_batch --list)"
 unset RESERVE_GB
