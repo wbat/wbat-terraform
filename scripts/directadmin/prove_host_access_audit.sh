@@ -397,6 +397,25 @@ sg_run() {
 sg_run "$TMP/sg-none.txt" | grep -q 'closed to the internet entirely' \
   || { echo "FAIL: closed and restricted should be distinguishable" >&2; exit 1; }
 
+# ::/0 is exactly as open as 0.0.0.0/0, and a rule set of only null columns is
+# the CLI's way of printing "no sources", not a set of allowed addresses.
+printf '::/0\n' >"$TMP/sg-v6.txt"
+printf 'None\tNone\tNone\tNone\n' >"$TMP/sg-nulls.txt"
+printf 'pl-0abc123\n' >"$TMP/sg-prefix.txt"
+printf 'sg-0e674f4e2937c6392\n' >"$TMP/sg-selfref.txt"
+[ "$(sg_run "$TMP/sg-v6.txt" | verdict_for exposure/da-panel-sg)" = "FAIL" ] \
+  || { echo "FAIL: ::/0 on 2222 is an open panel" >&2; exit 1; }
+[ "$(sg_run "$TMP/sg-nulls.txt" | verdict_for exposure/da-panel-sg)" = "OK" ] \
+  || { echo "FAIL: all-null columns mean no sources, not restricted sources" >&2; exit 1; }
+sg_run "$TMP/sg-nulls.txt" | grep -q 'closed to the internet entirely' \
+  || { echo "FAIL: all-null columns should read as closed" >&2; exit 1; }
+# A prefix list is an indirection this vantage point cannot see through, so it
+# is neither a pass nor a failure -- claiming either would be inventing a fact.
+[ "$(sg_run "$TMP/sg-prefix.txt" | verdict_for exposure/da-panel-sg)" = "WARN" ] \
+  || { echo "FAIL: an unexpanded prefix list must not read as restricted" >&2; exit 1; }
+[ "$(sg_run "$TMP/sg-selfref.txt" | verdict_for exposure/da-panel-sg)" = "OK" ] \
+  || { echo "FAIL: a group self-reference is a restricted source" >&2; exit 1; }
+
 # And with no way to ask AWS, it must skip rather than guess either way.
 out="$(env -i PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
   HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_SSHD_CONFIG="$TMP/sshd_config.plain" \
@@ -407,4 +426,119 @@ out="$(env -i PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   || { echo "FAIL: unknown security group should skip, not pass or fail" >&2; exit 1; }
 echo "OK the security group decides, and an unanswerable question skips"
 
-echo "PASS: host access audit proofs (19 cases)"
+echo "== Case 20: the security-group query itself, not a copy of it =="
+# Case 19 injects rules through HOST_AUDIT_SG_RULES_FILE, which proves the
+# classification but never runs the JMESPath. That gap hid a real bug: the
+# query was missing the `[]` flatten after the filter, so against actual AWS
+# output it returned nothing for a world-open group -- and "nothing" was read
+# as "no rule allows 2222". The check would have certified an open panel as
+# closed. So evaluate the exact query the script ships, with the same engine
+# the CLI uses, against recorded describe-security-groups shapes.
+command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 unavailable" >&2; exit 1; }
+python3 - "$AUDIT" <<'PY' || exit 1
+import json, re, subprocess, sys
+
+src = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r'^DA_PANEL_SG_QUERY="(.+)"$', src, re.M)
+if not m:
+    sys.exit("FAIL: could not extract DA_PANEL_SG_QUERY from the audit script")
+# The script stores it for a double-quoted shell context, where \` is a literal.
+query = m.group(1).replace("\\`", "`")
+
+try:
+    import jmespath
+except ImportError:
+    sys.exit("FAIL: jmespath is required to prove the security-group query")
+
+
+def perm(proto="tcp", frm=None, to=None, v4=(), v6=(), pl=(), sg=()):
+    p = {"IpProtocol": proto,
+         "IpRanges": [{"CidrIp": c} for c in v4],
+         "Ipv6Ranges": [{"CidrIpv6": c} for c in v6],
+         "PrefixListIds": [{"PrefixListId": i} for i in pl],
+         "UserIdGroupPairs": [{"GroupId": g} for g in sg]}
+    if frm is not None:
+        p["FromPort"], p["ToPort"] = frm, to
+    return p
+
+
+web = perm("tcp", 443, 443, v4=["0.0.0.0/0"])
+cases = [
+    ("as applied: two server EIPs plus the group self-reference",
+     [perm("tcp", 2222, 2222, v4=["44.214.133.234/32", "34.205.151.236/32"],
+           sg=["sg-0e674f4e2937c6392"]), web],
+     {"44.214.133.234/32", "34.205.151.236/32", "sg-0e674f4e2937c6392"}),
+    ("world-open on 2222 -- the case the broken query missed entirely",
+     [perm("tcp", 2222, 2222, v4=["0.0.0.0/0"])], {"0.0.0.0/0"}),
+    ("open over IPv6 only",
+     [perm("tcp", 2222, 2222, v6=["::/0"])], {"::/0"}),
+    ("an all-traffic -1 rule, which carries no FromPort",
+     [perm("-1", v4=["0.0.0.0/0"])], {"0.0.0.0/0"}),
+    ("a 2000-3000 range that covers 2222 without naming it",
+     [perm("tcp", 2000, 3000, v4=["0.0.0.0/0"])], {"0.0.0.0/0"}),
+    ("a prefix list as the source",
+     [perm("tcp", 2222, 2222, pl=["pl-0abc123"])], {"pl-0abc123"}),
+    ("genuinely closed: 2222 appears in no rule",
+     [web], set()),
+    ("adjacent ports must not be picked up",
+     [perm("tcp", 2223, 2223, v4=["0.0.0.0/0"]),
+      perm("tcp", 22, 22, v4=["1.2.3.4/32"])], set()),
+    ("rules spread across two security groups both count",
+     None, {"0.0.0.0/0", "sg-0aaa"}),
+]
+
+fail = 0
+for name, perms, expected in cases:
+    if perms is None:
+        doc = {"SecurityGroups": [
+            {"IpPermissions": [perm("tcp", 2222, 2222, v4=["0.0.0.0/0"])]},
+            {"IpPermissions": [perm("tcp", 2222, 2222, sg=["sg-0aaa"])]}]}
+    else:
+        doc = {"SecurityGroups": [{"IpPermissions": perms}]}
+    got = {t for t in (jmespath.search(query, doc) or []) if t}
+    if got != expected:
+        print("FAIL: %s\n  expected %s\n  got      %s" % (name, expected or "{}", got or "{}"))
+        fail += 1
+
+if fail:
+    sys.exit("%d security-group query case(s) failed" % fail)
+print("OK the shipped JMESPath resolves every source kind and port shape")
+PY
+
+echo "== Case 21: a denied DescribeSecurityGroups is not an all-clear =="
+# The dangerous direction. If the API call fails, the rule set is unknown, and
+# unknown must not collapse into "no rule allows 2222".
+mkdir -p "$TMP/bin"
+cat >"$TMP/bin/aws" <<'EOF'
+#!/bin/bash
+# describe-instances succeeds; describe-security-groups is denied.
+case "$2" in
+  describe-instances) echo "sg-0e674f4e2937c6392"; exit 0 ;;
+  *) echo "An error occurred (UnauthorizedOperation)" >&2; exit 254 ;;
+esac
+EOF
+chmod +x "$TMP/bin/aws"
+aws_run() {
+  env -i PATH="$TMP/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_SSHD_CONFIG="$TMP/sshd_config.plain" \
+    HOST_AUDIT_CSF_CONF="$TMP/csf.conf" HOST_AUDIT_LFD_ACTIVE=1 \
+    HOST_AUDIT_LISTENERS="22,2222" HOST_AUDIT_INSTANCE_ID="i-0118b8ede80b52ef7" \
+    bash "$AUDIT" --json 2>/dev/null || true
+}
+[ "$(aws_run | verdict_for exposure/da-panel-sg)" = "SKIP" ] \
+  || { echo "FAIL: a denied describe-security-groups must skip, not report closed" >&2; exit 1; }
+
+# And when the call succeeds and the group really is world-open, it must fail.
+cat >"$TMP/bin/aws" <<'EOF'
+#!/bin/bash
+case "$2" in
+  describe-instances) echo "sg-0e674f4e2937c6392"; exit 0 ;;
+  *) printf '0.0.0.0/0\tNone\tNone\tNone\n'; exit 0 ;;
+esac
+EOF
+chmod +x "$TMP/bin/aws"
+[ "$(aws_run | verdict_for exposure/da-panel-sg)" = "FAIL" ] \
+  || { echo "FAIL: a successful query showing 0.0.0.0/0 must fail" >&2; exit 1; }
+echo "OK an unreadable security group skips, and a readable open one fails"
+
+echo "PASS: host access audit proofs (21 cases)"

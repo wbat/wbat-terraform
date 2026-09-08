@@ -568,37 +568,70 @@ audit_exposure() {
 # So ask AWS. The instance profile usually cannot describe EC2, which makes this
 # a SKIP with the command to run from a workstation, and a SKIP marks the audit
 # incomplete rather than passing it.
+#
+# Three things this query has to get right, because each of them is a way for a
+# world-open panel to read as closed:
+#
+#   - The `[]` after the filter. Without it the result is one list per security
+#     group and the trailing `.IpRanges[].CidrIp` silently evaluates to empty,
+#     which this check would have read as "no rule allows 2222".
+#   - Every source kind, not just IPv4. An `::/0` on 2222 is as open as an
+#     0.0.0.0/0, and prefix lists and group references are real sources too.
+#   - Rules that cover 2222 without naming it: a 2000-3000 range, and `-1`
+#     all-traffic rules, which carry no FromPort at all.
+#
+# Kept as a single string so the offline proof can extract and evaluate the
+# exact query that ships rather than a copy of it.
+DA_PANEL_SG_QUERY="SecurityGroups[].IpPermissions[?IpProtocol=='-1' || (FromPort<=\`2222\` && ToPort>=\`2222\`)][].[IpRanges[].CidrIp, Ipv6Ranges[].CidrIpv6, PrefixListIds[].PrefixListId, UserIdGroupPairs[].GroupId][][]"
+
 audit_da_panel_boundary() {
-  local iid sgs rules
+  local iid sgs rules queried=no
   iid="${HOST_AUDIT_INSTANCE_ID:-$(curl -fsS -m 1 -H "X-aws-ec2-metadata-token: $(curl -fsS -m 1 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token 2>/dev/null)" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)}"
 
   if [ -n "${HOST_AUDIT_SG_RULES_FILE:-}" ]; then
     rules="$(cat "$HOST_AUDIT_SG_RULES_FILE" 2>/dev/null)"
+    queried=yes
   elif have aws && [ -n "$iid" ]; then
-    sgs="$(aws ec2 describe-instances --instance-ids "$iid" \
-      --query 'Reservations[].Instances[].SecurityGroups[].GroupId' --output text 2>/dev/null)"
-    if [ -n "$sgs" ]; then
+    # An empty answer means "no rule allows 2222" only if the call succeeded.
+    # Treating a failed call as an empty rule set would turn a denied
+    # DescribeSecurityGroups into an all-clear.
+    if sgs="$(aws ec2 describe-instances --instance-ids "$iid" \
+      --query 'Reservations[].Instances[].SecurityGroups[].GroupId' --output text 2>/dev/null)" &&
+      [ -n "$sgs" ]; then
       # shellcheck disable=SC2086 # deliberate word splitting: one arg per group
-      rules="$(aws ec2 describe-security-groups --group-ids $sgs \
-        --query "SecurityGroups[].IpPermissions[?FromPort==\`2222\`].IpRanges[].CidrIp" \
-        --output text 2>/dev/null)"
+      if rules="$(aws ec2 describe-security-groups --group-ids $sgs \
+        --query "$DA_PANEL_SG_QUERY" --output text 2>/dev/null)"; then
+        queried=yes
+      fi
     fi
   fi
 
-  if [ -z "${rules+x}" ] || { [ -z "$rules" ] && [ -z "${HOST_AUDIT_SG_RULES_FILE:-}" ] && { ! have aws || [ -z "$iid" ]; }; }; then
-    report SKIP "exposure/da-panel-sg" "cannot read the security group from this host; run: aws ec2 describe-security-groups --group-ids \$(aws ec2 describe-instances --instance-ids ${iid:-<instance-id>} --query 'Reservations[].Instances[].SecurityGroups[].GroupId' --output text) --query \"SecurityGroups[].IpPermissions[?FromPort=='2222'].IpRanges[]\""
+  if [ "$queried" != yes ]; then
+    report SKIP "exposure/da-panel-sg" "cannot read the security group from this host; run from a workstation with credentials: aws ec2 describe-security-groups --group-ids \$(aws ec2 describe-instances --instance-ids ${iid:-<instance-id>} --query 'Reservations[].Instances[].SecurityGroups[].GroupId' --output text) --query \"$DA_PANEL_SG_QUERY\" --output text"
+    return
+  fi
+
+  # Tab-separated columns, and `None` is what the CLI prints for a null element
+  # in a text projection. Reduce to a space-separated list of real sources.
+  rules="$(printf '%s' "$rules" |
+    awk '{for (i = 1; i <= NF; i++) if ($i != "None") printf "%s%s", (n++ ? " " : ""), $i} END {print ""}')"
+
+  if [ -z "$rules" ]; then
+    report OK "exposure/da-panel-sg" "no security-group rule allows 2222 -- the panel is closed to the internet entirely, reachable only by SSM port-forward"
     return
   fi
 
   case " $rules " in
-    *" 0.0.0.0/0 "*)
-      report FAIL "exposure/da-panel-sg" "the security group allows 2222 from 0.0.0.0/0 -- the panel is open to the internet"
+    *" 0.0.0.0/0 "* | *" ::/0 "*)
+      report FAIL "exposure/da-panel-sg" "the security group allows 2222 from the whole internet (${rules}) -- the panel is open"
       ;;
-    "  ")
-      report OK "exposure/da-panel-sg" "no security-group rule allows 2222 -- the panel is closed to the internet entirely, reachable only by SSM port-forward"
+    *"pl-"*)
+      # A prefix list is an indirection this check cannot see through, and its
+      # entries are editable elsewhere. Naming it beats implying it was read.
+      report WARN "exposure/da-panel-sg" "2222 is allowed via a prefix list whose entries were not read (${rules}) -- expand it with: aws ec2 get-managed-prefix-list-entries --prefix-list-id"
       ;;
     *)
-      report OK "exposure/da-panel-sg" "2222 restricted at the security group to: $(printf '%s' "$rules" | tr '\t' ' ')"
+      report OK "exposure/da-panel-sg" "2222 restricted at the security group to: ${rules}"
       ;;
   esac
 }
