@@ -17,7 +17,7 @@ worse ones: **no backup has reached S3 since 2026-07-02**, and the weekly system
 
 **Where this stands, for a reader arriving after the fact.** The memory fix is deployed and
 the query is bounded. The system backup is producing databases again. Eleven of the
-thirteen accounts got a backup on 2026-09-07, the first since July, and the other two do
+thirteen accounts got a backup on 2026-09-07, the first since July, and the other two did
 not fit on this volume at all. Chasing that surfaced a third problem worse than either
 of the two above: an archive can be checksum-verified into S3 and still be unreadable, and
 [reading the whole bucket
@@ -26,10 +26,13 @@ that are. Only one of the 22 is the newest object in the bucket for its account,
 one is the `tellerstec` fragment already known about and already renamed. What is still
 outstanding is in
 [the order below](#do-it-in-this-order) and in [Still open](#still-open). The batching work
-is now deployed and scheduled. Of the two accounts it cannot reach, `teller` is a disk
-decision and `tellerstec` is now a one-line exclusion file, which the size estimate
-[honours as of this branch](#what-the-estimator-does-about-it-now) and which nobody has
-written yet.
+is deployed and running nightly, and as of 2026-09-08 **twelve of the thirteen accounts
+have a current, readable backup**. `tellerstec` was the twelfth: its exclusion file is
+written and its archive has been [read back out of S3 in
+full](#tellerstec-backed-up-and-verified-2026-09-08), closing a 68-day gap. `teller` is the
+one account left, it is a disk decision rather than a bug, and the deadline that remains is
+not a backup deadline at all — Installatron is writing 2.54 GB a day into `tellerstec` and
+the volume fills in about 22 days on its own.
 
 ## Do it in this order
 
@@ -63,9 +66,10 @@ step 6 exists to stop DirectAdmin's own schedule racing it.
 | 4 | [Smoke-test DirectAdmin with one small account](#1-prove-the-backup-engine-works-without-filling-the-disk-cli) | kilobytes | done 2026-09-07 | Proves engine → hook → S3 → cleanup end to end for almost no space. |
 | 5 | [Diagnose `Not implemented`](#2-find-out-what-not-implemented-refers-to-cli) | none | not done, and optional | Read-only, and no longer on the critical path — step 7 does not go through the task queue. |
 | 6 | [Delete DirectAdmin's schedule](#3-delete-directadmins-backup-schedule) | — | done 2026-09-08 | Removed from the stored job list, not the panel — see the section for why that turned out to be possible. Repairing it would have restored a full all-users run, which no longer fits. |
-| 7 | [Let the per-account batch run take over](#per-account-backups-da_backup_batchsh) | largest single account, not the sum | scheduled 2026-09-08, first automatic run 2026-09-09 01:00 EDT | Installed by step 3. Eleven of the thirteen accounts fit and now run nightly. `tellerstec` does not fit for a reason that turned out to be fixable and free — see step 8 — and `teller` needs a disk decision. |
-| 8 | [Prune `tellerstec`'s Installatron backups](#why-tellerstec-stopped-fitting-and-why-that-is-the-cheapest-thing-here) | **frees ~29 GB, and stops ~2.6 GB/day of growth** | **not done** | The largest single reclaim left, and the only item here with a deadline: at the observed rate the volume fills in roughly three weeks on its own, regardless of backups. Needs the account owner. |
-| 9 | [Write `tellerstec`'s exclusion file](#what-the-estimator-does-about-it-now) | none | **not done** | Three lines, and independent of step 8 — it does not free disk, it stops 29 GB of backups-of-backups being archived, which is what makes the account fit again tonight. The estimator honours the file as of this branch; the file itself does not exist and this repository did not create it. |
+| 7 | [Let the per-account batch run take over](#per-account-backups-da_backup_batchsh) | largest single account, not the sum | done; first automatic run 2026-09-08 01:16 EDT succeeded | Installed by step 3. That run did 11 accounts, skipped 2 for space and failed none. With step 9 done it is 12, and only `teller` is left out. |
+| 8 | [Prune `tellerstec`'s Installatron backups](#why-tellerstec-stopped-fitting-and-why-that-is-the-cheapest-thing-here) | **frees ~31 GB, and stops ~2.5 GB/day of growth** | **not done** | The largest single reclaim left, and still the only item here with a deadline: measured over the last seven days the growth is 2.54 GB/day against 57.7 GB free, so the volume fills in about 22 days regardless of backups. Needs the account owner. Step 9 did not change this by a byte. |
+| 9 | [Write `tellerstec`'s exclusion file](#what-the-estimator-does-about-it-now) | none | done 2026-09-08 | Written, and the account was backed up and the archive read back the same afternoon — [the result](#tellerstec-backed-up-and-verified-2026-09-08). |
+| 10 | [Decide disk for `teller`](#still-open) | ~$8/month either way | **not done** | The one account no exclusion can help: 54 GB of genuine content, checked. Needs a decision, not a fix. |
 
 ### State of the host, read 2026-09-07 05:02 UTC
 
@@ -1336,12 +1340,18 @@ which comes out at 66.8 GiB for `tellerstec` and 108 GiB for `teller`. Both are 
 the table, so the gate skips both accounts a fortiori. The table is the honest lower bound;
 the gate is deliberately more pessimistic than it.
 
-Either way **per-account batching gets eleven of the thirteen accounts and cannot get the
-other two.** Those two hold 87.4 GiB of the 114 GiB of homes on the host — a figure that happens
+Either way **per-account batching got eleven of the thirteen accounts on 2026-09-07 and
+could not get the other two.** Those two hold 87.4 GiB of the 114 GiB of homes on the host
+— a figure that happens
 to resemble `teller`'s peak above and is not related to it. Lowering the ratio would not help: the gate would
 stop skipping them, the floor would kill them mid-run, and — before the sentinel fix —
 each kill would publish another fragment to S3. This is a disk problem now, not a
 scheduling one — but only half of it is a disk *purchase*, which the next section is about.
+That half has since been settled without buying anything:
+[`tellerstec` runs and is verified](#tellerstec-backed-up-and-verified-2026-09-08) as of
+2026-09-08, making it twelve of thirteen, and the sizing figure this section derives —
+66.8 GiB — is what the estimate reads when nothing is excluded. With
+`application_backups` excluded it reads 10.0 GB, and the run's real peak was under 5 GB.
 
 ### Why `tellerstec` stopped fitting, and why that is the cheapest thing here
 
@@ -1438,6 +1448,47 @@ rather than the file's existence: `tellerstec`
 should then show about 29 GB under `EXCLUDED` beside its 34 GB home, a peak of roughly
 10 GB instead of 66.8 GB, and `FITS NOW` reading `yes`.
 
+### `tellerstec` backed up and verified (2026-09-08)
+
+Done, on the afternoon of 2026-09-08, after #128 was merged and installed. The file was
+written exactly as above and `--list` answered:
+
+```
+ACCOUNT                HOME   EXCLUDED       PEAK FITS NOW
+tellerstec            35.5G      30.5G      10.0G yes
+teller                54.0G          -     108.1G NO
+```
+
+35.5 GB of home, 30.5 GB of it excluded, and the account re-sorted from last-but-one into
+the middle of the size order. The run took **6m21s** and ended `1 done, 0 skipped, 0
+failed`, with free space back at 57.7 GB and the staging directory empty. For comparison,
+the attempt on 2026-09-07 ran 24 minutes before the floor killed it.
+
+The archive was then **read back out of S3 end to end**, because this is the account that
+proved a checksum is not a read: 3,278,219,149 bytes, `zstd -dc | tar -tf` to completion,
+**72,264 members**, exit 0. Three things in that listing are the actual verification:
+
+- **0 members** under `application_backups`. The exclusion took effect in tar, not merely
+  in the estimate — those are separate claims and only this one is evidence for the first.
+- **5 `.sql` members.** The databases are in it. Worth checking explicitly here, because a
+  database-less backup that looks fine is
+  [exactly what the system backups were doing](#do-it-in-this-order).
+- **72,264 members read to the end**, which is what distinguishes this from the
+  `2026-09-07` object, still sitting in the bucket as
+  `reseller.admin.tellerstec.tar.zst.TRUNCATED-DO-NOT-RESTORE`.
+
+**The gap this closes is 68 days.** The last readable `tellerstec` archive before today was
+`2026-07-02/reseller.admin.tellerstec.tar.zst`, 8,275,672,175 bytes. Today's is
+3,278,219,149 — smaller than July's because July's contained the Installatron backups and
+this one does not, which is the whole point of the exclusion.
+
+None of this reclaims a byte of local disk, and one thing about it is worth being plain
+about rather than leaving implied: **those 31 GB of Installatron archives are now backed up
+nowhere.** That is the intended trade and it is a small one, because they are themselves
+backups of applications whose live copies are in this archive — what is given up is
+point-in-time app history, not the apps. It stops being a small trade if anyone starts
+treating that directory as the primary copy of something.
+
 One caveat on that peak, because it is the one account where the ratio is carrying real
 weight. The estimate is 100% of the home, and the archive is not bounded by the home: the
 `.sql` dumps come from `/var/lib/mysql`. `tellerstec` archived to 7.7 GiB in July against
@@ -1446,10 +1497,11 @@ the measured shape implies a peak nearer 16 GiB than the 10 GB the gate would es
 fit inside 59.8 GB free with the 10 GB reserve, so the account runs either way, and the
 free-space floor is the guard that would catch it if that stopped being true.
 
-None of this reclaims a byte of local disk. The exclusion stops DirectAdmin archiving 29 GB
-of backups of backups and makes the account fit tonight; the ~2.6 GB/day that fills this
-volume in about three weeks is untouched by it. Pruning, and capping Installatron's
-retention, are still the items with the deadline, and both still need the account owner.
+The exclusion makes the account fit; it does not slow the growth that fills the volume.
+Measured over the seven days to 2026-09-08 that growth is **2.54 GB/day** — 17.81 GB, from
+the four daily runs of `33 1,7,13,19 * * * /usr/local/installatron/lib/cron.updater.sh` —
+against 57.7 GB free, which is **about 22 days**. Pruning and capping Installatron's
+retention are still the items with the deadline, and both still need the account owner.
 
 ### 2. Find out what `Not implemented` refers to (CLI)
 
@@ -1942,26 +1994,22 @@ could not be read, so it can gate a restore decision. Results of the first run a
   four and a half hours during this outage with no notification. That is a metric EC2
   emits for free, needs no agent, and would have caught this — the cheapest available
   improvement, and it belongs in Terraform.
-- **The two largest accounts cannot be backed up on this volume, but only one of them is
-  really a disk problem.** `tellerstec` needs about 64 GiB of peak local space and
-  `teller` about 87 GiB, against 59.8 GiB free, because DirectAdmin holds the assembled
-  parts of a backup and the archive built from them on disk at the same time. The other
-  eleven fit comfortably and now run nightly. The two are not the same case, though, and
-  treating them as one is what made this look like a hardware purchase:
-  [`tellerstec` is 85% backups of itself](#why-tellerstec-stopped-fitting-and-why-that-is-the-cheapest-thing-here),
-  and pruning them costs nothing and has to happen anyway. Only `teller` — 55 GB of real
-  mail, media and web content, 43.4 GiB archived — genuinely needs more room.
+- **One account still cannot be backed up on this volume, and it is the one that is
+  genuinely a disk problem.** `tellerstec` and `teller` were never the same case, and
+  treating them as one is what made this look like a hardware purchase.
+  [`tellerstec` was 85% backups of itself](#why-tellerstec-stopped-fitting-and-why-that-is-the-cheapest-thing-here);
+  excluding those made it fit, and it has been
+  [backed up and verified](#tellerstec-backed-up-and-verified-2026-09-08) as of
+  2026-09-08 without pruning anything or buying anything. Twelve of the thirteen accounts
+  now have a current backup.
 
-  The tooling half of `tellerstec` is done and the host half is not. The size estimate now
-  subtracts what `/home/<account>/.backup_exclude_paths` keeps out of the archive, so
-  excluding `application_backups` is enough to make the account fit without pruning
-  anything or buying anything — but **that file does not exist on the host**, and until
-  someone writes it (three lines and a `chown`, in
-  [what the estimator does about it now](#what-the-estimator-does-about-it-now))
-  `tellerstec` is still sized from all 34 GB of its home and still skipped every night.
-  Writing it is not a substitute for step 8: it stops 29 GB being archived, and reclaims
-  no local disk at all. For `teller`, the root volume is a 200 GB `gp3` at 71% used, so at
-  $0.08/GB-month:
+  `teller` is the exception and no exclusion will help it, which was checked rather than
+  assumed: its 54 GB is 45 GB of `domains` (18 GB `cl/gallery`, 11 GB `steveteller.com`,
+  5.8 GB `iotsystems.com`), 4.5 GB of `imap` and 4.0 GB of `Maildir`. There is no
+  backups-of-backups directory in it — `/home/teller/backups` exists and is empty — so
+  there is nothing to exclude that anyone would want excluded, and at 200% of 54 GB it
+  needs about 108 GB of peak against 57.6 GB free. It is a decision, not a fix. The root
+  volume is a 200 GB `gp3` at 72% used, so at $0.08/GB-month:
 
   | Option | Change | Cost | Covers |
   |---|---|---|---|
@@ -1982,19 +2030,24 @@ could not be read, so it can gate a restore decision. Results of the first run a
 
   | Nightly set | Per night | Steady state | Cost |
   |---|---|---|---|
-  | The eleven that fit today | 14.96 GiB | ~4.9 TB | ~$38/mo |
-  | All thirteen, `tellerstec` as it is now | ~90.4 GiB | ~30 TB | **~$230/mo** |
-  | All thirteen, `tellerstec` pruned | ~66 GiB | ~22 TB | ~$168/mo |
-  | Eleven + pruned `tellerstec` nightly, `teller` weekly | ~29 GiB | ~9.7 TB | ~$74/mo |
+  | The eleven that fit before the exclusion | 14.96 GiB | ~4.9 TB | ~$38/mo |
+  | **The twelve running now** (`tellerstec` excluded, measured 3.05 GiB) | **~18.0 GiB** | ~6.0 TB | **~$46/mo** |
+  | The twelve, plus `teller` weekly rather than nightly | ~24 GiB | ~8.0 TB | ~$61/mo |
+  | All thirteen nightly | ~63 GiB | ~21 TB | ~$161/mo |
 
-  An earlier revision of this section put the all-thirteen figure at 66 GiB, reasoning from
-  the 2026-07-02 full run, which really was 66.055 GiB. That is now wrong, and the reason
-  it is wrong is the same finding as above: in July `tellerstec` archived to 7.7 GiB, and
-  today it would archive to about 32 GiB. Reasoning from the last complete run is only safe
-  while nothing has changed underneath it. The last line of the table is the one worth
-  considering: if `teller` does not need daily granularity, a weekly `--user=` run gets
-  most of the protection for a third of the cost of doing everything nightly. Per-account
-  sizes are under [the first real run](#the-first-real-run-2026-09-07-2215-edt).
+  These are now measurements rather than projections for every row but the last two, which
+  still carry `teller`'s 43.4 GiB July archive. `tellerstec` is the row that moved most and
+  it moved twice: an earlier revision put the all-thirteen figure at 66 GiB from the
+  2026-07-02 full run, then this document corrected it upward to ~90 GiB once the
+  Installatron growth was found, and the exclusion has now taken that account to 3.05 GiB
+  actual — below even the July figure, because July's archive contained the Installatron
+  backups too. Reasoning from the last complete run is only safe while nothing has changed
+  underneath it, and something has changed underneath it twice.
+
+  The middle row is the one worth considering: if `teller` does not need daily granularity,
+  a weekly `--user=teller` run gets most of the protection for about $15/month more than is
+  being spent now — and it still needs the disk, because the constraint is peak local
+  space during the run, not how often the run happens.
 - **Restore has never been rehearsed** — though the archives have now been read.
   [The 2026-09-08 sweep](#is-what-is-already-in-s3-readable-a-read-back-of-every-archive-2026-09-08)
   read every compressed object in the bucket and settled the readability half of this:
