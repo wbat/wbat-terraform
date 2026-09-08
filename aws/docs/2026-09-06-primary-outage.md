@@ -33,9 +33,9 @@ then touch DirectAdmin.
 | 2 | [Upload the old `/backup` weeks, verify, then delete](#recovering-space-safely) | **frees ~52 GB** | `rclone` streams to S3 without staging locally, so this works at 99%. Takes the volume to ~74% and gets the newest database dump off-host in the same pass. |
 | 3 | Deploy the fixed tooling: `install_da_vhost_listen.sh --install` | negligible | Nothing else uploads or cleans up, and the installed hook is hand-edited. Must be in place before a backup succeeds. |
 | 4 | [Smoke-test DirectAdmin with one small account](#1-prove-the-backup-engine-works-without-filling-the-disk-cli) | kilobytes | Proves engine → hook → S3 → cleanup end to end for almost no space. |
-| 5 | [Diagnose `Not implemented`](#2-find-out-what-not-implemented-refers-to-cli) | none | Read-only. |
-| 6 | [Recreate the schedule](#3-recreate-the-backup-schedule--this-one-needs-the-panel) (panel) | — | Only once 2 and 4 have passed. |
-| 7 | A full all-users backup | **~45 GB** | Needs step 2 to have completed first. See the note there about peak local usage. |
+| 5 | [Diagnose `Not implemented`](#2-find-out-what-not-implemented-refers-to-cli) | none | Read-only, and no longer on the critical path — step 7 does not go through the task queue. |
+| 6 | [Delete DirectAdmin's schedule](#3-delete-directadmins-backup-schedule--this-one-needs-the-panel) (panel) | — | It still fires at 05:00 every day. Repairing it would restore a full all-users run, which no longer fits. |
+| 7 | [Let the per-account batch run take over](#per-account-backups-da_backup_batchsh) | largest single account, not the sum | Installed by step 3. Twelve of fourteen accounts fit; the other two need a disk decision, not a schedule. |
 
 ### State of the host, read 2026-09-07 05:02 UTC
 
@@ -332,8 +332,17 @@ Sep  5 05:00:51 server dataskq[2747705]: running backup task data=map[... local_
 Sep  5 05:00:51 server dataskq[2747705]: finished task duration=66.334153ms task=action=backup&id=1
 ```
 
-66 milliseconds, no files produced. A *post*-backup hook cannot fire when the backup
-never runs, so **no hook fix restores uploads until this is repaired**. Corroborating:
+66 milliseconds, no files produced. A *post*-backup hook cannot fire when the backup never
+runs, so **no hook fix restores uploads through the scheduled path until this is
+repaired**. An earlier revision said that without the qualifier, which read as though
+nothing could produce a backup until DirectAdmin's task queue was fixed. That turned out
+to be the wrong conclusion to draw: `admin-backup --user=` runs in the foreground and does
+not go through the task queue at all, and on 2026-09-07 it archived and uploaded eleven
+accounts with `Not implemented` still failing every morning. Repairing the stored job is
+therefore not a prerequisite for having backups — see
+[the batching section](#per-account-backups-da_backup_batchsh) — and the stored job is now
+something to [delete](#3-delete-directadmins-backup-schedule--this-one-needs-the-panel)
+rather than repair. Corroborating:
 `/home/admin_backups` is empty with mtime 2026-07-02, `/var/log/da-backup-s3.log` has not
 been written since 2026-07-02 05:52, and S3 confirms it:
 
@@ -1230,28 +1239,49 @@ Two known causes of task-queue failures worth ruling out while you are in there:
 stopped tolerating it), and a `directadmin.conf` edited on Windows so every value has
 `\r` appended.
 
-### 3. Recreate the backup schedule — this one needs the panel
+### 3. Delete DirectAdmin's backup schedule — this one needs the panel
 
-There is no documented CLI command to *create or edit a scheduled* backup. The task queue
-accepts `action=backup` for a one-off run, and `admin-backup` runs one immediately, but
-the cron entry itself is written by the GUI wizard. So if step 2 shows the stored job is
-malformed, recreate it at **Admin Level → Admin Backup/Transfer → Schedule**:
+An earlier revision of this section said to recreate this job, and the step above it in
+[the order](#do-it-in-this-order) still pointed here to say so. That was written before
+the staging arithmetic below was done, and following it now would reintroduce the failure
+the batching work exists to prevent. The stored job is `who:[all]`, so a repaired version
+of it stages every account's archive on the root volume before the upload hook gets a
+chance to remove any of them, and that needs more space than the volume has. Delete it.
 
-- **Who:** All Users
-- **When:** Cron Schedule, minute `0`, hour `5`, day of month `*`, month `*`, day of week `*`
-- **Where:** Local, path `/home/admin_backups` — must match `local_path` in the hook
-- **What:** All data
+The job is not dangerous today, which is why this is easy to leave undone: it fails in
+66 ms and produces nothing, and has done every morning since Jul 2. It is a loaded gun in
+two directions instead. Whoever eventually diagnoses `Not implemented` and fixes it gets a
+full all-users backup at 05:00 the next morning without having asked for one. And
+`/etc/cron.d/da-backup-batch`, which step 3 of the order installs, runs at 01:00 — a batch
+run that overruns into 05:00 would find DirectAdmin starting a second backup into the same
+staging directory, contending for the same hook lock.
 
-Then delete the old job so both are not queued. The scriptable equivalent, if you would
-rather not use the browser, is `CMD_API_ADMIN_BACKUP` with `action=create`; DirectAdmin
-does not document its full parameter list and suggests running DA in debug mode to
-capture what the GUI sends, so the panel is genuinely the lower-risk path here.
+Delete it at **Admin Level → Admin Backup/Transfer → Schedule**. There is no documented
+CLI command to create, edit *or remove* a scheduled backup: the task queue accepts
+`action=backup` for a one-off run and `admin-backup` runs one immediately, but the cron
+entry itself is owned by the GUI wizard. `CMD_API_ADMIN_BACKUP` is the scriptable
+equivalent; DirectAdmin does not document its full parameter list and suggests running DA
+in debug mode to capture what the GUI sends, so the panel is genuinely the lower-risk path
+here.
 
-After it runs, confirm the whole chain rather than just the panel's success message:
+Confirm it is gone from the stored job list and from the daily log, rather than trusting
+the panel's success message:
 
 ```bash
-ls -la /home/admin_backups/                    # did files appear?
-tail -40 /var/log/da-backup-s3.log             # did the hook fire and upload?
+cat /usr/local/directadmin/data/admin/backup_crons.list     # id=1 should no longer be here
+grep 'Running Backup: type=admin' /var/log/directadmin/system.log | tail -3
+```
+
+That second line is how to tell the deletion took: it has appeared at 05:00 every day from
+Aug 17 onwards, so the useful signal is the first morning it does not.
+
+Then let step 7 produce the backups. The chain to check after a batch run is the same one
+this section used to describe, pointed at the producer that now exists:
+
+```bash
+tail -40 /var/log/da-backup-batch.log          # which accounts ran, and which did not fit
+tail -40 /var/log/da-backup-s3.log             # did the hook upload and verify each one?
+ls -la /home/admin_backups/                    # and did it drain between accounts?
 aws s3 ls s3://wbat-tellerstech-directadmin-backups-708113892725/server/ | tail -5
 ```
 
@@ -1283,9 +1313,11 @@ Run the script you reverted **to**, not the one you reverted **from**.
 that produces the 55 KB config-only archive, so verifying with it reproduces the bug and
 looks like the revert failed.
 
-Note that step 3 makes this partly redundant: admin backups include databases, so once
-they work again the system backup matters mainly for server configuration. Both are worth
-having, but fix the admin backup first.
+Note that working account backups make this partly redundant: they carry the databases, so
+once the batch run is scheduled the system backup matters mainly for server configuration.
+Both are worth having. This one is already done — see
+[step 4 in the host state below](#state-of-the-host-as-of-2026-09-07-2130-edt) — and it is
+the only one of the two that currently covers `tellerstec` and `teller` at all.
 
 ## State of the host as of 2026-09-07 21:30 EDT
 
