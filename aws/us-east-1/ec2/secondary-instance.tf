@@ -16,6 +16,22 @@ resource "aws_instance" "secondary" {
     cpu_credits = "standard"
   }
 
+  # Force IMDSv2. Worth doing even though this box only serves DNS: it shares the
+  # WBAT_Main_Server instance profile with the primary, so credentials stolen through
+  # unauthenticated metadata access here can send SES mail and invalidate CloudFront just
+  # the same.
+  #
+  # Safe to enforce, unlike the primary. MetadataNoToken is flat zero across 14 days on
+  # this instance -- the primary's only IMDSv1 consumer is Installatron, which is not
+  # installed here. Every other agent the two boxes share (amazon-ssm-agent,
+  # nm-cloud-setup, the AWS CLI, our own reconciler) is token-first, and this instance's
+  # zero is the evidence for that. See aws/docs/imdsv2-enforcement.md.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 1
+  }
+
   root_block_device {
     volume_type           = "gp3"
     volume_size           = 200

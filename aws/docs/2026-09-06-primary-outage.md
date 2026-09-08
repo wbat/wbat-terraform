@@ -1012,8 +1012,9 @@ So do not schedule a full local run on this volume. Three ways out were consider
   and clear each before the next. Peak usage becomes the largest single account.
 - **Move the upload per-user.** DirectAdmin's `user_backup_post.sh` hook fires after each
   account, so each archive is uploaded and deleted as it is produced. Same peak as
-  batching, but it changes which hook owns the upload and therefore reopens every
-  data-loss question `all_backups_post.sh` already answers.
+  batching — 43.4 GB for `teller` at the last measurement, still large but survivable —
+  but it changes which hook owns the upload and therefore reopens every data-loss
+  question `all_backups_post.sh` already answers.
 - **Give it somewhere else to write.** A separate EBS volume mounted at
   `/home/admin_backups` decouples staging from the root filesystem, at ongoing cost, and
   does nothing about an account that outgrows the new volume either.
@@ -1216,10 +1217,11 @@ merely producing incomplete archives — it is not creating a file at all, and t
 had nothing to fire on since July. Nothing alerts on this: DirectAdmin logged no error,
 raised no ticket, and the daily failure is invisible from the panel.
 
-Do not simply re-enable or recreate the job. As the arithmetic in step 1 shows, a
+Do not simply re-enable or recreate the job. As the arithmetic in step 1 now shows, a
 successful full run needs 66+ GiB of local staging against 60 GB free, so "fixing" the
-trigger on its own would fill the volume at 05:00 the next morning. `da_backup_batch.sh`
-above is the replacement; DirectAdmin's schedule should be deleted rather than repaired.
+trigger without first changing where the archives are written would fill the volume at
+05:00 the next morning. `da_backup_batch.sh` above is that change; DirectAdmin's schedule
+should be deleted rather than repaired.
 
 **`/backup` is empty again, and 7.4 GB came back.** `09-05-26` and `08-29-26` were the
 last two directories left there. Both were verified against S3 with

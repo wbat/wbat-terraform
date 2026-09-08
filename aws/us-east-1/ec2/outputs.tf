@@ -56,19 +56,23 @@ output "secondary_ami_snapshot_id" {
   description = "Snapshot backing secondary_ami_id."
 }
 
-# Surfaced deliberately: the primary snapshot data source still filters on
-# volume-size 300 while the live root volume is 200 GB after the shrink cutover, so a
-# rebuild from primary_ami_id would come up with the pre-shrink disk. Printing the two
-# sizes side by side makes that mismatch visible in `terraform output` rather than only
-# discoverable by reading data_sources.tf.
+# These two were added while the snapshot source was pinned to the pre-shrink 300 GB
+# fossil, to make that mismatch visible. The source now tracks the current DLM snapshots,
+# so they should agree -- which is exactly why they are worth keeping: they turn "is the
+# DR AMI built from the right disk?" into a standing check rather than a one-time fix.
 output "primary_ami_snapshot_volume_size" {
   value       = data.aws_ebs_snapshot.primary.volume_size
   description = "Volume size (GiB) of the snapshot the primary AMI is built from."
 }
 
+output "primary_ami_snapshot_start_time" {
+  value       = data.aws_ebs_snapshot.primary.start_time
+  description = "When the snapshot behind the primary AMI was taken. DLM runs Mon/Wed/Fri at 06:00 UTC and retains 3, so anything older than about a week means the schedule has stopped. (DLM cron is UTC-only, so the policy's 2AM_ET name holds only under EDT; in winter it fires at 01:00 ET.)"
+}
+
 output "primary_root_volume_size" {
   value       = one(aws_instance.primary.root_block_device[*].volume_size)
-  description = "Root volume size (GiB) of the running primary. Should match primary_ami_snapshot_volume_size; a difference means the DR AMI is stale."
+  description = "Root volume size (GiB) of the running primary. If this differs from primary_ami_snapshot_volume_size the DR AMI is built from the wrong disk."
 }
 
 output "primary_launch_template_id" {
@@ -76,14 +80,34 @@ output "primary_launch_template_id" {
   description = "Launch template for a primary rebuild."
 }
 
+output "primary_launch_template_default_version" {
+  value       = aws_launch_template.primary.default_version
+  description = "Default version a rebuild gets when it does not name one. update_default_version = true keeps this equal to latest_version; if they ever diverge, the version a rebuild would launch is not the one this repo describes."
+}
+
+output "primary_launch_template_latest_version" {
+  value       = aws_launch_template.primary.latest_version
+  description = "Newest version of the primary launch template."
+}
+
 output "secondary_launch_template_id" {
   value       = aws_launch_template.secondary.id
   description = "Launch template for a secondary rebuild."
 }
 
+output "secondary_launch_template_default_version" {
+  value       = aws_launch_template.secondary.default_version
+  description = "Default version a rebuild gets when it does not name one; see primary_launch_template_default_version."
+}
+
+output "secondary_launch_template_latest_version" {
+  value       = aws_launch_template.secondary.latest_version
+  description = "Newest version of the secondary launch template."
+}
+
 output "primary_dlm_policy_id" {
   value       = aws_dlm_lifecycle_policy.primary.id
-  description = "DLM policy taking the M/W/F 2AM ET primary snapshots (3 retained)."
+  description = "DLM policy taking the M/W/F primary snapshots at 06:00 UTC (3 retained). The 2AM_ET in its name holds only under EDT; DLM cron is UTC-only."
 }
 
 output "secondary_dlm_policy_id" {

@@ -142,9 +142,14 @@ output "primary_ami_snapshot_volume_size" {
   description = "Volume size (GiB) of the snapshot the primary AMI is built from."
 }
 
+output "primary_ami_snapshot_start_time" {
+  value       = module.us-east-1.primary_ami_snapshot_start_time
+  description = "When the snapshot behind the primary AMI was taken. DLM runs Mon/Wed/Fri and retains 3, so anything older than about a week means the schedule has stopped."
+}
+
 output "primary_root_volume_size" {
   value       = module.us-east-1.primary_root_volume_size
-  description = "Root volume size (GiB) of the running primary. If this differs from primary_ami_snapshot_volume_size the DR AMI is stale."
+  description = "Root volume size (GiB) of the running primary. If this differs from primary_ami_snapshot_volume_size the DR AMI is built from the wrong disk."
 }
 
 output "primary_launch_template_id" {
@@ -152,14 +157,34 @@ output "primary_launch_template_id" {
   description = "Launch template for a primary rebuild."
 }
 
+output "primary_launch_template_default_version" {
+  value       = module.us-east-1.primary_launch_template_default_version
+  description = "Default version a rebuild gets when it does not name one. update_default_version = true keeps this equal to latest_version; if they ever diverge, the version a rebuild would launch is not the one this repo describes."
+}
+
+output "primary_launch_template_latest_version" {
+  value       = module.us-east-1.primary_launch_template_latest_version
+  description = "Newest version of the primary launch template."
+}
+
 output "secondary_launch_template_id" {
   value       = module.us-east-1.secondary_launch_template_id
   description = "Launch template for a secondary rebuild."
 }
 
+output "secondary_launch_template_default_version" {
+  value       = module.us-east-1.secondary_launch_template_default_version
+  description = "Default version a rebuild gets when it does not name one; see primary_launch_template_default_version."
+}
+
+output "secondary_launch_template_latest_version" {
+  value       = module.us-east-1.secondary_launch_template_latest_version
+  description = "Newest version of the secondary launch template."
+}
+
 output "primary_dlm_policy_id" {
   value       = module.us-east-1.primary_dlm_policy_id
-  description = "DLM policy taking the M/W/F 2AM ET primary snapshots (3 retained)."
+  description = "DLM policy taking the M/W/F primary snapshots at 06:00 UTC (3 retained). The 2AM_ET in its name holds only under EDT; DLM cron is UTC-only."
 }
 
 output "secondary_dlm_policy_id" {

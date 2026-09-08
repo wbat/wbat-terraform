@@ -89,9 +89,13 @@ a name-mismatch warning into hard expiry. Re-check renewal state after the fix.
 # Which address does nginx actually have bound, and which servers are in each group?
 sudo nginx -T | grep -nE '^\s*(listen|server_name)' | less
 
-# The address public traffic lands on (primary private IP of this instance):
+# The address public traffic lands on (primary private IP of this instance).
+# IMDSv2 is enforced on both boxes, so a bare GET returns 401 -- fetch a token first.
 ip -4 addr show scope global
-curl -s http://169.254.169.254/latest/meta-data/local-ipv4; echo
+TOKEN=$(curl -sS -X PUT http://169.254.169.254/latest/api/token \
+  -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
+curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" \
+  http://169.254.169.254/latest/meta-data/local-ipv4; echo
 
 # Confirm a broken domain has no listen on that address:
 sudo nginx -T | grep -A15 'server_name .*iots\.com' | grep listen
@@ -126,13 +130,48 @@ Known-bad `nginx -T` captured before the fix (offline detector fixture):
 Scripts: `scripts/directadmin/da_vhost_listen_reconcile.sh` (cron/boot `--enforce`,
 hook `--check`) and `scripts/directadmin/nginx_vhost_listen_invariant.sh`.
 
-The per-domain `fix-nginx-loopback-listeners.sh` path is **retired** (cron disabled;
-`~/bin/fix-nginx-loopback-listeners.sh.retired`). Do not re-enable it.
+## The invariant
+
+**Linked IP is the only supported way to put an address into vhost listens on this host.
+Per-domain `listen` injection is forbidden.**
+
+That is a rule about mechanism, not about one bad script, because the failure it prevents is
+not intuitive: nginx picks the server block whose `listen` most specifically matches the
+address a request arrived on, so adding an explicit address to *one* vhost silently demotes
+every vhost that lacks it to the catch-all. A change that reads as "make tellerstech.com
+work" is in fact a server-wide change, and the sites it breaks are the ones nobody edited.
+
+Linked IP is the supported mechanism because DirectAdmin expands it into every domain's vhost
+through the `|LINKEDIP|` / `|LINKEDIPSSL|` tokens: it survives `rewrite_confs` and DA updates,
+and new domains inherit it with no hook. There is exactly one place to get it right, and
+`da_vhost_listen_reconcile.sh` keeps it right.
+
+### The retired hand-patch, and how it could come back
+
+`fix-nginx-loopback-listeners.sh` is the concrete violation, now **retired**: root cron
+disabled, script renamed to `~/bin/fix-nginx-loopback-listeners.sh.retired`. It injected
+`127.0.0.1`, `[::1]`, and `172.30.0.71` into `tellerstec`'s vhosts only, every 5 minutes.
+
+Two details from the capture matter for anyone tempted to bring it back or write another one:
+
+- **It edited the *generated* config** (`data/users/tellerstec/nginx.conf`), not `cust_nginx`
+  or a custombuild template. So a DA rewrite wiped it and cron re-applied it minutes later.
+  That is why the regression looked intermittent and why removal was safe to sequence: there
+  was no persistent template to unwind.
+- **A copy ships inside a WordPress plugin**
+  (`.../plugins/tellerstech-landing/scripts/fix-nginx-loopback-listeners.sh`). Retiring the
+  file in `~/bin` does not remove that one. **A plugin redeploy is the live recurrence
+  vector** — if these symptoms return, check whether that script was reinstated and a cron
+  entry with it, before re-diagnosing from scratch.
+
+Full capture, including the injection-site analysis:
+[`fixtures/nginx-catchall-broken-2026-07-26/`](fixtures/nginx-catchall-broken-2026-07-26/)
 
 ## Prevention
 
-- Treat any per-domain `listen` injection on this host as a **server-wide** change. Adding an
-  explicit address to one vhost silently removes that address from every vhost that lacks it.
+- Treat any per-domain `listen` injection on this host as a **server-wide** change, per the
+  invariant above. It is also a duplicate-`listen` hazard: once Linked IP is correct, an
+  injected address appears twice in the same server block and `nginx -t` fails.
 - Catch-all responses now include `X-DA-Catchall: 1` (hostname `nginx-vhosts.conf`). Hard-fail
   with `421`/`444` remains opt-in. Use `check-vhost-listeners.sh` (ports 80+443, ACME, header).
 - After any `rewrite nginx` / `da build rewrite_confs`, run the multi-domain verification
