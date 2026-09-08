@@ -316,6 +316,72 @@ now, and a watchdog that kills the backup if free space crosses `DA_BATCH_FLOOR_
 mid-run. An account that never fits is skipped and mailed rather than attempted, because an
 account with no backup is worth saying out loud.
 
+The estimate is of the archive DirectAdmin will write, not of the disk the account
+occupies, and those differ whenever an account excludes something. DirectAdmin reads
+`/home/<account>/.backup_exclude_paths` and passes it as `--exclude-from` right after `-C
+/home/<account>`, to both the inner `home.tar` and the outer account archive, so a path
+listed there is in the home and not in the backup. Sizing from `du -sk /home/<account>` is
+what keeps `tellerstec` skipped every night: 34 GB of home, 29 GB of it Installatron's own
+copies of applications DirectAdmin is already archiving, and a 68 GB peak against 59.8 GB
+free for an archive that would come in around 16 GB. So the estimator subtracts what the
+exclusions match. `--list` shows it in an `EXCLUDED` column and the run log says `less N GB
+excluded`, because an exclusion that took effect and one with a typo in it have to look
+different from each other rather than both looking like a smaller number.
+
+Every part of that is written to fail towards over-stating an account, since over-stating
+costs a skip that arrives by mail with the account named in it, while under-stating starts
+a backup on a volume that cannot hold it. It asks the DirectAdmin binary whether
+`allow_backup_exclude_path` is on and treats a config dump that fails, or that does not
+carry the key, exactly like a `0` — the documented default is `1`, but a default is an
+assumption rather than a reading. An entry with a leading slash or a `..` in it subtracts
+nothing, because neither can match an archive member name and DirectAdmin will back the
+path up regardless; the leading slash is the usual way this file is got wrong and it is
+otherwise silent. A **trailing slash** subtracts nothing for the same reason and is the
+worst of the three, because it is the natural way to write a directory: the shell expands
+`application_backups/` to the directory quite happily, while GNU tar 1.35 given `app/` in
+an `--exclude-from` archives both `app/` and `app/file`, and given `app` archives neither.
+So does an entry that resolves outside the home, and an excluded symlink,
+which keeps the link out of the archive rather than the tree it points at. Overlapping
+entries are measured in a single `du` run so `domains` and `domains/example.com` cannot
+come off twice, and a `du` or a glob expansion that fails sizes the account from its whole
+home rather than from a partial total. `DA_BATCH_HONOUR_EXCLUDES` forces the answer to
+`1` or `0` if you would rather not have it decided by interrogation.
+
+Two more, both of which exist because this file is the one input to the script that an
+account holder owns and can rewrite between runs:
+
+- **Hard-linked bytes are not credited.** `du` counts an inode once per run, so a file with
+  one link under an excluded path and another under a path that is archived is counted once
+  by each of the two `du` runs and subtracted in full — while tar, having skipped the
+  excluded link, writes the whole file out under the one it kept. Deciding it exactly means
+  walking the home for every link, so any file under the excluded paths with a link count
+  above one is simply not taken off, and the log says how much that was. An account that
+  wanted to could otherwise hide a volume's worth of data behind it.
+- **The list must be a regular file, and a small one.** It is read after the batch lock is
+  taken and before the per-account timeout starts, so a read that never returns stops every
+  account, not one, and nothing mails until the next night's run finds a day-old lock. A
+  FIFO satisfies `-e` and `-r` and then blocks forever; a symlink to `/dev/zero` returns NUL
+  bytes without end; a symlink to an ordinary file elsewhere would have this script read,
+  and log lines from, a file DirectAdmin never would. So a symlink or a non-regular file is
+  refused, the read is bounded by `timeout` in case the path is swapped after the check, and
+  anything over `DA_BATCH_EXCLUDE_MAX_BYTES` (64 KB) is refused whole rather than read to the
+  limit — a cut-off last line is not a shorter list but a different one, and
+  `domains/example.com/private` clipped to `domains` names a real directory.
+
+Writing one, per account, owned by the account:
+
+```bash
+install -m 600 -o tellerstec -g tellerstec /dev/null \
+  /home/tellerstec/.backup_exclude_paths
+printf 'application_backups\n' >/home/tellerstec/.backup_exclude_paths
+/usr/local/sbin/da-backup-batch.sh --list   # EXCLUDED must be non-empty for that account
+```
+
+Paths are **relative to the home, with no leading slash, no trailing slash and no
+`/home/<account>` prefix**, one per line, globs allowed (`domains/*/awstats`, `*.zip`).
+`--list` is how you find out whether DirectAdmin and this script agree that the entry means
+anything.
+
 The peak is the estimated archive taken `DA_BATCH_PEAK_COPIES_PCT` over, not the archive
 itself, because DirectAdmin needs room for two copies. It assembles the account under
 `<destination>/<user>/` — `backup/home.tar.zst`, then a `.sql` per database, then the
@@ -370,6 +436,9 @@ Backup/Transfer → Schedule**, or the two race at 05:00.
 | Reserve left free after the estimated peak | 10 GB | `DA_BATCH_RESERVE_GB` |
 | Hard floor that kills a running backup | 8 GB | `DA_BATCH_FLOOR_GB` |
 | Estimated archive as a % of the home directory | 100% | `DA_BATCH_RATIO_PCT` |
+| Subtract what `.backup_exclude_paths` excludes | `auto` (ask DirectAdmin) | `DA_BATCH_HONOUR_EXCLUDES` |
+| Largest `.backup_exclude_paths` that will be read | 65536 bytes | `DA_BATCH_EXCLUDE_MAX_BYTES` |
+| Timeout on reading it | 10s | `DA_BATCH_EXCLUDE_READ_TIMEOUT` |
 | Peak disk as a % of that archive | 200% | `DA_BATCH_PEAK_COPIES_PCT` |
 | Wait for the hook to clear the staging dir | 1800s | `DA_BATCH_DRAIN_TIMEOUT` |
 | Hard limit on one account's archive run | 21600s | `DA_BATCH_ACCOUNT_TIMEOUT` |
@@ -478,6 +547,14 @@ backlog, so a sweep that silently fails to reclaim anything is the worst place t
 | Backups stop with no hook log at all | The DirectAdmin backup task itself is failing, so no post-hook fires | `grep 'dataskq.*backup' /var/log/messages`; a `Not implemented` error is a DA problem, not a hook problem |
 | `ERROR ... not verified in S3 (rclone check rc=N)` | Objects did not land, or the bucket is unreachable | Local copies were kept deliberately; fix rclone/S3 access and re-run the hook |
 | `backup local cleanup FAILED` / `ERROR could not remove N verified file(s)` | The upload was verified but the delete failed: read-only filesystem, `chattr +i`, or an I/O error | The copies named in the mail are already in S3 and safe to `rm` by hand; then find what blocked the delete (`mount | grep ' / '`, `lsattr`, `dmesg`) |
+| `NOTE ignoring '...' ... a leading slash matches no archive member` | An entry in `.backup_exclude_paths` is absolute, so DirectAdmin excludes nothing for it | Rewrite it relative to the home (`application_backups`, not `/home/tellerstec/application_backups`) and re-check with `--list` |
+| An account is skipped and `--list` shows `-` under `EXCLUDED` | Either there is no `.backup_exclude_paths`, or nothing in it resolves to anything inside the home | The log has a `NOTE ignoring` line per rejected entry saying which it is |
+| `NOTE ... is not being taken off the size estimate ... not known to honour it` | `allow_backup_exclude_path` is `0`, or the config could not be read | `/usr/local/directadmin/directadmin c \| grep allow_backup_exclude_path`. Exclusions are deliberately ignored unless that reads `1`, because assuming otherwise under-states an account and fills the volume |
+| `WARN could not measure the paths excluded by ...` | `du` failed part way through an excluded path | The account is sized from its whole home for that run, which can only cost it a skip. Check permissions and `dmesg` |
+| `NOTE ignoring '...' ... a trailing slash matches no archive member` | An entry is written `application_backups/`, which the shell resolves and tar ignores | Drop the slash. The message names the spelling to use |
+| `NOTE N KB ... is hard-linked and may still be reachable` | Something under the excluded paths has a link count above one, so those bytes may survive into the archive under a path that is not excluded | Expected when an account hard-links across the boundary, and deliberately not credited. `find /home/<account>/<excluded> -type f -links +1` shows which files |
+| `WARN ... is not a regular file; sizing ... rather than opening it` | `.backup_exclude_paths` is a symlink, FIFO, or device | `ls -l` it. This is refused because a FIFO there blocks the read inside the batch lock and stops every account, so it is worth understanding how it got there |
+| `WARN ... is N bytes, over the ... byte limit` | The exclusion list is larger than `DA_BATCH_EXCLUDE_MAX_BYTES` | Refused whole rather than truncated, because a cut-off final entry can name a directory much larger than the one intended. Shorten it, or raise the limit if it is genuinely that long |
 | `ERROR another run held /var/log/... lock` | Admin and system backups overlapped and one waited out `DA_BACKUP_LOCK_WAIT` | `pgrep -a rclone`; clear the stuck upload, then re-run the hook |
 | Disk fills with no backups in `/home` | Not the backup hook | `da-disk-guard.sh --report` for the actual consumers |
 
