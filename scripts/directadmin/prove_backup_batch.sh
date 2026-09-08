@@ -51,6 +51,20 @@ mkdir -p "${SANDBOX}/bin"
 # looks like from this script's side.
 cat >"${SANDBOX}/bin/directadmin" <<'STUB'
 #!/bin/bash
+# `directadmin c` dumps the running configuration. It is how the batch script finds out
+# whether DirectAdmin will honour a per-user .backup_exclude_paths before it takes one off
+# an account's size estimate, and STUB_DA_CONFIG drives all three answers it can get: the
+# key set to 1, the key set to 0, and no usable answer at all.
+if [[ "${1:-}" == "c" ]]; then
+  echo "backup_tmpdir=/home/tmp"
+  case "${STUB_DA_CONFIG:-1}" in
+    absent) : ;;      # a build whose config dump does not carry the key
+    unreadable) exit 2 ;; # no binary, wrong permissions, DirectAdmin not installed
+    *) echo "allow_backup_exclude_path=${STUB_DA_CONFIG:-1}" ;;
+  esac
+  echo "backup_crons=1"
+  exit 0
+fi
 dest=""; user=""
 for a in "$@"; do
   case "$a" in
@@ -135,6 +149,30 @@ add_account() {
   dd if=/dev/zero of="${CASE}/home/${user}/data.bin" bs=1M count="$mb" status=none
 }
 
+# More real bytes, somewhere under the account's home rather than at the top of it. Used by
+# the exclusion proofs, where the whole question is which part of a home is measured.
+add_account_data() {
+  local user="$1" rel="$2" mb="$3"
+  mkdir -p "${CASE}/home/${user}/${rel}"
+  dd if=/dev/zero of="${CASE}/home/${user}/${rel}/blob.bin" bs=1M count="$mb" status=none
+}
+
+# The tellerstec shape at 1/1700 scale: a home that is three quarters application backups.
+# 20 MB of home, so at the 200% peak model it needs 40 MB of free space as it stands and
+# 10 MB with the application backups left out. The exclusion proofs run it against 30 MB.
+add_excluder_account() {
+  local user="$1"
+  add_account "$user" 5
+  add_account_data "$user" application_backups 15
+}
+
+# The per-user file DirectAdmin reads, written where DirectAdmin reads it from.
+set_excludes() {
+  local user="$1"
+  shift
+  printf '%s\n' "$@" >"${CASE}/home/${user}/.backup_exclude_paths"
+}
+
 # FLOOR_GB defaults to 0 here, unlike the script's own 8, because most proofs work in
 # megabytes of fake free space. Leaving the real default on would put every one of them
 # below the floor, so the run would abort for that reason instead of exercising whatever
@@ -176,6 +214,9 @@ run_batch() {
     "DA_BATCH_ABORT_SENTINEL=${CASE}/abort-sentinel"
   )
   [[ -n "${PEAK_COPIES_PCT:-}" ]] && envs+=("DA_BATCH_PEAK_COPIES_PCT=${PEAK_COPIES_PCT}")
+  # Passed through only when a proof forces it, so every other proof resolves the exclusion
+  # question the way the host will: by asking the DirectAdmin binary.
+  [[ -n "${HONOUR_EXCLUDES:-}" ]] && envs+=("DA_BATCH_HONOUR_EXCLUDES=${HONOUR_EXCLUDES}")
   env "${envs[@]}" \
     ${bound[@]+"${bound[@]}"} \
     "$SCRIPT" "$@" >"${CASE}/stdout" 2>"${CASE}/stderr"
@@ -284,6 +325,202 @@ assert "the account is skipped even though a single archive would fit" "! grep -
 assert "the log calls it a peak need rather than an archive size" "grep -q 'peak need is about' '${CASE}/batch.log'"
 assert "the log says why one archive is not the number that matters" "grep -q 'assembled parts and the archive' '${CASE}/batch.log'"
 assert "the mail reports the home size next to the peak" "grep -q 'peak need' '$STUB_MAIL'"
+
+# ---------------------------------------------------------------------------
+echo
+echo "3e. A path DirectAdmin has been told not to archive is not sized as though it will be"
+# The tellerstec case, scaled down. 34 GB of home, 29 GB of it Installatron's own gzipped
+# copies of applications DirectAdmin already backs up, and an estimate built from all of it
+# says the account needs 68 GB of peak space against 59.8 GB free. So it is skipped, and it
+# has been skipped every night since 2026-07-02. What DirectAdmin would actually write is
+# roughly July's 7.7 GiB, which fits with room to spare.
+#
+# Here: a 20 MB home, 15 MB of it in application_backups, against 30 MB free. The whole
+# home needs 40 MB of peak space and does not fit; what will be archived needs 10 MB and
+# does. The exclusion is the only thing that differs between the two runs below.
+new_case exclude-fits
+add_excluder_account mostlybackups
+add_account plain 1
+echo $((30 * 1024)) >"$STUB_DF_KB_FILE"
+RESERVE_GB=0
+rc="$(run_batch)"
+assert "exit 1 with no exclusion in place" "[[ '$rc' == 1 ]]"
+assert "the account is skipped, as it has been every night since July" "! grep -qx mostlybackups '$STUB_DA_CALLS'"
+
+: >"$STUB_DA_CALLS"
+: >"$STUB_MAIL"
+set_excludes mostlybackups "application_backups"
+rc="$(run_batch)"
+unset RESERVE_GB
+assert "exit 0 once the exclusion is in place" "[[ '$rc' == 0 ]]"
+assert "the same account, the same free space, and now it is archived" "grep -qx mostlybackups '$STUB_DA_CALLS'"
+assert "the log shows what was taken off rather than quietly using a smaller number" "grep -q 'less .* GB excluded' '${CASE}/batch.log'"
+
+RESERVE_GB=0
+rc="$(run_batch --list)"
+unset RESERVE_GB
+assert "--list exits 0" "[[ '$rc' == 0 ]]"
+assert "--list has a column for it" "grep -q 'EXCLUDED' '${CASE}/stdout'"
+assert "--list shows the exclusion against the account it applies to" \
+  "[[ \"\$(awk '\$1 == \"mostlybackups\" { print \$3 }' '${CASE}/stdout')\" != '-' ]]"
+assert "--list shows a dash for an account that excludes nothing" \
+  "[[ \"\$(awk '\$1 == \"plain\" { print \$3 }' '${CASE}/stdout')\" == '-' ]]"
+assert "--list still reports the whole home beside it" \
+  "[[ -n \"\$(awk '\$1 == \"mostlybackups\" { print \$2 }' '${CASE}/stdout')\" ]]"
+
+# ---------------------------------------------------------------------------
+echo
+echo "3f. A leading slash subtracts nothing, because DirectAdmin excludes nothing for it"
+# The single most common way to get this file wrong, and it is silent: DirectAdmin passes
+# the file to tar as --exclude-from after -C /home/<user>, so the patterns are matched
+# against member names that are relative to the home. An absolute path matches none of
+# them and the directory is archived in full. An estimator that subtracted for it would
+# size the account from an archive that is never written -- which is the one error that
+# fills the volume rather than merely skipping an account.
+#
+# The entry below is written absolute, and the path it names really does exist, so nothing
+# but the guard stands between it and a smaller estimate.
+new_case exclude-leading-slash
+add_excluder_account slashed
+set_excludes slashed "${CASE}/home/slashed/application_backups"
+echo $((30 * 1024)) >"$STUB_DF_KB_FILE"
+RESERVE_GB=0
+rc="$(run_batch)"
+unset RESERVE_GB
+assert "exit 1" "[[ '$rc' == 1 ]]"
+assert "the estimate is not shrunk by an entry DirectAdmin will ignore" "! grep -qx slashed '$STUB_DA_CALLS'"
+assert "the log says the entry does nothing, so a typo is visible rather than silent" "grep -q 'leading slash matches no archive member' '${CASE}/batch.log'"
+
+# ---------------------------------------------------------------------------
+echo
+echo "3g. Overlapping entries describe the same bytes once"
+# `domains` and `domains/example.com` in the same file are the same disk space named
+# twice. Subtracting it twice takes the estimate below what the archive will be, and past
+# a certain point below zero -- at which the clamp makes every account look free, and the
+# gate stops being a gate at all.
+#
+# 25 MB of home, 15 MB of it named by both entries, against 15 MB free. Counted once the
+# account needs 20 MB of peak space and is rightly skipped; counted twice it estimates at
+# nothing and is waved straight through.
+new_case exclude-overlap
+add_account nested 10
+add_account_data nested domains/example.com 15
+set_excludes nested "domains" "domains/example.com"
+echo $((15 * 1024)) >"$STUB_DF_KB_FILE"
+RESERVE_GB=0
+rc="$(run_batch)"
+unset RESERVE_GB
+assert "exit 1" "[[ '$rc' == 1 ]]"
+assert "the overlap is not subtracted twice, so the account is still too big to start" "! grep -qx nested '$STUB_DA_CALLS'"
+
+# ---------------------------------------------------------------------------
+echo
+echo "3h. A glob is expanded, and every path it matches counts"
+# DirectAdmin supports patterns here (`domains/*/awstats`, `*.zip`), so an estimator that
+# only understood literal paths would subtract nothing for the exact entries people are
+# most likely to write.
+#
+# 25 MB of home in three places, 20 MB of it matched by one pattern, against 22 MB free.
+# Both matches taken off, the account needs 10 MB and runs; either of them missed and it
+# needs 30 MB and is skipped.
+new_case exclude-glob
+add_account globbed 5
+add_account_data globbed domains/a.example/appbackups 10
+add_account_data globbed domains/b.example/appbackups 10
+set_excludes globbed "domains/*/appbackups"
+echo $((22 * 1024)) >"$STUB_DF_KB_FILE"
+RESERVE_GB=0
+rc="$(run_batch)"
+unset RESERVE_GB
+assert "exit 0" "[[ '$rc' == 0 ]]"
+assert "both matches were taken off, not just the first" "grep -qx globbed '$STUB_DA_CALLS'"
+
+# ---------------------------------------------------------------------------
+echo
+echo "3i. An entry that leaves the home subtracts nothing"
+# Two ways out of the home, neither of which DirectAdmin will honour, and both of which
+# would shrink the estimate if this took the entries at face value. `..` cannot appear in
+# an archive member name, so a pattern containing one matches nothing however tidily it
+# resolves on disk; and a path reached through a symlinked parent lands outside the tree
+# this account's archive contains at all.
+new_case exclude-escapes-home
+add_excluder_account dotdot
+set_excludes dotdot "application_backups/../application_backups"
+add_excluder_account symlinked
+mkdir -p "${CASE}/outside"
+dd if=/dev/zero of="${CASE}/outside/blob.bin" bs=1M count=15 status=none
+ln -s "${CASE}/outside" "${CASE}/home/symlinked/elsewhere"
+set_excludes symlinked "elsewhere/blob.bin"
+echo $((30 * 1024)) >"$STUB_DF_KB_FILE"
+RESERVE_GB=0
+rc="$(run_batch)"
+unset RESERVE_GB
+assert "exit 1" "[[ '$rc' == 1 ]]"
+assert "a .. entry subtracts nothing" "! grep -qx dotdot '$STUB_DA_CALLS'"
+assert "the log says why it was ignored" "grep -q 'component matches no archive member' '${CASE}/batch.log'"
+assert "a path that leaves the home through a symlink subtracts nothing" "! grep -qx symlinked '$STUB_DA_CALLS'"
+assert "the log names where it actually resolved to" "grep -q ', outside ' '${CASE}/batch.log'"
+
+# ---------------------------------------------------------------------------
+echo
+echo "3j. Excluding a symlink excludes the link, not what it points at"
+# tar leaves out the link entry and then walks to the target under its own name, so the
+# tree is archived in full. Following the link here would subtract 15 MB that DirectAdmin
+# is about to write -- and unlike the cases above, this one is trivially arranged by the
+# account owner, who need not have meant anything by it.
+new_case exclude-symlink-inside
+add_excluder_account linked
+ln -s application_backups "${CASE}/home/linked/backups-link"
+set_excludes linked "backups-link"
+echo $((30 * 1024)) >"$STUB_DF_KB_FILE"
+RESERVE_GB=0
+rc="$(run_batch)"
+unset RESERVE_GB
+assert "exit 1" "[[ '$rc' == 1 ]]"
+assert "the tree behind the link is still counted, so the account is still skipped" "! grep -qx linked '$STUB_DA_CALLS'"
+
+# ---------------------------------------------------------------------------
+echo
+echo "3k. The file is only believed when DirectAdmin says it reads it"
+# allow_backup_exclude_path defaults to 1, and on this host it is 1, but a default is not a
+# reading. Every state in which the answer is not a definite yes has to size the account
+# from its whole home: over-stating an account costs it a skip, which arrives by mail with
+# the account named in it, while under-stating one starts a backup the volume cannot hold.
+new_case exclude-not-honoured
+add_excluder_account gated
+set_excludes gated "application_backups"
+echo $((30 * 1024)) >"$STUB_DF_KB_FILE"
+RESERVE_GB=0
+
+export STUB_DA_CONFIG=0
+rc="$(run_batch)"
+assert "exit 1" "[[ '$rc' == 1 ]]"
+assert "allow_backup_exclude_path=0 means the file is ignored entirely" "! grep -qx gated '$STUB_DA_CALLS'"
+assert "the log says the file was not applied, and why" "grep -q 'not being taken off the size estimate' '${CASE}/batch.log'"
+
+: >"$STUB_DA_CALLS"
+export STUB_DA_CONFIG=absent
+rc="$(run_batch)"
+assert "a config dump that never mentions the key is not read as permission" "! grep -qx gated '$STUB_DA_CALLS'"
+
+: >"$STUB_DA_CALLS"
+export STUB_DA_CONFIG=unreadable
+rc="$(run_batch)"
+assert "a config that cannot be obtained at all is not read as permission either" "! grep -qx gated '$STUB_DA_CALLS'"
+
+# The override, in both directions: it is what lets an operator apply the adjustment on a
+# build this cannot interrogate, and turn it off on one where it can.
+: >"$STUB_DA_CALLS"
+HONOUR_EXCLUDES=1
+rc="$(run_batch)"
+assert "DA_BATCH_HONOUR_EXCLUDES=1 applies the file without asking" "grep -qx gated '$STUB_DA_CALLS'"
+
+: >"$STUB_DA_CALLS"
+unset STUB_DA_CONFIG
+HONOUR_EXCLUDES=0
+rc="$(run_batch)"
+assert "DA_BATCH_HONOUR_EXCLUDES=0 turns it off where DirectAdmin would have honoured it" "! grep -qx gated '$STUB_DA_CALLS'"
+unset HONOUR_EXCLUDES RESERVE_GB
 
 # ---------------------------------------------------------------------------
 echo
@@ -662,6 +899,115 @@ PEAK_COPIES_PCT=100
 run_batch >/dev/null
 unset RESERVE_GB PEAK_COPIES_PCT
 nv_check "the account that needs two archives' worth of room is attempted" "grep -qx doubled '$STUB_DA_CALLS'"
+
+# The exclusion guards. Every one of them refuses to subtract for a path DirectAdmin is
+# going to archive anyway, so removing any of them produces the same failure: an estimate
+# smaller than the archive, and an account started on a volume that cannot hold it.
+
+# NV3e: stop rejecting an absolute entry, and a path DirectAdmin will not match comes off
+# the estimate.
+sed 's|    if \[\[ "$entry" == /\* \]\]; then|    if false; then|' "$SCRIPT" >"$NV"
+chmod +x "$NV"
+new_case nv-leading-slash
+add_excluder_account slashed
+set_excludes slashed "${CASE}/home/slashed/application_backups"
+echo $((30 * 1024)) >"$STUB_DF_KB_FILE"
+SCRIPT_SAVE="$SCRIPT"
+SCRIPT="$NV"
+RESERVE_GB=0
+run_batch >/dev/null
+unset RESERVE_GB
+SCRIPT="$SCRIPT_SAVE"
+nv_check "an absolute entry shrinks the estimate and the account is started" "grep -qx slashed '$STUB_DA_CALLS'"
+
+# NV3f: stop rejecting a .. component. It resolves inside the home, so nothing else catches
+# it, and no archive member name it could match exists.
+sed 's|      \*/\.\./\*)|      __never_matches__)|' "$SCRIPT" >"$NV"
+chmod +x "$NV"
+new_case nv-dotdot
+add_excluder_account dotdot
+set_excludes dotdot "application_backups/../application_backups"
+echo $((30 * 1024)) >"$STUB_DF_KB_FILE"
+SCRIPT_SAVE="$SCRIPT"
+SCRIPT="$NV"
+RESERVE_GB=0
+run_batch >/dev/null
+unset RESERVE_GB
+SCRIPT="$SCRIPT_SAVE"
+nv_check "a .. entry shrinks the estimate and the account is started" "grep -qx dotdot '$STUB_DA_CALLS'"
+
+# NV3g: stop checking that a resolved entry is still inside the home, and space that is not
+# in this account at all is deducted from it.
+sed 's|        if \[\[ "$resolved" != "${real_home}"/\* \]\]; then|        if false; then|' "$SCRIPT" >"$NV"
+chmod +x "$NV"
+new_case nv-escapes-home
+add_excluder_account symlinked
+mkdir -p "${CASE}/outside"
+dd if=/dev/zero of="${CASE}/outside/blob.bin" bs=1M count=15 status=none
+ln -s "${CASE}/outside" "${CASE}/home/symlinked/elsewhere"
+set_excludes symlinked "elsewhere/blob.bin"
+echo $((30 * 1024)) >"$STUB_DF_KB_FILE"
+SCRIPT_SAVE="$SCRIPT"
+SCRIPT="$NV"
+RESERVE_GB=0
+run_batch >/dev/null
+unset RESERVE_GB
+SCRIPT="$SCRIPT_SAVE"
+nv_check "a path outside the home is deducted from it and the account is started" "grep -qx symlinked '$STUB_DA_CALLS'"
+
+# NV3h: follow an excluded symlink to its target, and a tree tar is about to write is
+# subtracted. This is the one an account owner can arrange without meaning to.
+sed 's|        \[\[ -L "$match" \]\] && continue|        :|' "$SCRIPT" >"$NV"
+chmod +x "$NV"
+new_case nv-symlink-inside
+add_excluder_account linked
+ln -s application_backups "${CASE}/home/linked/backups-link"
+set_excludes linked "backups-link"
+echo $((30 * 1024)) >"$STUB_DF_KB_FILE"
+SCRIPT_SAVE="$SCRIPT"
+SCRIPT="$NV"
+RESERVE_GB=0
+run_batch >/dev/null
+unset RESERVE_GB
+SCRIPT="$SCRIPT_SAVE"
+nv_check "the link's target is subtracted and the account is started" "grep -qx linked '$STUB_DA_CALLS'"
+
+# NV3i: measure the excluded paths one du run each instead of one run for all of them. du
+# counts a file once per invocation and not across invocations, so this is exactly how
+# `domains` and `domains/example.com` come off the estimate twice.
+sed 's|du -sk --files0-from="$paths"|xargs -0 -a "$paths" -n1 du -sk --|' "$SCRIPT" >"$NV"
+chmod +x "$NV"
+new_case nv-overlap
+add_account nested 10
+add_account_data nested domains/example.com 15
+set_excludes nested "domains" "domains/example.com"
+echo $((15 * 1024)) >"$STUB_DF_KB_FILE"
+SCRIPT_SAVE="$SCRIPT"
+SCRIPT="$NV"
+RESERVE_GB=0
+run_batch >/dev/null
+unset RESERVE_GB
+SCRIPT="$SCRIPT_SAVE"
+nv_check "the same bytes are subtracted twice and the account is started" "grep -qx nested '$STUB_DA_CALLS'"
+
+# NV3j: apply the file whatever DirectAdmin says about it. The proof above uses the state
+# where the binary cannot be asked at all, because that is the one a wrong default is most
+# likely to be reached through: a build without the key, a binary that has moved.
+sed 's|  if \[\[ "$EXCLUDE_SUPPORT" != "yes" \]\]; then|  if false; then|' "$SCRIPT" >"$NV"
+chmod +x "$NV"
+new_case nv-not-honoured
+add_excluder_account gated
+set_excludes gated "application_backups"
+echo $((30 * 1024)) >"$STUB_DF_KB_FILE"
+SCRIPT_SAVE="$SCRIPT"
+SCRIPT="$NV"
+export STUB_DA_CONFIG=unreadable
+RESERVE_GB=0
+run_batch >/dev/null
+unset RESERVE_GB
+unset STUB_DA_CONFIG
+SCRIPT="$SCRIPT_SAVE"
+nv_check "an unanswerable config question is taken as a yes and the account is started" "grep -qx gated '$STUB_DA_CALLS'"
 
 # NV4: drop the per-account time limit and let the same hang run unbounded. The outer
 # `timeout` is what stands in for the guard: rc 124 means the script never gave up on its

@@ -27,6 +27,12 @@
 #      ratio that got worse, or another process writing to the same volume; the floor does
 #      not care why the number moved.
 #
+# The estimate is of the archive DirectAdmin will write, not of the disk the account
+# occupies, and those differ when the account excludes something. DirectAdmin honours a
+# per-user .backup_exclude_paths, and sizing from the whole home ignores it: on this host
+# tellerstec is 34 GB of home of which 29 GB is Installatron's own backups, so the account
+# is skipped every night over space its archive would never have needed.
+#
 # Paths are overridable by environment variable so prove_backup_batch.sh can exercise this
 # without root, DirectAdmin, or S3.
 
@@ -104,6 +110,12 @@ SIZE_RATIO_PCT="${DA_BATCH_RATIO_PCT:-100}"
 #
 # 200 is that doubling with nothing added for luck; the reserve below is the slack.
 PEAK_COPIES_PCT="${DA_BATCH_PEAK_COPIES_PCT:-200}"
+# Whether to take DirectAdmin's per-user backup exclusions off the size estimate.
+#
+# `auto` asks the DirectAdmin binary whether it will honour them at all; 1 and 0 force the
+# answer, so an operator who does not trust the adjustment can turn it off without editing
+# this file.
+HONOUR_EXCLUDES="${DA_BATCH_HONOUR_EXCLUDES:-auto}"
 WATCH_INTERVAL_SEC="${DA_BATCH_WATCH_INTERVAL:-5}"
 # How long to wait for the hook to drain the staging directory after an account finishes.
 DRAIN_TIMEOUT_SEC="${DA_BATCH_DRAIN_TIMEOUT:-1800}"
@@ -133,7 +145,7 @@ MODE="run"
 declare -a ONLY_USERS=()
 
 usage() {
-  sed -n '2,31p' "$0"
+  sed -n '2,37p' "$0"
   cat <<'USAGE'
 
 Usage:
@@ -245,10 +257,217 @@ list_users() {
   done < <(known_users)
 }
 
-raw_kb_for() {
+home_kb_for() {
   local user="$1" kb
   kb="$(du -sk "${HOME_ROOT}/${user}" 2>/dev/null | cut -f1)"
   printf '%d' "${kb:-0}"
+}
+
+# Whether DirectAdmin will act on a per-user .backup_exclude_paths file at all: yes, no, or
+# unknown. Resolved once, before any account is sized, so the binary is asked once instead
+# of once per account and no two accounts can be sized against different answers.
+EXCLUDE_SUPPORT="unknown"
+EXCLUDE_SUPPORT_WHY=""
+
+# Ask the DirectAdmin binary, because the file existing is not the same as it being read.
+#
+# `unknown` is treated exactly like `no` by everything downstream. That asymmetry is
+# deliberate and it is the whole safety argument for this feature: subtracting space for
+# paths DirectAdmin turns out to archive anyway takes the estimate below the archive, and
+# the gate then starts an account the volume cannot hold -- the 2026-09-07 failure, at the
+# floor, with a partial archive to clean up. Not subtracting when it would have been safe
+# to only makes an account look bigger than it is, and that surfaces as a named skip in
+# the summary mail. One of those is recoverable by reading the mail; the other fills the
+# root volume at 01:00.
+#
+# So a config dump that cannot be obtained, and one that does not mention the key, are
+# both `unknown`. The documented default for allow_backup_exclude_path is 1, but a default
+# is what this script would be assuming, not what it has read, and the point of asking is
+# to have read it.
+resolve_exclude_support() {
+  case "$HONOUR_EXCLUDES" in
+    1)
+      EXCLUDE_SUPPORT="yes"
+      return 0
+      ;;
+    0)
+      EXCLUDE_SUPPORT="no"
+      EXCLUDE_SUPPORT_WHY="DA_BATCH_HONOUR_EXCLUDES=0"
+      return 0
+      ;;
+  esac
+
+  local conf value conf_rc=0
+  conf="$("$DA_BIN" c 2>/dev/null)" || conf_rc=$?
+  if ((conf_rc != 0)); then
+    EXCLUDE_SUPPORT="unknown"
+    EXCLUDE_SUPPORT_WHY="${DA_BIN} c exited ${conf_rc}"
+    return 0
+  fi
+
+  value="$(printf '%s\n' "$conf" | sed -n 's/^allow_backup_exclude_path=\([0-9]*\).*$/\1/p' | tail -1)"
+  case "$value" in
+    1) EXCLUDE_SUPPORT="yes" ;;
+    0)
+      EXCLUDE_SUPPORT="no"
+      EXCLUDE_SUPPORT_WHY="allow_backup_exclude_path=0"
+      ;;
+    *)
+      EXCLUDE_SUPPORT="unknown"
+      EXCLUDE_SUPPORT_WHY="${DA_BIN} c did not report allow_backup_exclude_path"
+      ;;
+  esac
+}
+
+resolve_exclude_support
+
+# Kilobytes of an account's home that DirectAdmin has been told to leave out of its backup.
+#
+# DirectAdmin reads /home/<user>/.backup_exclude_paths and passes it as --exclude-from
+# directly after -C /home/<user>, to both the inner home.tar and the outer account archive.
+# Entries are therefore patterns matched against archive member names relative to the home:
+# one path per line, no leading slash, globs allowed.
+#
+# Prints kilobytes and returns 0. Returns non-zero when the figure could not be
+# established, and every caller must then subtract nothing -- see resolve_exclude_support
+# above for why that is the only direction this is allowed to be wrong in.
+excluded_kb_for() {
+  local user="$1"
+  local home="${HOME_ROOT}/${user}"
+  local list="${home}/.backup_exclude_paths"
+
+  [[ -e "$list" ]] || {
+    printf '0'
+    return 0
+  }
+
+  if [[ "$EXCLUDE_SUPPORT" != "yes" ]]; then
+    log "NOTE ${list} exists but is not being taken off the size estimate for ${user}: DirectAdmin is not known to honour it (${EXCLUDE_SUPPORT_WHY:-${EXCLUDE_SUPPORT}}). ${user} is sized from its whole home, so it may be skipped for space its archive would not have needed."
+    printf '0'
+    return 0
+  fi
+
+  # Unreadable by this script does not mean unreadable by DirectAdmin, which runs as root,
+  # so this is a gap in what can be measured rather than evidence that nothing is excluded.
+  [[ -r "$list" ]] || {
+    log "WARN cannot read ${list}; sizing ${user} from its whole home"
+    return 1
+  }
+
+  local real_home
+  real_home="$(readlink -f -- "$home" 2>/dev/null)" || real_home=""
+  [[ -n "$real_home" && -d "$real_home" ]] || {
+    log "WARN could not resolve ${home}; sizing ${user} from its whole home"
+    return 1
+  }
+
+  local -a wanted=()
+  local entry
+  while IFS= read -r entry || [[ -n "$entry" ]]; do
+    entry="${entry%$'\r'}"
+    [[ -n "${entry//[[:space:]]/}" ]] || continue
+
+    # A leading slash is the usual way this file is got wrong, and it fails silently:
+    # DirectAdmin matches these against member names, which are relative to -C /home/<user>,
+    # so neither /home/<user>/x nor /x ever matches and nothing is excluded. Subtracting for
+    # one would size the account from an archive DirectAdmin is not going to write.
+    if [[ "$entry" == /* ]]; then
+      log "NOTE ignoring '${entry}' in ${list}: entries are relative to ${home}, and a leading slash matches no archive member, so DirectAdmin will back that path up regardless"
+      continue
+    fi
+    # Same reasoning for a .. component: member names never contain one, so no pattern
+    # holding one can match, however tidily it resolves on the filesystem.
+    case "/${entry}/" in
+      */../*)
+        log "NOTE ignoring '${entry}' in ${list}: a .. component matches no archive member, so DirectAdmin will back that path up regardless"
+        continue
+        ;;
+    esac
+    wanted+=("$entry")
+  done <"$list"
+
+  ((${#wanted[@]} > 0)) || {
+    printf '0'
+    return 0
+  }
+
+  local paths expand_rc=0
+  paths="$(mktemp)" || {
+    log "WARN could not create a temp file to list ${user}'s excluded paths; sizing it from its whole home"
+    return 1
+  }
+
+  # Expanded in the home, because that is where DirectAdmin resolves them from, and with
+  # nullglob so a pattern that matches nothing contributes nothing rather than itself.
+  (
+    cd "$real_home" || exit 1
+    shopt -s nullglob dotglob
+    # Empty IFS so a path with spaces in it stays one word; the globbing below is what is
+    # meant to split $entry, not word splitting.
+    IFS=
+    for entry in "${wanted[@]}"; do
+      for match in $entry; do
+        # nullglob drops a pattern that matched nothing, but a word with no glob character
+        # in it is not a pattern at all and survives even when the path does not exist. A
+        # mistyped entry excludes nothing, so it must subtract nothing -- and letting the
+        # name through would instead fail the du below and cost the account its whole
+        # adjustment.
+        [[ -e "$match" || -L "$match" ]] || continue
+        # du's output is line-based, so a name carrying a newline followed by digits and a
+        # tab would add kilobytes that belong to no file. Skipping it costs an
+        # over-estimate; summing it could hand back an arbitrary number.
+        [[ "$match" == *$'\n'* ]] && continue
+        # Excluding a symlink keeps the link out of the archive, not whatever it points at:
+        # tar still walks to the target by its own name. Following it here would subtract a
+        # tree that is about to be archived, which is the one error that fills the volume.
+        [[ -L "$match" ]] && continue
+        resolved="$(readlink -f -- "$match" 2>/dev/null)" || continue
+        [[ -n "$resolved" ]] || continue
+        if [[ "$resolved" == "$real_home" ]]; then
+          log "NOTE ignoring '${entry}' in ${list}: it resolves to ${user}'s home itself, and an account estimated at nothing is not an account that fits"
+          continue
+        fi
+        # Anything reached through a symlinked parent, or otherwise landing outside the
+        # home, is space this account's archive does not contain and this account's
+        # exclusion cannot remove.
+        if [[ "$resolved" != "${real_home}"/* ]]; then
+          log "NOTE ignoring '${entry}' in ${list}: it resolves to ${resolved}, outside ${real_home}"
+          continue
+        fi
+        printf '%s\0' "$resolved"
+      done
+    done
+  ) >"$paths" || expand_rc=$?
+  if ((expand_rc != 0)); then
+    log "WARN could not expand the exclusions in ${list} (rc=${expand_rc}); sizing ${user} from its whole home"
+    rm -f "$paths"
+    return 1
+  fi
+
+  if [[ ! -s "$paths" ]]; then
+    rm -f "$paths"
+    printf '0'
+    return 0
+  fi
+
+  # One du run over the whole set, never a sum of one run per path. Within a single
+  # invocation du counts each file once, so overlapping entries -- `domains` and
+  # `domains/example.com` -- and hard links between two excluded paths are each counted
+  # once, which is also how tar will store them. Summing separate runs double-counts both,
+  # and too large a subtraction is the direction that matters: it takes the estimate below
+  # the archive and waves through an account the volume cannot hold.
+  local du_out du_rc=0
+  du_out="$(du -sk --files0-from="$paths" 2>/dev/null)" || du_rc=$?
+  rm -f "$paths"
+  if ((du_rc != 0)); then
+    # A du that gave up part way through still prints what it reached, and that partial
+    # total is a plausible-looking number. It is not the same as subtracting nothing, and
+    # the difference only shows up as a backup that started when it should not have.
+    log "WARN could not measure the paths excluded by ${list} (du rc=${du_rc}); sizing ${user} from its whole home"
+    return 1
+  fi
+
+  printf '%s\n' "$du_out" | awk -F'\t' '$1 ~ /^[0-9]+$/ { total += $1 } END { printf "%d", total + 0 }'
 }
 
 # Peak free space one account needs, which is not the same thing as the size of the
@@ -262,12 +481,23 @@ peak_kb_for() {
 
 # Ascending, so a failure on the largest account leaves the other thirteen already safe in
 # S3 rather than never attempted. On this host `teller` alone is roughly half the total.
+#
+# Each row carries the home size and the excluded size beside the figure the gate uses, so
+# --list and the run log can show that an exclusion took effect -- and, just as much to the
+# point, that a mistyped one did not.
 ordered_users() {
-  local u kb
+  local u home_kb excl_kb sized_kb
   while IFS= read -r u; do
     [[ -n "$u" ]] || continue
-    kb="$(raw_kb_for "$u")"
-    printf '%d\t%s\n' "$kb" "$u"
+    home_kb="$(home_kb_for "$u")"
+    excl_kb="$(excluded_kb_for "$u")" || excl_kb=0
+    excl_kb="${excl_kb:-0}"
+    # Clamped rather than trusted. An exclusion measured larger than the home it is inside
+    # means the two numbers came from different views of the filesystem -- a du that raced
+    # a delete, a bind mount -- and a negative size sorts first and passes every gate.
+    sized_kb=$((home_kb - excl_kb))
+    ((sized_kb > 0)) || sized_kb=0
+    printf '%d\t%d\t%d\t%s\n' "$sized_kb" "$home_kb" "$excl_kb" "$u"
   done < <(list_users) | sort -n
 }
 
@@ -579,19 +809,32 @@ Runbook: aws/docs/2026-09-06-primary-outage.md"
 fi
 
 if [[ "$MODE" == "list" ]]; then
-  printf '%-16s %10s %10s %s\n' "ACCOUNT" "HOME" "PEAK" "FITS NOW"
+  # HOME and EXCLUDED are both shown because the interesting cases are the ones where they
+  # differ: an operator who has just written a .backup_exclude_paths needs to see that it
+  # took effect, and one whose entry has a leading slash in it needs to see that it did not.
+  printf '%-16s %10s %10s %10s %s\n' "ACCOUNT" "HOME" "EXCLUDED" "PEAK" "FITS NOW"
   now_kb="$(avail_kb "$ADMIN_DIR")"
   now_kb="${now_kb:-0}"
-  while IFS=$'\t' read -r kb user; do
+  any_excluded=0
+  while IFS=$'\t' read -r kb home_kb excl_kb user; do
     [[ -n "$user" ]] || continue
     est="$(peak_kb_for "$kb")"
     if ((now_kb >= est + reserve_kb)); then fits="yes"; else fits="NO"; fi
-    printf '%-16s %9sG %9sG %s\n' "$user" "$(gb "$kb")" "$(gb "$est")" "$fits"
+    if ((excl_kb > 0)); then
+      excl_col="$(gb "$excl_kb")G"
+      any_excluded=1
+    else
+      excl_col="-"
+    fi
+    printf '%-16s %9sG %10s %9sG %s\n' "$user" "$(gb "$home_kb")" "$excl_col" "$(gb "$est")" "$fits"
   done < <(ordered_users)
-  printf '\n%s GB free now. PEAK is the estimated archive (%s%% of home) taken %s%% over,\n' \
-    "$(gb "$now_kb")" "$SIZE_RATIO_PCT" "$PEAK_COPIES_PCT"
-  printf 'because DirectAdmin holds the assembled parts and the archive made from them at the\n'
-  printf 'same time; each account needs that much free plus a %s GB reserve.\n' "$RESERVE_GB"
+  printf '\n%s GB free now. PEAK is the estimated archive (%s%% of home, less anything excluded)\n' \
+    "$(gb "$now_kb")" "$SIZE_RATIO_PCT"
+  printf 'taken %s%% over, because DirectAdmin holds the assembled parts and the archive made\n' "$PEAK_COPIES_PCT"
+  printf 'from them at the same time; each account needs that much free plus a %s GB reserve.\n' "$RESERVE_GB"
+  if ((any_excluded == 1)); then
+    printf 'EXCLUDED is what /home/<account>/.backup_exclude_paths keeps out of the archive.\n'
+  fi
   exit 0
 fi
 
@@ -617,13 +860,19 @@ limited_to=""
 log "start ${HOST}: $(gb "$(avail_kb "$ADMIN_DIR")") GB free, reserve ${RESERVE_GB} GB, floor ${FLOOR_GB} GB${limited_to}"
 
 aborted=""
-while IFS=$'\t' read -r kb user; do
+while IFS=$'\t' read -r kb home_kb excl_kb user; do
   [[ -n "$user" ]] || continue
   [[ -n "$aborted" ]] && break
 
   est_kb="$(peak_kb_for "$kb")"
   now_kb="$(avail_kb "$ADMIN_DIR")"
   now_kb="${now_kb:-0}"
+
+  # Say what the estimate was built from whenever that is not just the home directory. A
+  # skip that reads as "home 34 GB" when the account excludes 29 GB of it sends whoever
+  # opens the mail looking for disk to buy.
+  size_note="home $(gb "$home_kb") GB"
+  ((excl_kb > 0)) && size_note+=", less $(gb "$excl_kb") GB excluded"
 
   # Check the floor before starting rather than letting the watchdog discover it. Starting
   # a backup on a volume that is already below the floor means killing it a second later,
@@ -637,17 +886,17 @@ while IFS=$'\t' read -r kb user; do
 
   if ((now_kb < est_kb + reserve_kb)); then
     log "SKIP ${user}: peak need is about $(gb "$est_kb") GB (DirectAdmin holds the assembled parts and the archive built from them at once) plus a ${RESERVE_GB} GB reserve, and only $(gb "$now_kb") GB is free"
-    skipped_users+=("${user} (home $(gb "$kb") GB, peak need $(gb "$est_kb") GB, free $(gb "$now_kb") GB)")
+    skipped_users+=("${user} (${size_note}, peak need $(gb "$est_kb") GB, free $(gb "$now_kb") GB)")
     continue
   fi
 
   if [[ "$MODE" == "dry-run" ]]; then
-    log "would back up ${user} (home $(gb "$kb") GB, peak need $(gb "$est_kb") GB, free $(gb "$now_kb") GB)"
+    log "would back up ${user} (${size_note}, peak need $(gb "$est_kb") GB, free $(gb "$now_kb") GB)"
     done_users+=("$user")
     continue
   fi
 
-  log "backing up ${user} (home $(gb "$kb") GB, peak need $(gb "$est_kb") GB, free $(gb "$now_kb") GB)"
+  log "backing up ${user} (${size_note}, peak need $(gb "$est_kb") GB, free $(gb "$now_kb") GB)"
   if ! backup_one "$user"; then
     failed_users+=("${user}${backup_one_reason:+ (${backup_one_reason})}")
     # A kill or a DirectAdmin failure on one account says nothing reliable about the next,
