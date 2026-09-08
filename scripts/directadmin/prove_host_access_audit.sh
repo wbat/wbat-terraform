@@ -434,7 +434,10 @@ echo "== Case 20: the security-group query itself, not a copy of it =="
 # as "no rule allows 2222". The check would have certified an open panel as
 # closed. So evaluate the exact query the script ships, with the same engine
 # the CLI uses, against recorded describe-security-groups shapes.
-command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 unavailable" >&2; exit 1; }
+# A hard requirement, not a skip. This case is the one that caught the query
+# being wrong, so quietly passing without it would restore the original problem.
+command -v python3 >/dev/null 2>&1 \
+  || { echo "FAIL: python3 is required to evaluate the security-group query" >&2; exit 1; }
 python3 - "$AUDIT" <<'PY' || exit 1
 import json, re, subprocess, sys
 
@@ -448,7 +451,9 @@ query = m.group(1).replace("\\`", "`")
 try:
     import jmespath
 except ImportError:
-    sys.exit("FAIL: jmespath is required to prove the security-group query")
+    sys.exit("FAIL: jmespath is required to prove the security-group query "
+             "(pip install jmespath) -- it is the engine the AWS CLI applies "
+             "--query with, so nothing else proves the same thing")
 
 
 def perm(proto="tcp", frm=None, to=None, v4=(), v6=(), pl=(), sg=()):
