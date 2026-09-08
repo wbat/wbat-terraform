@@ -30,7 +30,13 @@ account. See [Bound is not the same as reachable](#bound-is-not-the-same-as-reac
 ## Measure first
 
 ```bash
-sudo /usr/local/sbin/host-access-audit.sh          # or run from the repo
+# The audit is installed with the rest of the host tooling, so pull and install
+# first -- an audit predating the checks it is trusted to make is the one kind
+# of stale copy that actively misleads.
+cd /root/wbat-terraform && git pull
+sudo ./scripts/directadmin/install_da_vhost_listen.sh --install
+
+sudo /usr/local/sbin/host-access-audit.sh          # read-only posture report
 sudo /usr/local/sbin/host-access-audit.sh --json   # for automation
 ```
 

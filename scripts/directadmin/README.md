@@ -76,6 +76,7 @@ Known-bad fixture: [`aws/docs/fixtures/nginx-catchall-broken-2026-07-26/`](../..
 | `da-vhost-listen-boot.service` | `/etc/systemd/system/da-vhost-listen-boot.service` |
 | `user_httpd_write_post-da-vhost-listen-check.sh` | `/usr/local/directadmin/scripts/custom/user_httpd_write_post/da-vhost-listen-check.sh` (mode 700, `diradmin:diradmin`) |
 | `update_post-da-vhost-listen.sh` | append/call from `/usr/local/directadmin/scripts/custom/update_post.sh` |
+| `host_access_audit.sh` | `/usr/local/sbin/host-access-audit.sh` (on-demand, no cron; see [Host access posture](#host-access-posture-ssh-rate-limiting-2222)) |
 | `install_da_vhost_listen.sh` | not installed; run from the checkout to install the rows above or check them for drift |
 
 ### Install / update (from a repo checkout on the box)
@@ -480,7 +481,7 @@ backlog, so a sweep that silently fails to reclaim anything is the worst place t
 | `ERROR another run held /var/log/... lock` | Admin and system backups overlapped and one waited out `DA_BACKUP_LOCK_WAIT` | `pgrep -a rclone`; clear the stuck upload, then re-run the hook |
 | Disk fills with no backups in `/home` | Not the backup hook | `da-disk-guard.sh --report` for the actual consumers |
 
-## Host access posture (SSH, fail2ban, 2222)
+## Host access posture (SSH, rate limiting, 2222)
 
 The DirectAdmin account names on this host are permanently public: this repo's git
 history holds a verbatim `nginx -T` capture. Names cannot be un-published, so the
@@ -491,7 +492,15 @@ a 2222 that is not open to the internet.
 |-----------|--------------|
 | `host_access_audit.sh` | `/usr/local/sbin/host-access-audit.sh` |
 
+Installed and drift-checked by
+[`install_da_vhost_listen.sh`](install_da_vhost_listen.sh) along with the rest of
+the host tooling, so it does not need to be copied by hand and `--verify` will
+say when the installed copy predates the checks it is trusted to make:
+
 ```bash
+cd /root/wbat-terraform && git pull
+sudo ./scripts/directadmin/install_da_vhost_listen.sh --install
+
 sudo /usr/local/sbin/host-access-audit.sh          # read-only posture report
 sudo /usr/local/sbin/host-access-audit.sh --json   # same, for automation
 ```
