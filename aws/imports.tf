@@ -53,35 +53,34 @@
 #   id = "arn:aws:sns:us-east-1:708113892725:tellertech-email-forwarding"
 # }
 
-# Site media archive bucket + IAM — created in AWS ahead of TF apply during the
-# 2026-09-06 primary recovery (teller media split). Comment out after a
-# successful HCP apply that imports them into state.
-import {
-  to = module.global.aws_s3_bucket.site_media_archive
-  id = "wbat-tellerstech-site-media-archive-708113892725"
-}
-
-import {
-  to = module.global.aws_s3_bucket_versioning.site_media_archive
-  id = "wbat-tellerstech-site-media-archive-708113892725"
-}
-
-import {
-  to = module.global.aws_s3_bucket_server_side_encryption_configuration.site_media_archive
-  id = "wbat-tellerstech-site-media-archive-708113892725"
-}
-
-import {
-  to = module.global.aws_s3_bucket_public_access_block.site_media_archive
-  id = "wbat-tellerstech-site-media-archive-708113892725"
-}
-
-import {
-  to = module.global.aws_s3_bucket_lifecycle_configuration.site_media_archive
-  id = "wbat-tellerstech-site-media-archive-708113892725"
-}
-
-import {
-  to = module.global.module.iam.aws_iam_role_policy.WBAT_Main_Server-SiteMediaArchive
-  id = "WBAT_Main_Server:SiteMediaArchive"
-}
+# Site media archive bucket + IAM — imported 2026-09-08 (PR #136); comment out
+# after successful apply. Created in AWS ahead of TF during the teller media split.
+# import {
+#   to = module.global.aws_s3_bucket.site_media_archive
+#   id = "wbat-tellerstech-site-media-archive-708113892725"
+# }
+#
+# import {
+#   to = module.global.aws_s3_bucket_versioning.site_media_archive
+#   id = "wbat-tellerstech-site-media-archive-708113892725"
+# }
+#
+# import {
+#   to = module.global.aws_s3_bucket_server_side_encryption_configuration.site_media_archive
+#   id = "wbat-tellerstech-site-media-archive-708113892725"
+# }
+#
+# import {
+#   to = module.global.aws_s3_bucket_public_access_block.site_media_archive
+#   id = "wbat-tellerstech-site-media-archive-708113892725"
+# }
+#
+# import {
+#   to = module.global.aws_s3_bucket_lifecycle_configuration.site_media_archive
+#   id = "wbat-tellerstech-site-media-archive-708113892725"
+# }
+#
+# import {
+#   to = module.global.module.iam.aws_iam_role_policy.WBAT_Main_Server-SiteMediaArchive
+#   id = "WBAT_Main_Server:SiteMediaArchive"
+# }
