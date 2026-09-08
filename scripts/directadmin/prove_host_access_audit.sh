@@ -23,6 +23,12 @@ AUDIT="${ROOT}/scripts/directadmin/host_access_audit.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+# Default the machine-sniffing fallbacks to "nothing here" so no case can
+# accidentally assert against the box running the proof. Cases that are about
+# the fallback itself override this per-run. Case 16 was failing on a CI runner
+# that ships /etc/apache2 while passing everywhere else.
+export HOST_AUDIT_APACHE_EVIDENCE=0
+
 # Minimal `sshd -T` dumps. Real output has ~90 keys; only the ones the audit
 # reads matter, and extra keys are ignored by the awk lookups.
 cat >"$TMP/hardened" <<'EOF'
@@ -226,4 +232,330 @@ printf '%s' "$out" | grep -q 'zero bans ever recorded for: directadmin' \
   || { echo "FAIL: expected the quiet jail named, not an aggregate" >&2; exit 1; }
 echo "OK each jail is judged on its own logpath and ban count"
 
-echo "PASS: host access audit proofs (10 cases)"
+echo "== Case 11: CSF/lfd is a rate limiter, not an absence of one =="
+# The shape of the real primary: CSF with lfd, no fail2ban. Demanding fail2ban
+# here reported "nothing rate-limits password guessing" and would have pushed an
+# operator into installing a second iptables manager alongside CSF.
+cat >"$TMP/csf.conf" <<'EOF'
+TCP_IN = "20,21,22,25,80,110,143,443,465,587,993,995,2222"
+LF_SSHD = "5"
+LF_DIRECTADMIN = "5"
+LF_SMTPAUTH = "5"
+LF_POP3D = "10"
+LF_IMAPD = "10"
+LF_FTPD = "10"
+EOF
+csf_run() {
+  env -i PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" \
+    HOST_AUDIT_SSHD_CONFIG="$TMP/sshd_config.plain" \
+    HOST_AUDIT_CSF_CONF="${1:-$TMP/csf.conf}" \
+    HOST_AUDIT_LFD_ACTIVE="${2:-1}" \
+    HOST_AUDIT_LISTENERS="${3:-22,25,2222}" \
+    HOST_AUDIT_INSTANCE_ID="i-000000000000000" \
+    bash "$AUDIT" --json 2>/dev/null || true
+}
+out="$(csf_run)"
+[ "$(printf '%s' "$out" | verdict_for ratelimit/lfd)" = "OK" ] \
+  || { echo "FAIL: active lfd not recognised as a rate limiter" >&2; exit 1; }
+[ "$(printf '%s' "$out" | verdict_for ratelimit/lfd-coverage)" = "OK" ] \
+  || { echo "FAIL: fully configured lfd thresholds not accepted" >&2; exit 1; }
+[ "$(printf '%s' "$out" | verdict_for fail2ban/installed)" = "MISSING" ] \
+  || { echo "FAIL: still demanding fail2ban on a CSF host" >&2; exit 1; }
+echo "OK CSF/lfd satisfies the rate-limiting requirement"
+
+echo "== Case 12: an lfd threshold of 0 is a service nobody is watching =="
+sed 's/^LF_DIRECTADMIN = "5"/LF_DIRECTADMIN = "0"/' "$TMP/csf.conf" >"$TMP/csf.lf-off"
+out="$(csf_run "$TMP/csf.lf-off")"
+[ "$(printf '%s' "$out" | verdict_for ratelimit/lfd-coverage)" = "FAIL" ] \
+  || { echo "FAIL: LF_DIRECTADMIN=0 accepted as coverage" >&2; exit 1; }
+printf '%s' "$out" | grep -q 'LF_DIRECTADMIN' \
+  || { echo "FAIL: the unwatched service was not named" >&2; exit 1; }
+echo "OK a zero threshold is reported as unmetered, not as configured"
+
+echo "== Case 13: lfd installed but not running =="
+out="$(csf_run "$TMP/csf.conf" 0)"
+[ "$(printf '%s' "$out" | verdict_for ratelimit/lfd)" = "FAIL" ] \
+  || { echo "FAIL: stopped lfd reported as protection" >&2; exit 1; }
+echo "OK CSF present with lfd stopped is a failure, not a pass"
+
+echo "== Case 14: MySQL bound to every interface must not read as OK =="
+# The first real run listed 3306 among "world-bound ports" and reported OK,
+# because only 2222 was ever special-cased. A datastore has no lfd or fail2ban
+# in front of it and a success there is the whole dataset.
+out="$(csf_run "$TMP/csf.conf" 1 "22,2222,3306")"
+[ "$(printf '%s' "$out" | verdict_for exposure/datastore)" = "WARN" ] \
+  || { echo "FAIL: 3306 bound but firewalled should warn" >&2; exit 1; }
+printf '%s' "$out" | grep -q 'mysql/3306' \
+  || { echo "FAIL: the datastore port was not named" >&2; exit 1; }
+
+sed 's/2222"/2222,3306"/' "$TMP/csf.conf" >"$TMP/csf.mysql-open"
+out="$(csf_run "$TMP/csf.mysql-open" 1 "22,2222,3306")"
+[ "$(printf '%s' "$out" | verdict_for exposure/datastore)" = "FAIL" ] \
+  || { echo "FAIL: 3306 bound AND allowed by TCP_IN must fail" >&2; exit 1; }
+echo "OK bound-and-allowed fails, bound-but-firewalled warns, and they are distinguished"
+
+echo "== Case 15: plaintext credential ports are surfaced =="
+out="$(csf_run "$TMP/csf.conf" 1 "21,22,110,143,993,995")"
+[ "$(printf '%s' "$out" | verdict_for exposure/plaintext-auth)" = "WARN" ] \
+  || { echo "FAIL: plaintext auth ports not surfaced" >&2; exit 1; }
+echo "OK ftp/pop3/imap without implicit TLS are reported"
+
+echo "== Case 16: an irrelevant disabled DA key must not mask the scanner =="
+# First real run: brute_force_scan_apache_logs=0 became the finding, and whether
+# the scanner itself was enabled went unreported. On an nginx host there are no
+# Apache logs to scan, so it is not a finding at all.
+#
+# webserver= is pinned rather than left to the audit's fallback. Without it the
+# fallback looks for Apache on whatever machine is running the proof, and this
+# case passed on a developer box and failed on a CI runner that happens to ship
+# /etc/apache2 -- a proof that reads the host is not offline.
+printf 'brute_force_log_scanner=1\nbrute_force_scan_apache_logs=0\nnginx=1\n' >"$TMP/da.nginx"
+printf 'webserver=nginx\n' >"$TMP/cb.nginx"
+out="$(HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_DA_CONF="$TMP/da.nginx" \
+  HOST_AUDIT_CB_OPTIONS="$TMP/cb.nginx" bash "$AUDIT" --json 2>/dev/null || true)"
+[ "$(printf '%s' "$out" | verdict_for da/brute-force)" = "OK" ] \
+  || { echo "FAIL: enabled scanner masked by an irrelevant disabled key" >&2; exit 1; }
+[ "$(printf '%s' "$out" | verdict_for da/brute-force-disabled)" = "MISSING" ] \
+  || { echo "FAIL: apache log scanning should not be a finding on nginx" >&2; exit 1; }
+echo "OK the scanner's own state is the verdict"
+
+echo "== Case 17: nginx in front of Apache still needs Apache logs scanned =="
+# DirectAdmin's nginx_apache mode runs nginx as a reverse proxy and Apache still
+# serves, so the nginx binary is present and Apache logs are real. Treating
+# "nginx exists" as "Apache is absent" would drop a genuine finding.
+printf 'brute_force_log_scanner=1\nbrute_force_scan_apache_logs=0\nnginx=1\n' >"$TMP/da.nginx"
+printf 'webserver=nginx_apache\n' >"$TMP/cb.hybrid"
+out="$(HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_DA_CONF="$TMP/da.nginx" \
+  HOST_AUDIT_CB_OPTIONS="$TMP/cb.hybrid" bash "$AUDIT" --json 2>/dev/null || true)"
+[ "$(printf '%s' "$out" | verdict_for da/brute-force-disabled)" = "WARN" ] \
+  || { echo "FAIL: unscanned Apache logs dropped on a hybrid host" >&2; exit 1; }
+
+printf 'webserver=nginx\n' >"$TMP/cb.nginx"
+out="$(HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_DA_CONF="$TMP/da.nginx" \
+  HOST_AUDIT_CB_OPTIONS="$TMP/cb.nginx" bash "$AUDIT" --json 2>/dev/null || true)"
+[ "$(printf '%s' "$out" | verdict_for da/brute-force-disabled)" = "MISSING" ] \
+  || { echo "FAIL: nginx-only host should not warn about Apache logs" >&2; exit 1; }
+
+# With no CustomBuild answer, Apache's own presence decides. Installed or
+# running Apache keeps the finding even though nginx is also there.
+out="$(HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_DA_CONF="$TMP/da.nginx" \
+  HOST_AUDIT_CB_OPTIONS="$TMP/absent" HOST_AUDIT_APACHE_EVIDENCE=1 \
+  bash "$AUDIT" --json 2>/dev/null || true)"
+[ "$(printf '%s' "$out" | verdict_for da/brute-force-disabled)" = "WARN" ] \
+  || { echo "FAIL: Apache present with no CustomBuild answer should keep the finding" >&2; exit 1; }
+
+out="$(HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_DA_CONF="$TMP/da.nginx" \
+  HOST_AUDIT_CB_OPTIONS="$TMP/absent" HOST_AUDIT_APACHE_EVIDENCE=0 \
+  bash "$AUDIT" --json 2>/dev/null || true)"
+[ "$(printf '%s' "$out" | verdict_for da/brute-force-disabled)" = "MISSING" ] \
+  || { echo "FAIL: no Apache anywhere is real evidence, not a guess" >&2; exit 1; }
+echo "OK the web server mode decides; without one, Apache's own presence does"
+
+echo "== Case 18: real lfd config, with the _PERM siblings present =="
+# Verbatim shape from server.wbat.net. LF_SSHD_PERM must not be mistaken for
+# LF_SSHD, and every threshold here is set and non-zero.
+cat >"$TMP/csf.real" <<'EOF'
+LF_SSHD = "5"
+LF_SSHD_PERM = "1"
+LF_FTPD = "10"
+LF_FTPD_PERM = "1"
+LF_SMTPAUTH = "5"
+LF_SMTPAUTH_PERM = "1"
+LF_POP3D = "10"
+LF_POP3D_PERM = "1"
+LF_IMAPD = "10"
+LF_IMAPD_PERM = "1"
+LF_DIRECTADMIN = "5"
+LF_DIRECTADMIN_PERM = "1"
+TCP_IN = "35000:35999,20,21,22,25,53,80,110,143,443,465,587,993,995,2222"
+EOF
+out="$(csf_run "$TMP/csf.real" 1 "21,22,25,110,143,465,587,993,995,2222,3306,4190")"
+[ "$(printf '%s' "$out" | verdict_for ratelimit/lfd-coverage)" = "OK" ] \
+  || { echo "FAIL: a fully configured real lfd was not accepted" >&2; exit 1; }
+printf '%s' "$out" | grep -q 'LF_SSHD=5' \
+  || { echo "FAIL: LF_SSHD value misparsed (likely confused with LF_SSHD_PERM)" >&2; exit 1; }
+# 3306 is bound but absent from that TCP_IN, and 2222 is bound and present.
+[ "$(printf '%s' "$out" | verdict_for exposure/datastore)" = "WARN" ] \
+  || { echo "FAIL: 3306 bound-but-firewalled misclassified" >&2; exit 1; }
+[ "$(printf '%s' "$out" | verdict_for exposure/da-panel)" = "OK" ] \
+  || { echo "FAIL: the socket-level 2222 fact should be reported, not judged" >&2; exit 1; }
+# Nothing here can reach EC2, so the boundary is unknown -- and unknown must
+# leave the audit incomplete rather than reading as either safe or exposed.
+[ "$(printf '%s' "$out" | verdict_for exposure/da-panel-sg)" = "SKIP" ] \
+  || { echo "FAIL: unknown security group should skip" >&2; exit 1; }
+echo "OK the live host's configuration is classified correctly end to end"
+
+echo "== Case 19: the 2222 boundary is the security group, not the socket =="
+# Warning purely on "bound and passed by TCP_IN" would keep reporting a finding
+# on a host whose panel is already closed at the security group. A verdict that
+# doing the right thing cannot clear is one people learn to ignore.
+: >"$TMP/sg-none.txt"
+printf '0.0.0.0/0\n' >"$TMP/sg-open.txt"
+printf '174.49.138.101/32\t44.214.133.234/32\n' >"$TMP/sg-restricted.txt"
+sg_run() {
+  env -i PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_SSHD_CONFIG="$TMP/sshd_config.plain" \
+    HOST_AUDIT_CSF_CONF="$TMP/csf.conf" HOST_AUDIT_LFD_ACTIVE=1 \
+    HOST_AUDIT_LISTENERS="22,2222" HOST_AUDIT_SG_RULES_FILE="$1" \
+    bash "$AUDIT" --json 2>/dev/null || true
+}
+[ "$(sg_run "$TMP/sg-open.txt" | verdict_for exposure/da-panel-sg)" = "FAIL" ] \
+  || { echo "FAIL: 0.0.0.0/0 on 2222 not reported" >&2; exit 1; }
+[ "$(sg_run "$TMP/sg-restricted.txt" | verdict_for exposure/da-panel-sg)" = "OK" ] \
+  || { echo "FAIL: a restricted panel should clear" >&2; exit 1; }
+[ "$(sg_run "$TMP/sg-none.txt" | verdict_for exposure/da-panel-sg)" = "OK" ] \
+  || { echo "FAIL: a fully closed panel should clear" >&2; exit 1; }
+sg_run "$TMP/sg-none.txt" | grep -q 'closed to the internet entirely' \
+  || { echo "FAIL: closed and restricted should be distinguishable" >&2; exit 1; }
+
+# ::/0 is exactly as open as 0.0.0.0/0, and a rule set of only null columns is
+# the CLI's way of printing "no sources", not a set of allowed addresses.
+printf '::/0\n' >"$TMP/sg-v6.txt"
+printf 'None\tNone\tNone\tNone\n' >"$TMP/sg-nulls.txt"
+printf 'pl-0abc123\n' >"$TMP/sg-prefix.txt"
+printf 'sg-0e674f4e2937c6392\n' >"$TMP/sg-selfref.txt"
+[ "$(sg_run "$TMP/sg-v6.txt" | verdict_for exposure/da-panel-sg)" = "FAIL" ] \
+  || { echo "FAIL: ::/0 on 2222 is an open panel" >&2; exit 1; }
+[ "$(sg_run "$TMP/sg-nulls.txt" | verdict_for exposure/da-panel-sg)" = "OK" ] \
+  || { echo "FAIL: all-null columns mean no sources, not restricted sources" >&2; exit 1; }
+sg_run "$TMP/sg-nulls.txt" | grep -q 'closed to the internet entirely' \
+  || { echo "FAIL: all-null columns should read as closed" >&2; exit 1; }
+# A prefix list is an indirection this vantage point cannot see through, so it
+# is neither a pass nor a failure -- claiming either would be inventing a fact.
+[ "$(sg_run "$TMP/sg-prefix.txt" | verdict_for exposure/da-panel-sg)" = "WARN" ] \
+  || { echo "FAIL: an unexpanded prefix list must not read as restricted" >&2; exit 1; }
+[ "$(sg_run "$TMP/sg-selfref.txt" | verdict_for exposure/da-panel-sg)" = "OK" ] \
+  || { echo "FAIL: a group self-reference is a restricted source" >&2; exit 1; }
+
+# And with no way to ask AWS, it must skip rather than guess either way.
+out="$(env -i PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+  HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_SSHD_CONFIG="$TMP/sshd_config.plain" \
+  HOST_AUDIT_CSF_CONF="$TMP/csf.conf" HOST_AUDIT_LFD_ACTIVE=1 \
+  HOST_AUDIT_LISTENERS="22,2222" HOST_AUDIT_INSTANCE_ID="i-000000000000000" \
+  bash "$AUDIT" --json 2>/dev/null || true)"
+[ "$(printf '%s' "$out" | verdict_for exposure/da-panel-sg)" = "SKIP" ] \
+  || { echo "FAIL: unknown security group should skip, not pass or fail" >&2; exit 1; }
+echo "OK the security group decides, and an unanswerable question skips"
+
+echo "== Case 20: the security-group query itself, not a copy of it =="
+# Case 19 injects rules through HOST_AUDIT_SG_RULES_FILE, which proves the
+# classification but never runs the JMESPath. That gap hid a real bug: the
+# query was missing the `[]` flatten after the filter, so against actual AWS
+# output it returned nothing for a world-open group -- and "nothing" was read
+# as "no rule allows 2222". The check would have certified an open panel as
+# closed. So evaluate the exact query the script ships, with the same engine
+# the CLI uses, against recorded describe-security-groups shapes.
+# A hard requirement, not a skip. This case is the one that caught the query
+# being wrong, so quietly passing without it would restore the original problem.
+command -v python3 >/dev/null 2>&1 \
+  || { echo "FAIL: python3 is required to evaluate the security-group query" >&2; exit 1; }
+python3 - "$AUDIT" <<'PY' || exit 1
+import json, re, subprocess, sys
+
+src = open(sys.argv[1], encoding="utf-8").read()
+m = re.search(r'^DA_PANEL_SG_QUERY="(.+)"$', src, re.M)
+if not m:
+    sys.exit("FAIL: could not extract DA_PANEL_SG_QUERY from the audit script")
+# The script stores it for a double-quoted shell context, where \` is a literal.
+query = m.group(1).replace("\\`", "`")
+
+try:
+    import jmespath
+except ImportError:
+    sys.exit("FAIL: jmespath is required to prove the security-group query "
+             "(pip install jmespath) -- it is the engine the AWS CLI applies "
+             "--query with, so nothing else proves the same thing")
+
+
+def perm(proto="tcp", frm=None, to=None, v4=(), v6=(), pl=(), sg=()):
+    p = {"IpProtocol": proto,
+         "IpRanges": [{"CidrIp": c} for c in v4],
+         "Ipv6Ranges": [{"CidrIpv6": c} for c in v6],
+         "PrefixListIds": [{"PrefixListId": i} for i in pl],
+         "UserIdGroupPairs": [{"GroupId": g} for g in sg]}
+    if frm is not None:
+        p["FromPort"], p["ToPort"] = frm, to
+    return p
+
+
+web = perm("tcp", 443, 443, v4=["0.0.0.0/0"])
+cases = [
+    ("as applied: two server EIPs plus the group self-reference",
+     [perm("tcp", 2222, 2222, v4=["44.214.133.234/32", "34.205.151.236/32"],
+           sg=["sg-0e674f4e2937c6392"]), web],
+     {"44.214.133.234/32", "34.205.151.236/32", "sg-0e674f4e2937c6392"}),
+    ("world-open on 2222 -- the case the broken query missed entirely",
+     [perm("tcp", 2222, 2222, v4=["0.0.0.0/0"])], {"0.0.0.0/0"}),
+    ("open over IPv6 only",
+     [perm("tcp", 2222, 2222, v6=["::/0"])], {"::/0"}),
+    ("an all-traffic -1 rule, which carries no FromPort",
+     [perm("-1", v4=["0.0.0.0/0"])], {"0.0.0.0/0"}),
+    ("a 2000-3000 range that covers 2222 without naming it",
+     [perm("tcp", 2000, 3000, v4=["0.0.0.0/0"])], {"0.0.0.0/0"}),
+    ("a prefix list as the source",
+     [perm("tcp", 2222, 2222, pl=["pl-0abc123"])], {"pl-0abc123"}),
+    ("genuinely closed: 2222 appears in no rule",
+     [web], set()),
+    ("adjacent ports must not be picked up",
+     [perm("tcp", 2223, 2223, v4=["0.0.0.0/0"]),
+      perm("tcp", 22, 22, v4=["1.2.3.4/32"])], set()),
+    ("rules spread across two security groups both count",
+     None, {"0.0.0.0/0", "sg-0aaa"}),
+]
+
+fail = 0
+for name, perms, expected in cases:
+    if perms is None:
+        doc = {"SecurityGroups": [
+            {"IpPermissions": [perm("tcp", 2222, 2222, v4=["0.0.0.0/0"])]},
+            {"IpPermissions": [perm("tcp", 2222, 2222, sg=["sg-0aaa"])]}]}
+    else:
+        doc = {"SecurityGroups": [{"IpPermissions": perms}]}
+    got = {t for t in (jmespath.search(query, doc) or []) if t}
+    if got != expected:
+        print("FAIL: %s\n  expected %s\n  got      %s" % (name, expected or "{}", got or "{}"))
+        fail += 1
+
+if fail:
+    sys.exit("%d security-group query case(s) failed" % fail)
+print("OK the shipped JMESPath resolves every source kind and port shape")
+PY
+
+echo "== Case 21: a denied DescribeSecurityGroups is not an all-clear =="
+# The dangerous direction. If the API call fails, the rule set is unknown, and
+# unknown must not collapse into "no rule allows 2222".
+mkdir -p "$TMP/bin"
+cat >"$TMP/bin/aws" <<'EOF'
+#!/bin/bash
+# describe-instances succeeds; describe-security-groups is denied.
+case "$2" in
+  describe-instances) echo "sg-0e674f4e2937c6392"; exit 0 ;;
+  *) echo "An error occurred (UnauthorizedOperation)" >&2; exit 254 ;;
+esac
+EOF
+chmod +x "$TMP/bin/aws"
+aws_run() {
+  env -i PATH="$TMP/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_SSHD_CONFIG="$TMP/sshd_config.plain" \
+    HOST_AUDIT_CSF_CONF="$TMP/csf.conf" HOST_AUDIT_LFD_ACTIVE=1 \
+    HOST_AUDIT_LISTENERS="22,2222" HOST_AUDIT_INSTANCE_ID="i-0118b8ede80b52ef7" \
+    bash "$AUDIT" --json 2>/dev/null || true
+}
+[ "$(aws_run | verdict_for exposure/da-panel-sg)" = "SKIP" ] \
+  || { echo "FAIL: a denied describe-security-groups must skip, not report closed" >&2; exit 1; }
+
+# And when the call succeeds and the group really is world-open, it must fail.
+cat >"$TMP/bin/aws" <<'EOF'
+#!/bin/bash
+case "$2" in
+  describe-instances) echo "sg-0e674f4e2937c6392"; exit 0 ;;
+  *) printf '0.0.0.0/0\tNone\tNone\tNone\n'; exit 0 ;;
+esac
+EOF
+chmod +x "$TMP/bin/aws"
+[ "$(aws_run | verdict_for exposure/da-panel-sg)" = "FAIL" ] \
+  || { echo "FAIL: a successful query showing 0.0.0.0/0 must fail" >&2; exit 1; }
+echo "OK an unreadable security group skips, and a readable open one fails"
+
+echo "PASS: host access audit proofs (21 cases)"

@@ -225,11 +225,88 @@ audit_ssh_match() {
   esac
 }
 
-# --- fail2ban ----------------------------------------------------------------
+# --- Rate limiting -----------------------------------------------------------
+# Two engines do this job and a host should run exactly one. fail2ban is the
+# general answer; CSF's lfd is the one this stack actually ships, and on a
+# DirectAdmin box lfd is usually what is there.
+#
+# They must not both be installed -- each writes its own iptables rules, and two
+# daemons unblocking each other's bans is worse than either alone. So the check
+# is "is something rate-limiting password guessing", not "is fail2ban present".
+# Demanding fail2ban on a CSF host would push an operator into installing the
+# conflicting one.
+audit_rate_limit() {
+  local has_f2b=0 has_lfd=0
+  have fail2ban-client && has_f2b=1
+  { have csf || [ -r "${HOST_AUDIT_CSF_CONF:-/etc/csf/csf.conf}" ]; } && has_lfd=1
+
+  if [ "$has_f2b" -eq 1 ] && [ "$has_lfd" -eq 1 ]; then
+    report WARN "ratelimit/engine" "both fail2ban and CSF/lfd are installed -- they manage iptables independently and will undo each other's bans; run one"
+  fi
+
+  if [ "$has_f2b" -eq 1 ]; then
+    audit_fail2ban
+    return
+  fi
+  if [ "$has_lfd" -eq 1 ]; then
+    audit_lfd
+    return
+  fi
+  report FAIL "ratelimit/engine" "neither fail2ban nor CSF/lfd is installed -- nothing rate-limits password guessing"
+}
+
+# CSF's login failure daemon. Each LF_* setting is a failure threshold for one
+# service, and 0 means that service is not watched at all -- so, as with
+# DirectAdmin's own keys, presence of the setting says nothing. The services
+# that matter here are the password paths the disclosed account names reach:
+# SSH, DirectAdmin on 2222, mail and FTP.
+audit_lfd() {
+  local conf="${HOST_AUDIT_CSF_CONF:-/etc/csf/csf.conf}"
+
+  if [ -n "${HOST_AUDIT_LFD_ACTIVE:-}" ]; then
+    if [ "$HOST_AUDIT_LFD_ACTIVE" = "1" ]; then
+      report OK "ratelimit/lfd" "CSF lfd active"
+    else
+      report FAIL "ratelimit/lfd" "CSF is installed but lfd is not running -- nothing acts on login failures"
+      return
+    fi
+  elif systemctl is-active --quiet lfd 2>/dev/null; then
+    report OK "ratelimit/lfd" "CSF lfd active"
+  else
+    report FAIL "ratelimit/lfd" "CSF is installed but lfd is not running -- nothing acts on login failures"
+    return
+  fi
+
+  if [ ! -r "$conf" ]; then
+    report SKIP "ratelimit/lfd-config" "cannot read $conf (need root)"
+    return
+  fi
+
+  local svc key val off="" on="" missing=""
+  for svc in SSHD DIRECTADMIN SMTPAUTH POP3D IMAPD FTPD; do
+    key="LF_${svc}"
+    val="$(sed -n "s/^${key}[[:space:]]*=[[:space:]]*\"\{0,1\}\([0-9]*\)\"\{0,1\}.*/\1/p" "$conf" | head -1)"
+    if [ -z "$val" ]; then
+      missing="$missing ${key}"
+    elif [ "$val" = "0" ]; then
+      off="$off ${key}"
+    else
+      on="$on ${key}=${val}"
+    fi
+  done
+
+  if [ -n "$off" ]; then
+    report FAIL "ratelimit/lfd-coverage" "lfd is not watching:${off} -- those password paths are unmetered"
+  elif [ -n "$missing" ]; then
+    report WARN "ratelimit/lfd-coverage" "not set, so CSF defaults apply:${missing}${on:+ (set:$on)}"
+  else
+    report OK "ratelimit/lfd-coverage" "thresholds set for every password path:${on}"
+  fi
+}
+
 # Running is not the same as working. A jail watching a logpath that does not
 # exist on this distro reports "active" forever and bans nothing, which is worse
-# than no fail2ban because the dashboard looks green. Total bans is the cheapest
-# evidence that a jail is actually reading real logs.
+# than no fail2ban because the dashboard looks green.
 audit_fail2ban() {
   if ! have fail2ban-client; then
     report FAIL "fail2ban/installed" "not installed -- nothing rate-limits password guessing"
@@ -306,6 +383,34 @@ audit_fail2ban() {
   fi
 }
 
+# True unless this host is demonstrably nginx-only, which is a stronger claim
+# than "the nginx binary exists". DirectAdmin's nginx_apache mode runs nginx as
+# a reverse proxy with Apache still serving, so nginx is installed, Apache
+# writes the logs, and suppressing the Apache finding there would drop a real
+# unscanned password path.
+apache_serves_requests() {
+  local opts="${HOST_AUDIT_CB_OPTIONS:-/usr/local/directadmin/custombuild/options.conf}"
+  local mode=""
+  [ -r "$opts" ] && mode="$(sed -n 's/^webserver=//p' "$opts" | tr -d ' \r' | head -1)"
+
+  case "$mode" in
+    nginx) return 1 ;;
+    # nginx_apache, apache, litespeed and openlitespeed all serve through
+    # something that writes Apache-format access logs.
+    ?*) return 0 ;;
+  esac
+
+  # No CustomBuild answer. Look for Apache itself: a running httpd, or an
+  # installed one. Absence of all of it is real evidence that nothing writes
+  # Apache logs, not a guess -- so it is treated as such.
+  [ -n "${HOST_AUDIT_APACHE_EVIDENCE:-}" ] && return "$((1 - HOST_AUDIT_APACHE_EVIDENCE))"
+  pgrep -x httpd >/dev/null 2>&1 && return 0
+  pgrep -x apache2 >/dev/null 2>&1 && return 0
+  [ -d /etc/httpd ] && return 0
+  [ -d /etc/apache2 ] && return 0
+  return 1
+}
+
 # --- DirectAdmin -------------------------------------------------------------
 audit_directadmin() {
   local conf="${HOST_AUDIT_DA_CONF:-/usr/local/directadmin/conf/directadmin.conf}"
@@ -342,33 +447,102 @@ audit_directadmin() {
     return
   fi
 
-  if [ -n "$disabled" ]; then
-    report WARN "da/brute-force" "set but explicitly disabled:${disabled}"
-  elif [ "$scanner" = "1" ]; then
+  # The scanner's own state is the verdict. Reporting a disabled key instead
+  # lets an irrelevant one mask the answer -- which is what happened on the
+  # first real run: brute_force_scan_apache_logs=0 was surfaced as the finding,
+  # and whether the scanner itself was on went unsaid.
+  if [ "$scanner" = "1" ]; then
     report OK "da/brute-force" "brute_force_log_scanner=1${thresholds:+, thresholds:$thresholds}"
   else
     report WARN "da/brute-force" "brute_force_log_scanner not set (build default applies); keys present:$(printf '%s' "$kv" | cut -d= -f1 | paste -sd' ' -)"
   fi
+
+  # Apache log scanning is only a non-finding where Apache genuinely does not
+  # serve requests. `have nginx` does not establish that: DirectAdmin's
+  # nginx_apache mode runs nginx as a reverse proxy in front of Apache, so the
+  # nginx binary is present, Apache serves, and Apache logs are exactly what
+  # this scanner would read. Ask CustomBuild which server is configured, and
+  # keep the finding whenever the answer is anything other than nginx alone.
+  if [ -n "$disabled" ] && ! apache_serves_requests; then
+    disabled="$(printf '%s' "$disabled" | tr ' ' '\n' | grep -v '^brute_force_scan_apache_logs$' | paste -sd' ' -)"
+  fi
+  [ -z "${disabled// /}" ] \
+    || report WARN "da/brute-force-disabled" "set to 0, so present in the config but doing nothing:${disabled}"
 }
 
 # --- What is actually reachable ----------------------------------------------
 # Ground truth. Config files describe intent; the listening socket and the
 # firewall decide what an attacker can reach.
 audit_exposure() {
-  if ! have ss; then
+  if ! have ss && [ -z "${HOST_AUDIT_LISTENERS:-}" ]; then
     report SKIP "exposure/listeners" "ss not available"
     return
   fi
   local open
-  open="$(ss -lnt 2>/dev/null | awk 'NR>1 {print $4}' | grep -E '^(0\.0\.0\.0|\[::\]|\*):' | sed 's/.*://' | sort -un | paste -sd, -)"
-  if [ -n "$open" ]; then
-    report OK "exposure/listeners" "world-bound ports: $open"
-  else
+  # Test hook: a comma-separated port list stands in for the live socket table.
+  open="${HOST_AUDIT_LISTENERS:-$(ss -lnt 2>/dev/null | awk 'NR>1 {print $4}' | grep -E '^(0\.0\.0\.0|\[::\]|\*):' | sed 's/.*://' | sort -un | paste -sd, -)}"
+  if [ -z "$open" ]; then
     report SKIP "exposure/listeners" "could not enumerate listeners"
+    return
+  fi
+  report OK "exposure/listeners" "world-bound ports: $open"
+
+  # Listing the ports is not judging them. A bound port is only reachable if the
+  # firewall passes it, so read CSF's ingress allowlist and say which of the two
+  # is true -- "bound and allowed through" and "bound but firewalled" need
+  # different responses, and collapsing them either cries wolf or misses a live
+  # exposure.
+  local csf_conf="${HOST_AUDIT_CSF_CONF:-/etc/csf/csf.conf}" tcp_in="" fw_known=0
+  if [ -r "$csf_conf" ]; then
+    tcp_in="$(sed -n 's/^TCP_IN[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$csf_conf" | head -1 | tr -d ' ')"
+    [ -n "$tcp_in" ] && fw_known=1
   fi
 
+  # Nothing outside the box should ever reach these. A password path on a
+  # database is not rate-limited by lfd or fail2ban, and a success is the whole
+  # dataset rather than one account.
+  local port label exposed="" firewalled=""
+  for port in 3306:mysql 5432:postgres 6379:redis 11211:memcached 27017:mongodb 9200:elasticsearch; do
+    label="${port#*:}"
+    port="${port%%:*}"
+    case ",$open," in
+      *",$port,"*) ;;
+      *) continue ;;
+    esac
+    if [ "$fw_known" -eq 1 ] && ! printf ',%s,' "$tcp_in" | grep -q ",$port,"; then
+      firewalled="$firewalled ${label}/${port}"
+    else
+      exposed="$exposed ${label}/${port}"
+    fi
+  done
+
+  if [ -n "$exposed" ]; then
+    if [ "$fw_known" -eq 1 ]; then
+      report FAIL "exposure/datastore" "reachable from the internet (bound to all interfaces and allowed by TCP_IN):${exposed} -- bind to 127.0.0.1 or remove from TCP_IN"
+    else
+      report FAIL "exposure/datastore" "bound to all interfaces:${exposed} -- could not read a firewall allowlist to rule out internet reachability; bind to 127.0.0.1"
+    fi
+  fi
+  if [ -n "$firewalled" ]; then
+    report WARN "exposure/datastore" "bound to all interfaces but not in TCP_IN:${firewalled} -- firewalled today, exposed the moment CSF is stopped or flushed; prefer binding to 127.0.0.1"
+  fi
+  [ -n "$exposed$firewalled" ] || report OK "exposure/datastore" "no database ports bound to all interfaces"
+
+  # Plaintext credential paths. Their TLS equivalents (465/993/995, or FTP over
+  # TLS) exist on this stack, so these are usually legacy compatibility.
+  local plain=""
+  for port in 21:ftp 110:pop3 143:imap; do
+    label="${port#*:}"
+    port="${port%%:*}"
+    case ",$open," in *",$port,"*) plain="$plain ${label}/${port}" ;; esac
+  done
+  [ -z "$plain" ] || report WARN "exposure/plaintext-auth" "accepts credentials without implicit TLS:${plain} -- confirm STARTTLS is mandatory, or close in favour of 465/993/995"
+
   case ",$open," in
-    *,2222,*) report WARN "exposure/da-panel" "DirectAdmin 2222 is bound to all interfaces; restrict it to known source addresses at the security group or host firewall" ;;
+    *,2222,*)
+      report OK "exposure/da-panel" "DirectAdmin 2222 is bound to all interfaces and passed by TCP_IN -- the security group decides who reaches it, see exposure/da-panel-sg"
+      audit_da_panel_boundary
+      ;;
     *) report OK "exposure/da-panel" "2222 not world-bound" ;;
   esac
 
@@ -383,6 +557,83 @@ audit_exposure() {
   else
     report OK "exposure/firewall" "$fw"
   fi
+}
+
+# The boundary in front of 2222 is the EC2 security group, and it is not visible
+# from inside the instance. Warning purely on "bound and passed by TCP_IN" would
+# keep reporting a finding forever on a host whose panel is already closed at the
+# security group -- a verdict that cannot be cleared by doing the right thing is
+# one people learn to ignore.
+#
+# So ask AWS. The instance profile usually cannot describe EC2, which makes this
+# a SKIP with the command to run from a workstation, and a SKIP marks the audit
+# incomplete rather than passing it.
+#
+# Three things this query has to get right, because each of them is a way for a
+# world-open panel to read as closed:
+#
+#   - The `[]` after the filter. Without it the result is one list per security
+#     group and the trailing `.IpRanges[].CidrIp` silently evaluates to empty,
+#     which this check would have read as "no rule allows 2222".
+#   - Every source kind, not just IPv4. An `::/0` on 2222 is as open as an
+#     0.0.0.0/0, and prefix lists and group references are real sources too.
+#   - Rules that cover 2222 without naming it: a 2000-3000 range, and `-1`
+#     all-traffic rules, which carry no FromPort at all.
+#
+# Kept as a single string so the offline proof can extract and evaluate the
+# exact query that ships rather than a copy of it.
+DA_PANEL_SG_QUERY="SecurityGroups[].IpPermissions[?IpProtocol=='-1' || (FromPort<=\`2222\` && ToPort>=\`2222\`)][].[IpRanges[].CidrIp, Ipv6Ranges[].CidrIpv6, PrefixListIds[].PrefixListId, UserIdGroupPairs[].GroupId][][]"
+
+audit_da_panel_boundary() {
+  local iid sgs rules queried=no
+  iid="${HOST_AUDIT_INSTANCE_ID:-$(curl -fsS -m 1 -H "X-aws-ec2-metadata-token: $(curl -fsS -m 1 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token 2>/dev/null)" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)}"
+
+  if [ -n "${HOST_AUDIT_SG_RULES_FILE:-}" ]; then
+    rules="$(cat "$HOST_AUDIT_SG_RULES_FILE" 2>/dev/null)"
+    queried=yes
+  elif have aws && [ -n "$iid" ]; then
+    # An empty answer means "no rule allows 2222" only if the call succeeded.
+    # Treating a failed call as an empty rule set would turn a denied
+    # DescribeSecurityGroups into an all-clear.
+    if sgs="$(aws ec2 describe-instances --instance-ids "$iid" \
+      --query 'Reservations[].Instances[].SecurityGroups[].GroupId' --output text 2>/dev/null)" &&
+      [ -n "$sgs" ]; then
+      # shellcheck disable=SC2086 # deliberate word splitting: one arg per group
+      if rules="$(aws ec2 describe-security-groups --group-ids $sgs \
+        --query "$DA_PANEL_SG_QUERY" --output text 2>/dev/null)"; then
+        queried=yes
+      fi
+    fi
+  fi
+
+  if [ "$queried" != yes ]; then
+    report SKIP "exposure/da-panel-sg" "cannot read the security group from this host; run from a workstation with credentials: aws ec2 describe-security-groups --group-ids \$(aws ec2 describe-instances --instance-ids ${iid:-<instance-id>} --query 'Reservations[].Instances[].SecurityGroups[].GroupId' --output text) --query \"$DA_PANEL_SG_QUERY\" --output text"
+    return
+  fi
+
+  # Tab-separated columns, and `None` is what the CLI prints for a null element
+  # in a text projection. Reduce to a space-separated list of real sources.
+  rules="$(printf '%s' "$rules" |
+    awk '{for (i = 1; i <= NF; i++) if ($i != "None") printf "%s%s", (n++ ? " " : ""), $i} END {print ""}')"
+
+  if [ -z "$rules" ]; then
+    report OK "exposure/da-panel-sg" "no security-group rule allows 2222 -- the panel is closed to the internet entirely, reachable only by SSM port-forward"
+    return
+  fi
+
+  case " $rules " in
+    *" 0.0.0.0/0 "* | *" ::/0 "*)
+      report FAIL "exposure/da-panel-sg" "the security group allows 2222 from the whole internet (${rules}) -- the panel is open"
+      ;;
+    *"pl-"*)
+      # A prefix list is an indirection this check cannot see through, and its
+      # entries are editable elsewhere. Naming it beats implying it was read.
+      report WARN "exposure/da-panel-sg" "2222 is allowed via a prefix list whose entries were not read (${rules}) -- expand it with: aws ec2 get-managed-prefix-list-entries --prefix-list-id"
+      ;;
+    *)
+      report OK "exposure/da-panel-sg" "2222 restricted at the security group to: ${rules}"
+      ;;
+  esac
 }
 
 # --- Account surface ---------------------------------------------------------
@@ -410,14 +661,33 @@ audit_accounts() {
 # strength of that has no way back in, so local liveness and control-plane
 # reachability are reported as two separate facts.
 audit_ssm() {
-  if ! systemctl list-unit-files 2>/dev/null | grep -q amazon-ssm-agent; then
-    report WARN "ssm/agent" "amazon-ssm-agent not installed -- no out-of-band path; do NOT tighten SSH without another way in"
+  # Look in several places before concluding it is absent. A false negative here
+  # is expensive in both directions: it either sends someone to install an agent
+  # that is already there, or -- if the rest of the audit is clean -- it is the
+  # one thing standing between them and an SSH change with no way back.
+  local installed=0
+  systemctl list-unit-files 2>/dev/null | grep -q amazon-ssm-agent && installed=1
+  [ -x /usr/bin/amazon-ssm-agent ] && installed=1
+  [ -x /snap/bin/amazon-ssm-agent ] && installed=1
+  [ -d /var/lib/amazon/ssm ] && installed=1
+  if [ "$installed" -eq 0 ]; then
+    report FAIL "ssm/agent" "amazon-ssm-agent not installed -- there is no out-of-band path, so an SSH or firewall mistake has no rollback. Install it first: dnf install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm && systemctl enable --now amazon-ssm-agent"
     return
   fi
+  # systemd is not the only way this agent gets supervised, and the unit is not
+  # always discoverable under the name you expect. A live process is the fact
+  # that matters, so accept either -- reporting "installed but not running" for
+  # an agent the control plane can see is the false negative this avoids.
+  local running=""
   if systemctl is-active --quiet amazon-ssm-agent 2>/dev/null; then
-    report OK "ssm/agent" "local agent process is running (says nothing about control-plane reachability -- see ssm/reachable)"
+    running="systemd unit active"
+  elif pgrep -f '[a]mazon-ssm-agent' >/dev/null 2>&1; then
+    running="process running (no active systemd unit by that name)"
+  fi
+  if [ -n "$running" ]; then
+    report OK "ssm/agent" "local agent is up -- $running (says nothing about control-plane reachability, see ssm/reachable)"
   else
-    report FAIL "ssm/agent" "installed but not running -- restore it before tightening SSH"
+    report FAIL "ssm/agent" "installed but no running agent found -- restore it before tightening SSH"
     return
   fi
 
@@ -427,7 +697,7 @@ audit_ssm() {
   # which makes the audit incomplete rather than quietly passing.
   local iid ping=""
   iid="$(sed -n 's/.*"ManagedInstanceID":"\([^"]*\)".*/\1/p' /var/lib/amazon/ssm/registration 2>/dev/null)"
-  [ -n "$iid" ] || iid="$(curl -fsS -m 2 -H "X-aws-ec2-metadata-token: $(curl -fsS -m 2 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token 2>/dev/null)" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)"
+  [ -n "$iid" ] || iid="$(curl -fsS -m 1 -H "X-aws-ec2-metadata-token: $(curl -fsS -m 1 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token 2>/dev/null)" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)"
 
   if have aws && [ -n "$iid" ]; then
     ping="$(aws ssm describe-instance-information \
@@ -457,7 +727,7 @@ audit_ssm() {
 audit_ssm
 audit_ssh
 audit_ssh_match
-audit_fail2ban
+audit_rate_limit
 audit_directadmin
 audit_exposure
 audit_accounts
