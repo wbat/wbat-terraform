@@ -525,7 +525,13 @@ Where a clean verdict would be easy but wrong, it does the harder thing:
 - The 2222 boundary is the security group, which is invisible from inside the
   instance. The audit reports the socket-level fact, then asks EC2 who is actually
   allowed in — so a panel already closed at the security group clears, instead of
-  warning forever about a finding that has been fixed.
+  warning forever about a finding that has been fixed. That question is asked in a
+  way that cannot answer "closed" by accident: the filter matches IPv6 ranges,
+  prefix lists and group references as well as IPv4, and matches port *ranges*
+  containing 2222 and `-1` all-traffic rules, which carry no `FromPort`. A call
+  that fails is a skip, never an empty rule set, because a denied
+  `DescribeSecurityGroups` read as "no rule allows 2222" is an all-clear on the
+  most important question here.
 - A running `amazon-ssm-agent` is reported as a running process, not as a recovery
   path. Only `PingStatus: Online` from the control plane means a session can
   actually be opened, and that is a separate check.
@@ -539,7 +545,7 @@ in, is in [aws/docs/host-access-hardening.md](../../aws/docs/host-access-hardeni
 ./scripts/directadmin/prove_host_access_audit.sh
 ```
 
-Nineteen cases, every one of them a way this audit can mislead: a password path left
+Twenty-one cases, every one of them a way this audit can mislead: a password path left
 open while the report reads green, or a false alarm that sends an operator to install
 something harmful. The motivating case is `PasswordAuthentication no` with PAM
 keyboard-interactive still enabled: what most hardening checklists stop short of,
@@ -547,3 +553,15 @@ and it leaves the box brute-forceable while the config reads as hardened. The re
 cover `Match` blocks, skips that must not read as passes, settings that are present
 but disabled, one fail2ban jail masking another, CSF/lfd counting as the rate limiter
 it is, and MySQL bound to every interface.
+
+Case 20 exists because of a gap the other cases created. Every security-group case
+injected rules through `HOST_AUDIT_SG_RULES_FILE`, which proved the classification
+and never once ran the JMESPath — and the JMESPath was wrong, missing the flatten
+after the filter, so against real AWS output it returned nothing for a world-open
+group and the check called an open panel closed. A test hook that bypasses the thing
+most likely to be wrong is worse than no test, because it reports success. So the
+query is stored in one variable, `DA_PANEL_SG_QUERY`, and Case 20 extracts that exact
+string from the script and evaluates it with the same engine the AWS CLI uses against
+recorded `describe-security-groups` shapes. Reverting the query to the old one fails
+seven of its eight assertions; the eighth is the genuinely-closed group, which is
+empty either way, and that is precisely why the bug was invisible.

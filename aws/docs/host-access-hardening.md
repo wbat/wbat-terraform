@@ -238,6 +238,25 @@ The empty default is load-bearing. With no entries, no operator rule is
 created and nothing changes, so a missing variable cannot lock anyone out by
 omission.
 
+### State as of the last apply
+
+2222 is **closed to the internet**. The world-open rule was revoked and
+`da-panel.tf` applied, and `da_panel_allowed_cidrs` is currently empty, so the
+only rules on 2222 are the two server EIPs and the group self-reference. Panel
+access is therefore by SSM port-forward only, which is the end state described
+below rather than a gap to fix.
+
+Verified from outside AWS, from a host on no allowlist: 2222 and 3306 both
+time out while 443 answers. The timeout rather than a refusal is the tell — a
+security group drops, where a host firewall rejecting or a closed port returns
+`RST` immediately. Port 22 also times out from there, which is worth knowing
+because CSF's `TCP_IN` does allow 22: SSH is restricted at the security group,
+not by the host, so a broken allowlist entry cannot be worked around by
+falling back to SSH from an arbitrary address. SSM remains the path that does
+not depend on any of this.
+
+The procedure below is kept for the next time these rules change.
+
 ### The order that avoids locking yourself out
 
 Adding these rules **does not close 2222**. The existing `0.0.0.0/0` rule was
@@ -263,9 +282,16 @@ terraform output da_panel_allowed_sources
 ```bash
 aws ec2 describe-security-groups --profile wbat --region us-east-1 \
   --group-ids sg-0e674f4e2937c6392 \
-  --query "SecurityGroups[].IpPermissions[?FromPort==\`2222\`].[IpRanges[].[CidrIp,Description]]" \
+  --query "SecurityGroups[].IpPermissions[?IpProtocol=='-1' || (FromPort<=\`2222\` && ToPort>=\`2222\`)][].[IpRanges[].[CidrIp,Description], Ipv6Ranges[].[CidrIpv6,Description], UserIdGroupPairs[].[GroupId,Description]][][]" \
   --output text
 ```
+
+Three details in that filter are load-bearing, and each one is a way for an
+open 2222 to look closed: the `[]` after the filter (without it the projection
+stays nested per security group and a trailing `.IpRanges[].CidrIp` evaluates to
+nothing at all), the IPv6 and group-reference columns, and matching a *range*
+containing 2222 plus `-1` all-traffic rules, which carry no `FromPort`.
+`exposure/da-panel-sg` in the audit asks the same question with the same filter.
 
 4. **Then revoke the world-open rule**, and keep the command that puts it back
    in your shell history before you run it:
