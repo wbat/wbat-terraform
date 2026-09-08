@@ -62,6 +62,26 @@ SIZE_RATIO_PCT="${DA_BATCH_RATIO_PCT:-100}"
 WATCH_INTERVAL_SEC="${DA_BATCH_WATCH_INTERVAL:-5}"
 # How long to wait for the hook to drain the staging directory after an account finishes.
 DRAIN_TIMEOUT_SEC="${DA_BATCH_DRAIN_TIMEOUT:-1800}"
+# Hard limit on one account's archive run.
+#
+# The free-space floor only fires when the volume is filling. A backup can hang without
+# consuming a single byte -- an rclone inside the upload hook that stops making progress
+# against S3, DirectAdmin waiting on a MySQL lock, a filesystem that stops answering --
+# and a bare `wait` on the child is unbounded. That run never reaches the summary and
+# never mails, and because it still holds the batch lock, every cron invocation after it
+# takes the "another run holds it" branch and exits 0. Account backups would stop
+# completely, for as long as the hang lasts, with nothing saying so: the same
+# silent-failure shape as the two months this script exists to end.
+#
+# Six hours is far longer than any account on this host has plausibly needed -- the whole
+# 2026-07-02 run of all fourteen accounts produced 66 GiB well inside that -- and short
+# enough that the next daily run at 01:00 finds the lock free.
+ACCOUNT_TIMEOUT_SEC="${DA_BATCH_ACCOUNT_TIMEOUT:-21600}"
+# Grace between TERM and KILL when a backup is being stopped. tar and zstd exit promptly
+# on TERM; a process that does not is precisely the one that must not be left running,
+# because both reasons for stopping it -- the floor and the timeout -- get worse the
+# longer it keeps writing.
+KILL_GRACE_SEC="${DA_BATCH_KILL_GRACE:-60}"
 
 HOST="$(hostname -s)"
 MODE="run"
@@ -213,13 +233,36 @@ floor_kb=$((FLOOR_GB * 1048576))
 
 declare -a done_users=() skipped_users=() failed_users=()
 run_start_epoch="$(date +%s)"
+# Why the last backup_one call gave up, in words the summary mail can use. A failure that
+# reads only as the account name tells whoever opens the mail nothing about whether to
+# free disk or to go looking for a stuck rclone.
+backup_one_reason=""
 
-# Runs one account under the free-space floor. The watchdog is a plain background loop
-# rather than anything cleverer because it has to keep working when the volume is nearly
-# full, which is when writing state files stops being reliable.
+# Stop a backup and everything DirectAdmin forked from it. TERM first, then KILL, because
+# a TERM that is ignored is indistinguishable from one that worked right up until the
+# volume is full -- and the two callers of this are the floor breach and the per-account
+# timeout, neither of which can afford to be wrong about whether the writing stopped.
+stop_group() {
+  local pid="$1" waited=0
+  kill -TERM -- "-${pid}" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+  while ((waited < KILL_GRACE_SEC)) && kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+  # Unconditionally, not only while the parent is still alive. DirectAdmin forks tar and
+  # zstd; a parent that exits cleanly on TERM can leave those behind still writing into
+  # the volume this is trying to protect. If the group is already gone this is a no-op.
+  kill -KILL -- "-${pid}" 2>/dev/null || true
+}
+
+# Runs one account under the free-space floor and the per-account time limit. The watchdog
+# is a plain background loop rather than anything cleverer because it has to keep working
+# when the volume is nearly full, which is when writing state files stops being reliable.
 backup_one() {
   local user="$1"
   local abort_flag rc=0 da_pid watch_pid killed=0
+  local abort_reason="" abort_detail=""
+  backup_one_reason=""
 
   abort_flag="$(mktemp)" || {
     log "ERROR could not create the abort flag for ${user}; refusing to run without the free-space watchdog"
@@ -238,35 +281,65 @@ backup_one() {
   fi
   da_pid=$!
 
+  # One watchdog for both bounds. It samples on the same tick, so the elapsed count is
+  # the loop's own, not a second timer that could disagree with it.
   (
+    watched=0
     while kill -0 "$da_pid" 2>/dev/null; do
       now_kb="$(avail_kb "$ADMIN_DIR")"
       now_kb="${now_kb:-0}"
       if ((now_kb < floor_kb)); then
-        echo "$now_kb" >"$abort_flag"
-        kill -TERM -- "-${da_pid}" 2>/dev/null || kill -TERM "$da_pid" 2>/dev/null
+        printf 'floor %s\n' "$now_kb" >"$abort_flag"
+        break
+      fi
+      if ((ACCOUNT_TIMEOUT_SEC > 0 && watched >= ACCOUNT_TIMEOUT_SEC)); then
+        printf 'timeout %s\n' "$watched" >"$abort_flag"
         break
       fi
       sleep "$WATCH_INTERVAL_SEC"
+      watched=$((watched + WATCH_INTERVAL_SEC))
     done
+    # The loop also ends when the backup finishes on its own, which is the common case and
+    # needs no signal at all.
+    [[ -s "$abort_flag" ]] || exit 0
+    stop_group "$da_pid"
   ) &
   watch_pid=$!
 
   wait "$da_pid" || rc=$?
-  kill "$watch_pid" 2>/dev/null
-  wait "$watch_pid" 2>/dev/null
+  if [[ -s "$abort_flag" ]]; then
+    # The watchdog is part-way through escalating TERM to KILL. Tearing it down here is how
+    # the tar DirectAdmin forked outlives the kill that was meant for its whole group, and
+    # keeps writing into a volume that is already at the floor.
+    wait "$watch_pid" 2>/dev/null
+  else
+    kill "$watch_pid" 2>/dev/null
+    wait "$watch_pid" 2>/dev/null
+  fi
 
   if [[ -s "$abort_flag" ]]; then
     killed=1
-    log "ERROR killed the backup of ${user}: free space fell to $(gb "$(cat "$abort_flag")") GB, below the ${FLOOR_GB} GB floor"
+    read -r abort_reason abort_detail <"$abort_flag"
+    case "$abort_reason" in
+      timeout)
+        backup_one_reason="killed after ${abort_detail}s, past the ${ACCOUNT_TIMEOUT_SEC}s per-account limit"
+        log "ERROR killed the backup of ${user}: still running after ${abort_detail}s, past the ${ACCOUNT_TIMEOUT_SEC}s per-account limit. Free space never moved, so this is a hang rather than a full volume -- look for a stalled rclone in the upload hook before the next run."
+        ;;
+      *)
+        backup_one_reason="killed at the ${FLOOR_GB} GB free-space floor"
+        log "ERROR killed the backup of ${user}: free space fell to $(gb "$abort_detail") GB, below the ${FLOOR_GB} GB floor"
+        ;;
+    esac
   fi
   rm -f "$abort_flag"
 
   if ((killed == 1)); then
-    # Whatever is in the staging directory now is a partial archive of this account. The
-    # directory was confirmed empty before this account started, so there is nothing else
-    # it could be, and leaving it would let the hook upload a truncated archive to S3 and
-    # record it as a successful backup.
+    # Whatever is in the staging directory now belongs to this account: the directory was
+    # confirmed empty before it started, so there is nothing else it could be. It is
+    # deleted rather than left for the hook because a killed run cannot say whether the
+    # archive is truncated, and an archive of unknown completeness is a truncated one as
+    # far as S3 is concerned -- uploading it would record a partial backup as a successful
+    # one. Losing a re-creatable archive is the cheap side of that trade.
     local partial
     partial="$(find "$ADMIN_DIR" -type f 2>/dev/null)"
     if [[ -n "$partial" ]]; then
@@ -277,6 +350,7 @@ backup_one() {
   fi
 
   if ((rc != 0)); then
+    backup_one_reason="admin-backup exited ${rc}"
     log "ERROR admin-backup for ${user} exited ${rc}"
     return 1
   fi
@@ -371,7 +445,7 @@ while IFS=$'\t' read -r kb user; do
 
   log "backing up ${user} (home $(gb "$kb") GB, estimate $(gb "$est_kb") GB, free $(gb "$now_kb") GB)"
   if ! backup_one "$user"; then
-    failed_users+=("$user")
+    failed_users+=("${user}${backup_one_reason:+ (${backup_one_reason})}")
     # A kill or a DirectAdmin failure on one account says nothing reliable about the next,
     # except when it was the floor that fired -- and in that case continuing is how the
     # volume fills. Stop and let a person look.

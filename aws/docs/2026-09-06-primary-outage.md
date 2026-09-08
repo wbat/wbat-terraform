@@ -1050,6 +1050,16 @@ Two guards, because the size estimate is the part most likely to be wrong:
   starting, so a volume that is already below it produces a skip that says so rather than
   a backup that is launched and killed a second later.
 
+Both of those guards watch space, and a backup can fail without using any. An `rclone`
+inside the upload hook that stops making progress against S3, or DirectAdmin blocked on a
+database lock, hangs at constant free space, and waiting on the child process is otherwise
+unbounded. A run stuck there also holds the batch lock, so every cron invocation after it
+takes the "another run holds it" branch and exits 0 — account backups would stop
+completely and nothing would mail, which is the same silence that hid the July failure for
+two months. So each account is additionally bounded by a **six-hour limit**: past it the
+process group is terminated, the archive it left behind is deleted, and the run reports
+itself incomplete.
+
 Accounts run smallest first, so a failure on `teller` — the one account most likely not to
 fit — leaves the other thirteen already safe in S3 rather than never attempted. A run that
 skips or fails anything exits non-zero and mails `HEALTH_ALERT_TO` naming the accounts
@@ -1068,8 +1078,8 @@ deleted** at Admin Level → Admin Backup/Transfer → Schedule, or the two race
 [`prove_backup_batch.sh`](../../scripts/directadmin/prove_backup_batch.sh) pins the
 behaviour offline against a stubbed DirectAdmin, `df` and `mail`: ordering, the headroom
 gate, the reserve, refusing to start on a dirty staging directory, waiting for the drain,
-the floor kill and its partial cleanup. Three non-vacuity checks remove each guard in turn
-and confirm the matching proof then fails.
+the floor kill and its partial cleanup, and the per-account time limit. Non-vacuity checks
+remove each guard in turn and confirm the matching proof then fails.
 
 ### 2. Find out what `Not implemented` refers to (CLI)
 

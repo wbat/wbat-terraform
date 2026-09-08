@@ -302,6 +302,14 @@ hook cannot upload a truncated one — if free space crosses `DA_BATCH_FLOOR_GB`
 account that never fits is skipped and mailed rather than attempted, because an account
 with no backup is worth saying out loud.
 
+Every account run is also bounded by `DA_BATCH_ACCOUNT_TIMEOUT`. The floor only fires when
+the volume is being consumed, and a backup can hang at constant free space — an `rclone`
+inside the hook that stops making progress, DirectAdmin blocked on a database lock. A run
+stuck there holds the batch lock, so every cron invocation after it exits quietly on the
+lock and account backups stop for good with nothing mailing. Past the limit the process
+group is terminated, the archive it left is deleted, and the run reports itself
+incomplete.
+
 ```bash
 /usr/local/sbin/da-backup-batch.sh --list      # accounts, sizes, what fits right now
 /usr/local/sbin/da-backup-batch.sh --dry-run   # plan without invoking DirectAdmin
@@ -317,6 +325,8 @@ Backup/Transfer → Schedule**, or the two race at 05:00.
 | Hard floor that kills a running backup | 8 GB | `DA_BATCH_FLOOR_GB` |
 | Estimated archive as a % of the home directory | 100% | `DA_BATCH_RATIO_PCT` |
 | Wait for the hook to clear the staging dir | 1800s | `DA_BATCH_DRAIN_TIMEOUT` |
+| Hard limit on one account's archive run | 21600s | `DA_BATCH_ACCOUNT_TIMEOUT` |
+| Grace between TERM and KILL when stopping one | 60s | `DA_BATCH_KILL_GRACE` |
 
 `da_disk_guard.sh` is the separate hourly watch for the host's resources. Nothing else in
 the account monitors disk or memory (the only CloudWatch alarms are on billing, and the

@@ -117,7 +117,17 @@ add_account() {
 # below the floor, so the run would abort for that reason instead of exercising whatever
 # the proof was about -- and it would do so as a race against the stub finishing, which is
 # how this suite first went intermittent. Proof 6 sets the floor explicitly.
+#
+# ACCOUNT_TIMEOUT defaults to 0, which disables the per-account limit, for the same
+# reason: the real 21600s bound is not reachable in a suite that runs in seconds, and a
+# proof that is not about the timeout should not be able to trip it. Proof 6b sets it.
+#
+# RUN_TIMEOUT wraps the script in `timeout`. Only the non-vacuity check for the
+# per-account limit needs it: with that guard removed the script is supposed to hang
+# forever, and a proof that hangs forever is not a proof.
 run_batch() {
+  local bound=()
+  [[ -n "${RUN_TIMEOUT:-}" ]] && bound=(timeout "$RUN_TIMEOUT")
   PATH="${SANDBOX}/bin:$PATH" \
     DA_BATCH_DA_BIN="${SANDBOX}/bin/directadmin" \
     DA_BATCH_USERS_DIR="${CASE}/users" \
@@ -128,9 +138,12 @@ run_batch() {
     DA_BATCH_CONF="${CASE}/etc/conf" \
     DA_BATCH_WATCH_INTERVAL="${WATCH_INTERVAL:-1}" \
     DA_BATCH_DRAIN_TIMEOUT="${DRAIN_TIMEOUT:-3}" \
+    DA_BATCH_ACCOUNT_TIMEOUT="${ACCOUNT_TIMEOUT:-0}" \
+    DA_BATCH_KILL_GRACE="${KILL_GRACE:-5}" \
     DA_BATCH_RESERVE_GB="${RESERVE_GB:-10}" \
     DA_BATCH_FLOOR_GB="${FLOOR_GB:-0}" \
     DA_BATCH_RATIO_PCT="${RATIO_PCT:-100}" \
+    ${bound[@]+"${bound[@]}"} \
     "$SCRIPT" "$@" >"${CASE}/stdout" 2>"${CASE}/stderr"
   echo $?
 }
@@ -264,6 +277,34 @@ assert "the removal is logged rather than silent" "grep -q 'partial archive' '${
 
 # ---------------------------------------------------------------------------
 echo
+echo "6b. A backup that hangs without filling the disk is bounded, killed and reported"
+# The floor only fires when the volume is being consumed. An rclone that stops making
+# progress against S3, or DirectAdmin blocked on a MySQL lock, hangs at constant free
+# space -- and `wait` on its own never returns. That run holds the batch lock, so every
+# later cron invocation takes the "another run holds it" branch and exits 0: account
+# backups stop completely and nothing mails. That is the exact silent-failure shape this
+# whole script exists to end, so the hang has to be bounded.
+new_case hang
+add_account stuck 1
+export STUB_DA_SLEEP=13137 STUB_DRAIN=0
+ACCOUNT_TIMEOUT=2
+KILL_GRACE=5
+WATCH_INTERVAL=1
+hang_start="$(date +%s)"
+rc="$(run_batch)"
+hang_elapsed=$(($(date +%s) - hang_start))
+unset STUB_DA_SLEEP STUB_DRAIN
+unset ACCOUNT_TIMEOUT KILL_GRACE WATCH_INTERVAL
+assert "exit 1" "[[ '$rc' == 1 ]]"
+assert "the run returned rather than waiting out the hang (${hang_elapsed}s)" "(( hang_elapsed < 60 ))"
+assert "the log names the per-account limit" "grep -q 'per-account limit' '${CASE}/batch.log'"
+assert "it is not misreported as a floor breach" "! grep -q 'below the .* GB floor' '${CASE}/batch.log'"
+assert "the archive the killed run left behind was removed" "[[ -z \"\$(find '${CASE}/staging' -type f)\" ]]"
+assert "the incomplete run is mailed, naming the account" "grep -q 'stuck' '$STUB_MAIL'"
+assert "the mail says why, not just that it failed" "grep -q 'per-account limit' '$STUB_MAIL'"
+
+# ---------------------------------------------------------------------------
+echo
 echo "7. A DirectAdmin failure stops the run and is reported"
 new_case da-fails
 add_account a 1
@@ -363,6 +404,29 @@ run_batch >/dev/null
 unset STUB_DA_SLEEP STUB_DA_CONSUME_TO_KB STUB_DRAIN FLOOR_GB WATCH_INTERVAL
 SCRIPT="$SCRIPT_SAVE"
 nv_check "the partial archive is left for the hook to upload" "[[ -n \"\$(find '${CASE}/staging' -type f)\" ]]"
+
+# NV4: drop the per-account time limit and let the same hang run unbounded. The outer
+# `timeout` is what stands in for the guard: rc 124 means the script never gave up on its
+# own, which is the state in which the batch lock is held forever and nothing mails.
+sed 's/      if ((ACCOUNT_TIMEOUT_SEC > 0 \&\& watched >= ACCOUNT_TIMEOUT_SEC)); then/      if false; then/' "$SCRIPT" >"$NV"
+chmod +x "$NV"
+new_case nv-hang
+add_account stuck 1
+SCRIPT_SAVE="$SCRIPT"
+SCRIPT="$NV"
+export STUB_DA_SLEEP=13139 STUB_DRAIN=0
+ACCOUNT_TIMEOUT=2
+KILL_GRACE=5
+WATCH_INTERVAL=1
+RUN_TIMEOUT=15
+nv_rc="$(run_batch)"
+unset STUB_DA_SLEEP STUB_DRAIN
+unset ACCOUNT_TIMEOUT KILL_GRACE WATCH_INTERVAL RUN_TIMEOUT
+SCRIPT="$SCRIPT_SAVE"
+nv_check "the hung backup runs on unbounded and nothing is ever reported" "[[ '$nv_rc' == 124 ]]"
+# `timeout` signals the script, not the stub it orphaned. Reap it so the sandbox teardown
+# does not leave a stray sleep behind for the rest of the CI job.
+pkill -f 'sleep 13139' 2>/dev/null || true
 
 echo
 echo "----------------------------------------"
