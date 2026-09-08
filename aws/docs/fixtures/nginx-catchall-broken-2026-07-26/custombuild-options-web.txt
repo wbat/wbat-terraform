@@ -1,7 +1,7 @@
 Nginx Unit: no
-Nginx: <redacted>
+Nginx: 1.31.2
 LibModSecurity: no
-PHP (additional): <redacted>
-PHP (default): <redacted>
-phpMyAdmin: <redacted>
+PHP (additional): 8.1
+PHP (default): 8.2
+phpMyAdmin: 5.2.3
 Replace "php.ini" with 'da build all' and 'da build php_ini': no
