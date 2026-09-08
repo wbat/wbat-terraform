@@ -80,6 +80,11 @@ MANAGED=(
   "cron.d-da-disk-guard|${CRON_DIR}/da-disk-guard|644"
   "da_backup_batch.sh|${SBIN_DIR}/da-backup-batch.sh|755"
   "cron.d-da-backup-batch|${CRON_DIR}/da-backup-batch|644"
+  # Off-host copy of media the account backups deliberately exclude. Managed here for
+  # the same reason as the hooks: these paths are backed up by nothing else, so a stale
+  # or missing copy of this script is a silent gap rather than a degraded feature.
+  "sync_site_media.sh|${SBIN_DIR}/sync-site-media.sh|755"
+  "cron.d-da-site-media|${CRON_DIR}/da-site-media|644"
   "logrotate.d-da-ops|${LOGROTATE_DIR}/da-ops|644"
   # Read-only auditor, no cron entry: it is run on demand and reports, so a
   # schedule would only produce output nobody reads. Managed here because a

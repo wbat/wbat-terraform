@@ -1,0 +1,35 @@
+# Static website media copied to S3 and excluded from the nightly DirectAdmin
+# account backup. Read by /usr/local/sbin/sync-site-media.sh.
+#
+# Install to /etc/da-vhost-listen/site-media.conf (mode 0644, root-owned).
+#
+# Format: one entry per line, "<account> <path relative to the account home>".
+#
+#   - Relative paths only. An absolute path is ignored, not resolved.
+#   - No trailing slash. These exact strings are written into
+#     .backup_exclude_paths, and GNU tar 1.35 does not exclude a directory given
+#     with one -- the media would stay in the archive while the size estimate
+#     said otherwise.
+#   - No "..".
+#
+# What belongs here is content that is large, changes rarely, and is served from
+# the live site: galleries, video directories, document archives. What does not
+# belong here is anything whose only copy would then be an S3 object nobody has
+# read back -- run --deep-verify before the first exclusion, and note that the
+# nightly account backup stops covering these paths the moment they are listed.
+#
+# Adding a path here does not exclude it. Excluding is a separate, deliberate
+# step (--write-exclusions) that refuses to run without a verified receipt.
+
+# teller: 34 GB of the account's 54 GB, which is why it did not fit the staging
+# disk. Churn measured 2026-09-08 over a 90-day window.
+#   comsatlegacy gallery   17.3 GB, 33,319 files, 0 changed in 90d
+#   steveteller gallery    10.5 GB, 10,479 files, 1,801 changed in 90d (active)
+#   comsatlegacy videos     3.2 GB, newest file 6 years old
+#   comsatlegacy FromJHU    3.5 GB, newest file 5 years old
+#   iotsystems videos       3.1 GB, newest file 7.7 years old
+teller domains/comsatlegacy.com/public_html/gallery
+teller domains/comsatlegacy.com/public_html/videos
+teller domains/comsatlegacy.com/public_html/FromJHU
+teller domains/steveteller.com/public_html/gallery
+teller domains/iotsystems.com/public_html/videos
