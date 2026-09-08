@@ -1,0 +1,25 @@
+# Rotation for the DirectAdmin ops tooling logs.
+# Install: copy to /etc/logrotate.d/da-ops (mode 644).
+#
+# None of these logs were rotated. da-backup-s3.log is the worst of them: rclone runs at
+# --log-level INFO, so every backup writes one line per uploaded file, on the same volume
+# the backup hook is trying to keep free.
+#
+# copytruncate because rclone holds its --log-file open for the whole upload, which can
+# be hours for a full backup set. A plain rename would leave the rest of that run writing
+# into an unlinked file. copytruncate can lose a line in the race; a silent hole in the
+# only record of a backup upload is worse.
+/var/log/da-backup-s3.log
+/var/log/da-vhost-listen.log
+/var/log/da-disk-guard.log
+{
+    weekly
+    rotate 8
+    maxsize 50M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    create 640 root root
+}
