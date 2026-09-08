@@ -539,7 +539,10 @@ audit_exposure() {
   [ -z "$plain" ] || report WARN "exposure/plaintext-auth" "accepts credentials without implicit TLS:${plain} -- confirm STARTTLS is mandatory, or close in favour of 465/993/995"
 
   case ",$open," in
-    *,2222,*) report WARN "exposure/da-panel" "DirectAdmin 2222 is bound to all interfaces; restrict it to known source addresses at the security group or host firewall" ;;
+    *,2222,*)
+      report OK "exposure/da-panel" "DirectAdmin 2222 is bound to all interfaces and passed by TCP_IN -- the security group decides who reaches it, see exposure/da-panel-sg"
+      audit_da_panel_boundary
+      ;;
     *) report OK "exposure/da-panel" "2222 not world-bound" ;;
   esac
 
@@ -554,6 +557,50 @@ audit_exposure() {
   else
     report OK "exposure/firewall" "$fw"
   fi
+}
+
+# The boundary in front of 2222 is the EC2 security group, and it is not visible
+# from inside the instance. Warning purely on "bound and passed by TCP_IN" would
+# keep reporting a finding forever on a host whose panel is already closed at the
+# security group -- a verdict that cannot be cleared by doing the right thing is
+# one people learn to ignore.
+#
+# So ask AWS. The instance profile usually cannot describe EC2, which makes this
+# a SKIP with the command to run from a workstation, and a SKIP marks the audit
+# incomplete rather than passing it.
+audit_da_panel_boundary() {
+  local iid sgs rules
+  iid="${HOST_AUDIT_INSTANCE_ID:-$(curl -fsS -m 1 -H "X-aws-ec2-metadata-token: $(curl -fsS -m 1 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token 2>/dev/null)" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)}"
+
+  if [ -n "${HOST_AUDIT_SG_RULES_FILE:-}" ]; then
+    rules="$(cat "$HOST_AUDIT_SG_RULES_FILE" 2>/dev/null)"
+  elif have aws && [ -n "$iid" ]; then
+    sgs="$(aws ec2 describe-instances --instance-ids "$iid" \
+      --query 'Reservations[].Instances[].SecurityGroups[].GroupId' --output text 2>/dev/null)"
+    if [ -n "$sgs" ]; then
+      # shellcheck disable=SC2086 # deliberate word splitting: one arg per group
+      rules="$(aws ec2 describe-security-groups --group-ids $sgs \
+        --query "SecurityGroups[].IpPermissions[?FromPort==\`2222\`].IpRanges[].CidrIp" \
+        --output text 2>/dev/null)"
+    fi
+  fi
+
+  if [ -z "${rules+x}" ] || { [ -z "$rules" ] && [ -z "${HOST_AUDIT_SG_RULES_FILE:-}" ] && { ! have aws || [ -z "$iid" ]; }; }; then
+    report SKIP "exposure/da-panel-sg" "cannot read the security group from this host; run: aws ec2 describe-security-groups --group-ids \$(aws ec2 describe-instances --instance-ids ${iid:-<instance-id>} --query 'Reservations[].Instances[].SecurityGroups[].GroupId' --output text) --query \"SecurityGroups[].IpPermissions[?FromPort=='2222'].IpRanges[]\""
+    return
+  fi
+
+  case " $rules " in
+    *" 0.0.0.0/0 "*)
+      report FAIL "exposure/da-panel-sg" "the security group allows 2222 from 0.0.0.0/0 -- the panel is open to the internet"
+      ;;
+    "  ")
+      report OK "exposure/da-panel-sg" "no security-group rule allows 2222 -- the panel is closed to the internet entirely, reachable only by SSM port-forward"
+      ;;
+    *)
+      report OK "exposure/da-panel-sg" "2222 restricted at the security group to: $(printf '%s' "$rules" | tr '\t' ' ')"
+      ;;
+  esac
 }
 
 # --- Account surface ---------------------------------------------------------
@@ -617,7 +664,7 @@ audit_ssm() {
   # which makes the audit incomplete rather than quietly passing.
   local iid ping=""
   iid="$(sed -n 's/.*"ManagedInstanceID":"\([^"]*\)".*/\1/p' /var/lib/amazon/ssm/registration 2>/dev/null)"
-  [ -n "$iid" ] || iid="$(curl -fsS -m 2 -H "X-aws-ec2-metadata-token: $(curl -fsS -m 2 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token 2>/dev/null)" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)"
+  [ -n "$iid" ] || iid="$(curl -fsS -m 1 -H "X-aws-ec2-metadata-token: $(curl -fsS -m 1 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token 2>/dev/null)" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)"
 
   if have aws && [ -n "$iid" ]; then
     ping="$(aws ssm describe-instance-information \

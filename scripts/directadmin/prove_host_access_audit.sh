@@ -246,6 +246,7 @@ csf_run() {
     HOST_AUDIT_CSF_CONF="${1:-$TMP/csf.conf}" \
     HOST_AUDIT_LFD_ACTIVE="${2:-1}" \
     HOST_AUDIT_LISTENERS="${3:-22,25,2222}" \
+    HOST_AUDIT_INSTANCE_ID="i-000000000000000" \
     bash "$AUDIT" --json 2>/dev/null || true
 }
 out="$(csf_run)"
@@ -365,8 +366,45 @@ printf '%s' "$out" | grep -q 'LF_SSHD=5' \
 # 3306 is bound but absent from that TCP_IN, and 2222 is bound and present.
 [ "$(printf '%s' "$out" | verdict_for exposure/datastore)" = "WARN" ] \
   || { echo "FAIL: 3306 bound-but-firewalled misclassified" >&2; exit 1; }
-[ "$(printf '%s' "$out" | verdict_for exposure/da-panel)" = "WARN" ] \
-  || { echo "FAIL: 2222 reachable via TCP_IN not surfaced" >&2; exit 1; }
+[ "$(printf '%s' "$out" | verdict_for exposure/da-panel)" = "OK" ] \
+  || { echo "FAIL: the socket-level 2222 fact should be reported, not judged" >&2; exit 1; }
+# Nothing here can reach EC2, so the boundary is unknown -- and unknown must
+# leave the audit incomplete rather than reading as either safe or exposed.
+[ "$(printf '%s' "$out" | verdict_for exposure/da-panel-sg)" = "SKIP" ] \
+  || { echo "FAIL: unknown security group should skip" >&2; exit 1; }
 echo "OK the live host's configuration is classified correctly end to end"
 
-echo "PASS: host access audit proofs (18 cases)"
+echo "== Case 19: the 2222 boundary is the security group, not the socket =="
+# Warning purely on "bound and passed by TCP_IN" would keep reporting a finding
+# on a host whose panel is already closed at the security group. A verdict that
+# doing the right thing cannot clear is one people learn to ignore.
+: >"$TMP/sg-none.txt"
+printf '0.0.0.0/0\n' >"$TMP/sg-open.txt"
+printf '174.49.138.101/32\t44.214.133.234/32\n' >"$TMP/sg-restricted.txt"
+sg_run() {
+  env -i PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_SSHD_CONFIG="$TMP/sshd_config.plain" \
+    HOST_AUDIT_CSF_CONF="$TMP/csf.conf" HOST_AUDIT_LFD_ACTIVE=1 \
+    HOST_AUDIT_LISTENERS="22,2222" HOST_AUDIT_SG_RULES_FILE="$1" \
+    bash "$AUDIT" --json 2>/dev/null || true
+}
+[ "$(sg_run "$TMP/sg-open.txt" | verdict_for exposure/da-panel-sg)" = "FAIL" ] \
+  || { echo "FAIL: 0.0.0.0/0 on 2222 not reported" >&2; exit 1; }
+[ "$(sg_run "$TMP/sg-restricted.txt" | verdict_for exposure/da-panel-sg)" = "OK" ] \
+  || { echo "FAIL: a restricted panel should clear" >&2; exit 1; }
+[ "$(sg_run "$TMP/sg-none.txt" | verdict_for exposure/da-panel-sg)" = "OK" ] \
+  || { echo "FAIL: a fully closed panel should clear" >&2; exit 1; }
+sg_run "$TMP/sg-none.txt" | grep -q 'closed to the internet entirely' \
+  || { echo "FAIL: closed and restricted should be distinguishable" >&2; exit 1; }
+
+# And with no way to ask AWS, it must skip rather than guess either way.
+out="$(env -i PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+  HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_SSHD_CONFIG="$TMP/sshd_config.plain" \
+  HOST_AUDIT_CSF_CONF="$TMP/csf.conf" HOST_AUDIT_LFD_ACTIVE=1 \
+  HOST_AUDIT_LISTENERS="22,2222" HOST_AUDIT_INSTANCE_ID="i-000000000000000" \
+  bash "$AUDIT" --json 2>/dev/null || true)"
+[ "$(printf '%s' "$out" | verdict_for exposure/da-panel-sg)" = "SKIP" ] \
+  || { echo "FAIL: unknown security group should skip, not pass or fail" >&2; exit 1; }
+echo "OK the security group decides, and an unanswerable question skips"
+
+echo "PASS: host access audit proofs (19 cases)"

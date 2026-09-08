@@ -427,6 +427,10 @@ Where a clean verdict would be easy but wrong, it does the harder thing:
   whole dataset — and "reachable now" is separated from "firewalled until CSF stops".
 - DirectAdmin settings are read by value. `brute_force_log_scanner=0` is a key that
   is present and a scanner that is off.
+- The 2222 boundary is the security group, which is invisible from inside the
+  instance. The audit reports the socket-level fact, then asks EC2 who is actually
+  allowed in — so a panel already closed at the security group clears, instead of
+  warning forever about a finding that has been fixed.
 - A running `amazon-ssm-agent` is reported as a running process, not as a recovery
   path. Only `PingStatus: Online` from the control plane means a session can
   actually be opened, and that is a separate check.
@@ -440,7 +444,7 @@ in, is in [aws/docs/host-access-hardening.md](../../aws/docs/host-access-hardeni
 ./scripts/directadmin/prove_host_access_audit.sh
 ```
 
-Sixteen cases, every one of them a way this audit can mislead: a password path left
+Nineteen cases, every one of them a way this audit can mislead: a password path left
 open while the report reads green, or a false alarm that sends an operator to install
 something harmful. The motivating case is `PasswordAuthentication no` with PAM
 keyboard-interactive still enabled: what most hardening checklists stop short of,

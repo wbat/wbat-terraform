@@ -39,6 +39,11 @@ Do not skip it — the steps below are written against what it reports, and
 several of them are no-ops or actively wrong depending on the baseline. Two
 readings in particular are not what they first look like:
 
+- `exposure/da-panel` is a statement of fact, not a verdict: 2222 bound and
+  passed by `TCP_IN` only means the host accepts the connection. Whether
+  anything can reach it is `exposure/da-panel-sg`, which asks EC2 — and usually
+  skips, because the instance profile cannot describe security groups. Run the
+  command it prints from a workstation.
 - `ratelimit/lfd-coverage` failing names services whose lfd threshold is `0`.
   That is a service nobody is watching, not a missing tool, and installing
   fail2ban would make it worse rather than better.
