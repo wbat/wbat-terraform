@@ -41,6 +41,16 @@ ADMIN_DIR="${DA_BACKUP_ADMIN_DIR:-/home/admin_backups}"
 HOOK="${DA_BATCH_HOOK:-/usr/local/directadmin/scripts/custom/all_backups_post.sh}"
 LOG="${DA_BATCH_LOG:-/var/log/da-backup-batch.log}"
 LOCK="${DA_BATCH_LOCK:-/var/lock/da-backup-batch.lock}"
+# When the current lock holder started, recorded beside the lock rather than inside it:
+# opening the lock file truncates it, so a run that loses the race would erase the very
+# record it needs to read.
+LOCK_STARTED="${LOCK}.started"
+# How long a holder may keep the lock before the run that finds it says so out loud.
+# Exiting quietly is right for two runs a few minutes apart and wrong for a holder that
+# has been stuck since yesterday -- that branch is how one hung run turns into weeks of no
+# backups. A day means the daily schedule has already missed a night, which is the point
+# at which a person should hear about it rather than read about it later.
+STALE_LOCK_SEC="${DA_BATCH_STALE_LOCK_SEC:-86400}"
 
 # Shared with the vhost-listen tooling and the backup hook so there is one address per
 # host rather than three that can disagree.
@@ -362,13 +372,59 @@ lock_dir="$(dirname "$LOCK")"
 if [[ -d "$lock_dir" && -w "$lock_dir" ]] || [[ -w "$LOCK" ]]; then
   exec 9>"$LOCK" && lock_fd=9
 fi
+# Whether the run holding the lock has been there long enough to be a fault rather than an
+# overlap. Only a real backup run reports it: someone running --list to find out what is
+# going on should not generate the mail they are already investigating.
+stale_lock_holder() {
+  local held_for="$1"
+  [[ "$MODE" == "run" ]] || return 1
+  [[ "$held_for" =~ ^[0-9]+$ ]] || return 1
+  ((held_for > STALE_LOCK_SEC))
+}
+
 if [[ -n "$lock_fd" ]] && command -v flock >/dev/null 2>&1; then
   # Non-blocking: two batch runs overlapping would defeat the one-account-at-a-time
   # premise, and the second one has nothing useful to wait for.
   if ! flock -n 9; then
-    log "another da-backup-batch run holds ${LOCK}; exiting"
+    held_since=""
+    held_for=""
+    [[ -s "$LOCK_STARTED" ]] && held_since="$(head -1 "$LOCK_STARTED" 2>/dev/null)"
+    [[ "$held_since" =~ ^[0-9]+$ ]] && held_for=$(($(date +%s) - held_since))
+
+    # Skipping quietly is correct for an overlap of minutes and catastrophic if the holder
+    # never lets go: nothing else in this script runs, so the daily schedule reports
+    # success every night while no account is backed up. The per-account limit above is
+    # what should prevent a holder ever getting this old; if one does anyway, that is a
+    # failure of the thing meant to catch failures, and it has to reach a person.
+    if stale_lock_holder "$held_for"; then
+      log "ERROR another da-backup-batch run has held ${LOCK} for ${held_for}s; no account was backed up by this run"
+      alert "DirectAdmin batch backup has been stuck for ${held_for}s on ${HOST}" \
+        "A da-backup-batch run took ${LOCK} ${held_for}s ago and has not released it, so this run backed up nothing and neither did any run since.
+
+No account on ${HOST} has been backed up for at least that long.
+
+Find the holder and decide whether it is working or wedged:
+  ps -eo pid,etime,cmd | grep -e da-backup-batch -e admin-backup
+  pgrep -a rclone
+  tail -50 ${LOG}
+  tail -50 /var/log/da-backup-s3.log
+
+Each account is bounded by a ${ACCOUNT_TIMEOUT_SEC}s limit, so a holder older than that is
+stuck somewhere the limit does not cover -- most likely waiting on the upload hook to
+clear ${ADMIN_DIR}.
+
+Runbook: aws/docs/2026-09-06-primary-outage.md"
+      exit 1
+    fi
+
+    log "another da-backup-batch run holds ${LOCK}${held_for:+ (started ${held_for}s ago)}; exiting"
     exit 0
   fi
+
+  # Written only by whoever holds the lock, and only once it is held, so the value a later
+  # run reads is always the current holder's start time.
+  printf '%s\n' "$(date +%s)" >"$LOCK_STARTED" 2>/dev/null \
+    || log "WARN could not record the start time in ${LOCK_STARTED}; a later run will not be able to tell a stuck holder from a brief overlap"
 fi
 
 if [[ ! -d "$ADMIN_DIR" ]]; then

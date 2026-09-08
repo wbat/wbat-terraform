@@ -1058,7 +1058,9 @@ takes the "another run holds it" branch and exits 0 — account backups would st
 completely and nothing would mail, which is the same silence that hid the July failure for
 two months. So each account is additionally bounded by a **six-hour limit**: past it the
 process group is terminated, the archive it left behind is deleted, and the run reports
-itself incomplete.
+itself incomplete. The lock branch is the other half: a holder is still skipped quietly,
+which is right for an overlap of minutes, but one that has kept the lock for more than a
+day is mailed rather than taken as a reason to exit 0 again.
 
 Accounts run smallest first, so a failure on `teller` — the one account most likely not to
 fit — leaves the other thirteen already safe in S3 rather than never attempted. A run that

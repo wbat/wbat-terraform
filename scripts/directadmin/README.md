@@ -310,6 +310,13 @@ lock and account backups stop for good with nothing mailing. Past the limit the 
 group is terminated, the archive it left is deleted, and the run reports itself
 incomplete.
 
+The lock branch itself is the other half of that. A run that finds the lock taken still
+exits quietly, which is the right answer to two runs overlapping by minutes and the wrong
+one to a holder that never lets go — nothing else in the script runs, so the daily
+schedule would report success every night while no account was backed up. The holder
+records its start time in `${LOCK}.started`, and a run that finds one older than
+`DA_BATCH_STALE_LOCK_SEC` mails instead of skipping.
+
 ```bash
 /usr/local/sbin/da-backup-batch.sh --list      # accounts, sizes, what fits right now
 /usr/local/sbin/da-backup-batch.sh --dry-run   # plan without invoking DirectAdmin
@@ -327,6 +334,7 @@ Backup/Transfer → Schedule**, or the two race at 05:00.
 | Wait for the hook to clear the staging dir | 1800s | `DA_BATCH_DRAIN_TIMEOUT` |
 | Hard limit on one account's archive run | 21600s | `DA_BATCH_ACCOUNT_TIMEOUT` |
 | Grace between TERM and KILL when stopping one | 60s | `DA_BATCH_KILL_GRACE` |
+| Lock age at which a holder is reported, not skipped | 86400s | `DA_BATCH_STALE_LOCK_SEC` |
 
 `da_disk_guard.sh` is the separate hourly watch for the host's resources. Nothing else in
 the account monitors disk or memory (the only CloudWatch alarms are on billing, and the

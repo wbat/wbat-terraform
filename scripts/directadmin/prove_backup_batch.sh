@@ -344,6 +344,46 @@ assert "exit 0" "[[ '$rc' == 0 ]]"
 assert "only the named account ran" "[[ \"\$(cat '$STUB_DA_CALLS')\" == 'b' ]]"
 
 # ---------------------------------------------------------------------------
+echo
+echo "10. A lock held for minutes is skipped quietly; one held since yesterday is reported"
+# The quiet skip is the right answer to an overlap and the wrong answer to a holder that
+# never lets go: nothing else in the script runs, so the daily schedule would report
+# success every night while no account was backed up.
+new_case stale-lock
+add_account a 1
+: >"${CASE}/batch.lock"
+flock -n "${CASE}/batch.lock" -c 'sleep 60' &
+holder=$!
+# Wait for the holder to actually own it rather than guessing at a sleep.
+held=0
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if ! flock -n "${CASE}/batch.lock" -c true 2>/dev/null; then
+    held=1
+    break
+  fi
+  sleep 0.2
+done
+assert "the proof's own stand-in holder took the lock" "(( held == 1 ))"
+
+printf '%s\n' "$(date +%s)" >"${CASE}/batch.lock.started"
+rc="$(run_batch)"
+assert "exit 0 for an overlap of seconds" "[[ '$rc' == 0 ]]"
+assert "nothing was archived behind the holder's back" "[[ ! -s '$STUB_DA_CALLS' ]]"
+assert "a brief overlap is not mailed" "[[ ! -s '$STUB_MAIL' ]]"
+
+# Same holder, but it has been there since yesterday. The default STALE_LOCK_SEC of a day
+# is deliberately left alone here so the proof exercises the shipped threshold.
+printf '%s\n' "$(($(date +%s) - 200000))" >"${CASE}/batch.lock.started"
+: >"$STUB_MAIL"
+rc="$(run_batch)"
+assert "exit 1 once the holder is older than a whole schedule cycle" "[[ '$rc' == 1 ]]"
+assert "the stuck holder is mailed" "grep -qi 'stuck' '$STUB_MAIL'"
+assert "the mail says no account was backed up" "grep -q 'has not released it' '$STUB_MAIL'"
+assert "it still archives nothing" "[[ ! -s '$STUB_DA_CALLS' ]]"
+kill "$holder" 2>/dev/null
+wait "$holder" 2>/dev/null
+
+# ---------------------------------------------------------------------------
 # Non-vacuity. Each guard is removed from a copy of the script and the matching proof is
 # re-run: if it still passes, the proof was not testing the guard.
 echo
@@ -427,6 +467,30 @@ nv_check "the hung backup runs on unbounded and nothing is ever reported" "[[ '$
 # `timeout` signals the script, not the stub it orphaned. Reap it so the sandbox teardown
 # does not leave a stray sleep behind for the rest of the CI job.
 pkill -f 'sleep 13139' 2>/dev/null || true
+
+# NV5: drop the stale-holder check, so every run that finds the lock taken exits 0 quietly
+# however long it has been taken -- the branch that turns one wedged run into weeks of
+# silence.
+sed 's/if stale_lock_holder "$held_for"; then/if false; then/' "$SCRIPT" >"$NV"
+chmod +x "$NV"
+new_case nv-stale-lock
+add_account a 1
+: >"${CASE}/batch.lock"
+flock -n "${CASE}/batch.lock" -c 'sleep 60' &
+holder=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  flock -n "${CASE}/batch.lock" -c true 2>/dev/null || break
+  sleep 0.2
+done
+printf '%s\n' "$(($(date +%s) - 200000))" >"${CASE}/batch.lock.started"
+SCRIPT_SAVE="$SCRIPT"
+SCRIPT="$NV"
+nv_rc="$(run_batch)"
+SCRIPT="$SCRIPT_SAVE"
+kill "$holder" 2>/dev/null
+wait "$holder" 2>/dev/null
+nv_check "a holder stuck since yesterday is skipped as if it were an overlap" \
+  "[[ '$nv_rc' == 0 && ! -s '$STUB_MAIL' ]]"
 
 echo
 echo "----------------------------------------"
