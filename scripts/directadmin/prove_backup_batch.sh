@@ -384,6 +384,39 @@ kill "$holder" 2>/dev/null
 wait "$holder" 2>/dev/null
 
 # ---------------------------------------------------------------------------
+echo
+echo "11. A selection that resolves to no account is a failure, not a clean run"
+# The backup loop reads from ordered_users, so an empty selection is not an error to it --
+# it is a loop body that never runs. Without a check the run reaches the summary with
+# nothing failed and nothing skipped and exits 0: a report of success for a night on which
+# no account was backed up, which is the exact condition this whole script exists to end.
+new_case no-such-user
+add_account real 1
+rc="$(run_batch --user=raal)"
+assert "a typo in --user= does not exit 0" "[[ '$rc' == 2 ]]"
+assert "nothing was archived" "[[ ! -s '$STUB_DA_CALLS' ]]"
+assert "the log names the account that does not exist" "grep -q 'no such account' '${CASE}/batch.log'"
+assert "the log lists what does exist, so the typo is obvious" "grep -q 'known accounts are: real' '${CASE}/batch.log'"
+assert "it is mailed rather than left to cron's stderr" "grep -q 'does not exist' '$STUB_MAIL'"
+
+# The same typo through --list is an argument error too, but a person investigating should
+# not be mailed about the command they just typed.
+new_case no-such-user-list
+add_account real 1
+rc="$(run_batch --list --user=raal)"
+assert "--list rejects it as well" "[[ '$rc' == 2 ]]"
+assert "--list does not mail" "[[ ! -s '$STUB_MAIL' ]]"
+
+# A users directory that has moved, been renamed, or is unreadable to the user cron runs
+# this as. Silent, affects every account at once, and cron would keep reporting success.
+new_case no-accounts
+rc="$(run_batch)"
+assert "an empty users directory exits non-zero" "[[ '$rc' == 1 ]]"
+assert "the log says no accounts were found" "grep -q 'no accounts found under' '${CASE}/batch.log'"
+assert "it is mailed" "grep -q 'found no accounts' '$STUB_MAIL'"
+assert "the mail says this is not an empty server" "grep -q 'not an empty server' '$STUB_MAIL'"
+
+# ---------------------------------------------------------------------------
 # Non-vacuity. Each guard is removed from a copy of the script and the matching proof is
 # re-run: if it still passes, the proof was not testing the guard.
 echo
@@ -491,6 +524,36 @@ kill "$holder" 2>/dev/null
 wait "$holder" 2>/dev/null
 nv_check "a holder stuck since yesterday is skipped as if it were an overlap" \
   "[[ '$nv_rc' == 0 && ! -s '$STUB_MAIL' ]]"
+
+# NV6 and NV7: an empty selection is refused in two places -- once up front, naming what
+# was wrong, and once at the summary as a backstop for an enumeration that changes under
+# the run. Removing either alone leaves the other catching it, which is the point of
+# having both, so each check here removes the pair to show what they are jointly holding
+# back: a run that backed up nothing and exited 0.
+NV_EMPTY_SED=(
+  -e 's/if ((${#done_users\[@\]} + ${#skipped_users\[@\]} + ${#failed_users\[@\]} == 0)); then/if false; then/'
+)
+
+sed "${NV_EMPTY_SED[@]}" -e 's/if ((${#all_accounts\[@\]} == 0)); then/if false; then/' "$SCRIPT" >"$NV"
+chmod +x "$NV"
+new_case nv-no-accounts
+SCRIPT_SAVE="$SCRIPT"
+SCRIPT="$NV"
+nv_rc="$(run_batch)"
+SCRIPT="$SCRIPT_SAVE"
+nv_check "a users directory with no accounts in it reports a successful run" \
+  "[[ '$nv_rc' == 0 && ! -s '$STUB_MAIL' ]]"
+
+sed "${NV_EMPTY_SED[@]}" -e 's/if ((${#unknown_users\[@\]} > 0)); then/if false; then/' "$SCRIPT" >"$NV"
+chmod +x "$NV"
+new_case nv-no-such-user
+add_account real 1
+SCRIPT_SAVE="$SCRIPT"
+SCRIPT="$NV"
+nv_rc="$(run_batch --user=raal)"
+SCRIPT="$SCRIPT_SAVE"
+nv_check "a typo in --user= reports a successful run that backed up nothing" \
+  "[[ '$nv_rc' == 0 && ! -s '$STUB_DA_CALLS' && ! -s '$STUB_MAIL' ]]"
 
 echo
 echo "----------------------------------------"

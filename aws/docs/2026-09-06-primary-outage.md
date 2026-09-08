@@ -1062,6 +1062,14 @@ itself incomplete. The lock branch is the other half: a holder is still skipped 
 which is right for an overlap of minutes, but one that has kept the lock for more than a
 day is mailed rather than taken as a reason to exit 0 again.
 
+A run that selects **no account** is treated the same way, for the same reason. The backup
+loop reads from a generator, so an empty selection is not an error to it — it is a loop
+body that never executes, after which the summary finds nothing failed and nothing skipped
+and exits 0. A typo in `--user=` produces that, and so does a users directory that has
+moved, been renamed, or become unreadable to the account cron runs this as. The second is
+the one that matters: it is silent and it takes out every account at once, which is the
+2026-07-02 failure with a different mechanism.
+
 Accounts run smallest first, so a failure on `teller` — the one account most likely not to
 fit — leaves the other thirteen already safe in S3 rather than never attempted. A run that
 skips or fails anything exits non-zero and mails `HEALTH_ALERT_TO` naming the accounts

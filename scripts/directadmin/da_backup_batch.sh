@@ -186,20 +186,28 @@ gb() {
 # user.conf. A plain glob also picks up whatever else has been left in there -- this host
 # has a stray `fix.sh` -- and passing that to --user= makes DirectAdmin fail an entire
 # batch on a name that was never an account.
-list_users() {
-  local d name
+known_users() {
+  local d
   for d in "$USERS_DIR"/*; do
     [[ -d "$d" && -f "${d}/user.conf" ]] || continue
-    name="$(basename "$d")"
+    basename "$d"
+  done
+}
+
+# The same list, narrowed to --user= if any was given.
+list_users() {
+  local name wanted found
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
     if ((${#ONLY_USERS[@]} > 0)); then
-      local wanted found=0
+      found=0
       for wanted in "${ONLY_USERS[@]}"; do
         [[ "$wanted" == "$name" ]] && found=1
       done
       ((found == 1)) || continue
     fi
     printf '%s\n' "$name"
-  done
+  done < <(known_users)
 }
 
 raw_kb_for() {
@@ -432,6 +440,65 @@ if [[ ! -d "$ADMIN_DIR" ]]; then
   exit 1
 fi
 
+# Resolve the selection before doing anything with it, because every silent way this
+# script can fail runs through an empty one.
+#
+# The backup loop reads from ordered_users, so a selection that resolves to nothing is not
+# an error to it -- it is a loop body that never executes. The run then reaches the summary
+# with nothing failed and nothing skipped and exits 0, which is a report of success for a
+# night on which no account was backed up. A typo in --user= does it. So does a
+# DirectAdmin users directory that has moved, been renamed, or is unreadable to this
+# process, and that is the case that matters: it is silent, it affects every account at
+# once, and cron would keep reporting success indefinitely.
+declare -a all_accounts=() unknown_users=()
+while IFS= read -r account; do
+  [[ -n "$account" ]] || continue
+  all_accounts+=("$account")
+done < <(known_users)
+
+if ((${#all_accounts[@]} == 0)); then
+  log "ERROR no accounts found under ${USERS_DIR}; refusing to report a run in which nothing could have been backed up"
+  if [[ "$MODE" == "run" ]]; then
+    alert "DirectAdmin batch backup found no accounts on ${HOST}" \
+      "${USERS_DIR} contains no directory with a user.conf, so this run had nothing to back up and no account on ${HOST} has a backup from it.
+
+This is not an empty server. It means the DirectAdmin users tree is not where this script
+expects it, or is not readable by the user cron runs it as:
+  ls -la ${USERS_DIR}
+  id
+
+Runbook: aws/docs/2026-09-06-primary-outage.md"
+  fi
+  exit 1
+fi
+
+# An account named on the command line that does not exist is a typo, and a typo that
+# exits 0 is a backup someone believes they took.
+if ((${#ONLY_USERS[@]} > 0)); then
+  for wanted in "${ONLY_USERS[@]}"; do
+    found=0
+    for account in "${all_accounts[@]}"; do
+      [[ "$account" == "$wanted" ]] && found=1
+    done
+    ((found == 1)) || unknown_users+=("$wanted")
+  done
+fi
+
+if ((${#unknown_users[@]} > 0)); then
+  log "ERROR no such account(s) under ${USERS_DIR}: ${unknown_users[*]}; known accounts are: ${all_accounts[*]}"
+  if [[ "$MODE" == "run" ]]; then
+    alert "DirectAdmin batch backup asked for an account that does not exist on ${HOST}" \
+      "This run was limited to ${ONLY_USERS[*]}, and ${unknown_users[*]} is not an account under ${USERS_DIR}, so nothing was backed up.
+
+Known accounts: ${all_accounts[*]}
+
+If an account was renamed or removed, whatever schedules this run needs the same change.
+
+Runbook: aws/docs/2026-09-06-primary-outage.md"
+  fi
+  exit 2
+fi
+
 if [[ "$MODE" == "list" ]]; then
   printf '%-16s %10s %10s %s\n' "ACCOUNT" "HOME" "ESTIMATE" "FITS NOW"
   now_kb="$(avail_kb "$ADMIN_DIR")"
@@ -522,6 +589,16 @@ done < <(ordered_users)
 
 elapsed=$(($(date +%s) - run_start_epoch))
 log "finished in ${elapsed}s: ${#done_users[@]} done, ${#skipped_users[@]} skipped, ${#failed_users[@]} failed ($(gb "$(avail_kb "$ADMIN_DIR")") GB free)"
+
+# The selection was checked before the loop, so reaching here having considered nothing
+# means the enumeration disagreed with itself between the two points -- a users directory
+# that vanished mid-run, or an ordered_users subshell that died and took its output with
+# it. The check is cheap and it is the only thing standing between that and a clean exit
+# 0, which is precisely the report a night with no backups must not produce.
+if ((${#done_users[@]} + ${#skipped_users[@]} + ${#failed_users[@]} == 0)); then
+  log "ERROR the run considered no account at all, though ${#all_accounts[@]} were found before it started; treating this as an incomplete run rather than a clean one"
+  failed_users+=("no account was considered; enumerating ${USERS_DIR} produced nothing at run time")
+fi
 
 if ((${#failed_users[@]} == 0 && ${#skipped_users[@]} == 0)); then
   exit 0

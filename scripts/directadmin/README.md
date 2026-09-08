@@ -317,6 +317,14 @@ schedule would report success every night while no account was backed up. The ho
 records its start time in `${LOCK}.started`, and a run that finds one older than
 `DA_BATCH_STALE_LOCK_SEC` mails instead of skipping.
 
+A run that selects **no** account is a failure, not a run with nothing to do. The backup
+loop reads from a generator, so an empty selection is a loop body that never executes, and
+the summary would then find nothing failed and nothing skipped and exit 0 — a report of
+success for a night on which nothing was backed up. A typo in `--user=` exits 2 naming the
+account and what does exist; a users directory that has moved, been renamed, or is
+unreadable to the user cron runs this as exits 1 and mails, because that one is silent and
+hits every account at once.
+
 ```bash
 /usr/local/sbin/da-backup-batch.sh --list      # accounts, sizes, what fits right now
 /usr/local/sbin/da-backup-batch.sh --dry-run   # plan without invoking DirectAdmin
