@@ -15,6 +15,17 @@ worse ones: **no backup has reached S3 since 2026-07-02**, and the weekly system
 **stopped including databases** on 2026-09-05. See
 [What actually needs fixing](#what-actually-needs-fixing).
 
+**Where this stands, for a reader arriving after the fact.** The memory fix is deployed and
+the query is bounded. The system backup is producing databases again. Eleven of fourteen
+accounts got a backup on 2026-09-07, the first since July, and two of the remaining three
+do not fit on this volume at all. Chasing that surfaced a third problem worse than either
+of the two above: an archive can be checksum-verified into S3 and still be unreadable, and
+[reading the whole bucket
+back](#is-what-is-already-in-s3-readable-a-read-back-of-every-archive-2026-09-08) found 22
+that are. None of them is the newest copy of anything. What is still outstanding is in
+[the order below](#do-it-in-this-order) and in [Still open](#still-open); nothing from the
+batching work is on the host yet.
+
 ## Do it in this order
 
 The order matters, because the obvious first move is the one that breaks the host.
@@ -1010,8 +1021,10 @@ same sitting rather than afterwards.
 ## DirectAdmin remediation — what to run, and what needs the panel
 
 **Prerequisite: [free the disk first](#recovering-space-safely).** Everything below either
-writes archives to the root volume or is pointless without somewhere to put them, and the
-volume has 3.8 GB free.
+writes archives to the root volume or is pointless without somewhere to put them, and when
+this was written the volume had 3.8 GB free. **That step is done** — `/` is at 71% with
+59.8 GiB free — so this is here as the reason for the ordering rather than as work
+outstanding. It did not buy enough headroom for a full run; see below.
 
 ### 1. Prove the backup engine works without filling the disk (CLI)
 
@@ -1042,14 +1055,23 @@ This is also the cleanest diagnostic split available:
 - **It fails the same way** → the fault is in DirectAdmin itself, and step 2's debug
   output is what to send to DA support.
 
+**This was run on 2026-09-07 and it succeeded**, which settled the split: `--user=test2`
+completed in 2.4 seconds, the hook uploaded and verified the archive and removed the local
+copy, and the whole chain took three seconds. The engine is not broken. Only the
+all-at-once staging is, which is what the batching section below addresses.
+
 **On the eventual full run — it no longer fits.** `all_backups_post.sh` is DirectAdmin's
-*all backups* hook. It fires once, after every account has been archived, so peak local
-usage is the sum of all archives at once. The last full run that completed, on 2026-07-02,
-put **66.055 GiB across 13 objects** into S3, and the accounts have grown since (`teller`
-alone is now 55 GB of the 114 GB under `/home`). The cleanup in step 2 of the order above,
-plus the `/backup` reclaim on 2026-09-07, leaves **60 GB free**. A full run therefore
-needs more space than the volume has, and
-would drive it to 100% before the hook ever gets to upload anything — the outage this
+*all backups* hook. It fires once, after every account has been archived, so every archive
+is on local disk at the same time, and on top of that DirectAdmin holds the assembled parts
+of whichever account it is currently building. The last full run that completed, on
+2026-07-02, put **66.055 GiB across 13 objects** into S3, and the accounts have grown since
+(`teller` alone is 54.0 GiB of the 114 GiB of home directories). The cleanup in step 2 of
+the order above, plus the `/backup` reclaim on 2026-09-07, leaves **59.8 GiB free**.
+
+The sum of the finished archives alone already exceeds that, so a full run fails on this
+volume before the parts overhead is even counted — and counting it makes the requirement
+worse, by roughly the size of the largest account again. Either way the run drives the
+volume to 100% before the hook ever gets to upload anything, which is the outage this
 document exists to prevent.
 
 So do not schedule a full local run on this volume. Three ways out were considered:
@@ -1058,9 +1080,10 @@ So do not schedule a full local run on this volume. Three ways out were consider
   and clear each before the next. Peak usage becomes the largest single account.
 - **Move the upload per-user.** DirectAdmin's `user_backup_post.sh` hook fires after each
   account, so each archive is uploaded and deleted as it is produced. Same peak as
-  batching — 43.4 GB for `teller` at the last measurement, still large but survivable —
-  but it changes which hook owns the upload and therefore reopens every data-loss
-  question `all_backups_post.sh` already answers.
+  batching — 43.4 GiB for `teller` at the last measurement, and on the corrected model
+  about twice that, which is why neither approach reaches it — but it changes which hook
+  owns the upload and therefore reopens every data-loss question `all_backups_post.sh`
+  already answers.
 - **Give it somewhere else to write.** A separate EBS volume mounted at
   `/home/admin_backups` decouples staging from the root filesystem, at ongoing cost, and
   does nothing about an account that outgrows the new volume either.
@@ -1755,11 +1778,16 @@ could not be read, so it can gate a restore decision. Results of the first run a
   sub-megabyte accounts (`test2`, `brian2`, `aubrey`) into a scratch account. The change
   from before is that a rehearsal now starts from an archive known to be whole, so a
   failure would be attributable to the restore path rather than to the backup.
-- **The sweep has no trigger.** `sweep_old_system_dirs` in `all_backups_post.sh` is what
-  is supposed to keep `/backup` from accumulating, but the hook only runs when
-  DirectAdmin fires a backup event — which, per the point above, has not happened since
-  July. The two directories left there on 2026-09-07 had to be verified and removed by
-  hand. Until admin backups work, nothing sweeps `/backup` on its own, and the weekly
-  `sysbk` run restored in step 4 will start adding about 7.4 GB every Saturday.
+- **The sweep has no trigger yet, and gets one with #122.**
+  `sweep_old_system_dirs` in `all_backups_post.sh` is what keeps `/backup` from
+  accumulating, and the hook only runs when DirectAdmin fires a backup event. That is why
+  the two directories left there on 2026-09-07 had to be verified and removed by hand. It
+  is no longer true that no such event happens — the supervised batch run fired the hook
+  twelve times — but nothing is *scheduled*, so nothing sweeps on its own today, while the
+  weekly `sysbk` run restored in step 4 adds about 7.4 GB every Saturday. Installing
+  `/etc/cron.d/da-backup-batch` fixes this as a side effect: each nightly run fires the
+  hook, which uploads the week and then sweeps what it can confirm. Worth checking after
+  the first Saturday that follows the deploy, because it is the first time that path runs
+  against a directory it did not create.
 - **`/usr/local/sbin/migrate-backups-to-s3.sh` and `verify-backups-s3.sh`** exist on the
   host, are not in this repository, and were not examined.
