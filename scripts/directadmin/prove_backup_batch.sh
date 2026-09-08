@@ -590,6 +590,103 @@ unset HONOUR_EXCLUDES RESERVE_GB
 
 # ---------------------------------------------------------------------------
 echo
+echo "3l. A trailing slash subtracts nothing, because tar excludes nothing for it"
+# The natural way to write a directory, and the one spelling that reads as though it
+# worked while doing the opposite. Verified against GNU tar 1.35: --exclude-from holding
+# `app/` archives both `app/` and `app/file`; `app` archives neither. The shell, asked to
+# expand `application_backups/`, hands back the directory quite happily, so nothing here
+# notices unless it is looked for.
+new_case exclude-trailing-slash
+add_excluder_account slashed
+set_excludes slashed "application_backups/"
+echo $((30 * 1024)) >"$STUB_DF_KB_FILE"
+RESERVE_GB=0
+rc="$(run_batch)"
+unset RESERVE_GB
+assert "exit 1" "[[ '$rc' == 1 ]]"
+assert "the estimate is not shrunk by a pattern tar will not apply" "! grep -qx slashed '$STUB_DA_CALLS'"
+assert "the log says the entry does nothing" "grep -q 'trailing slash matches no archive member' '${CASE}/batch.log'"
+assert "the log says how to write it instead" "grep -q \"write it as 'application_backups'\" '${CASE}/batch.log'"
+
+# ---------------------------------------------------------------------------
+echo
+echo "3m. Bytes still reachable through a hard link are not taken off the estimate"
+# du counts an inode once per run. An inode with one link inside the excluded paths and
+# one outside is therefore counted once by the whole-home du and once again by the
+# exclusion du, and subtracting removes it from the estimate entirely -- while tar, having
+# skipped the excluded link, writes the whole file out under the included one. In the
+# check that produced this proof, 20 MB of data sized as 8 KB.
+new_case exclude-hardlink
+add_account linked 5
+add_account_data linked application_backups 15
+mkdir -p "${CASE}/home/linked/kept"
+ln "${CASE}/home/linked/application_backups/blob.bin" "${CASE}/home/linked/kept/blob.bin"
+set_excludes linked "application_backups"
+echo $((30 * 1024)) >"$STUB_DF_KB_FILE"
+RESERVE_GB=0
+rc="$(run_batch)"
+unset RESERVE_GB
+assert "exit 1" "[[ '$rc' == 1 ]]"
+assert "the account is not waved through on space its archive still needs" "! grep -qx linked '$STUB_DA_CALLS'"
+assert "the log says why the exclusion was not credited" "grep -q 'is hard-linked and may still be reachable' '${CASE}/batch.log'"
+
+# ---------------------------------------------------------------------------
+echo
+echo "3n. A file that is not a regular file is refused rather than opened"
+# This path belongs to the account holder, and the read happens after the batch lock is
+# taken and before the per-account timeout starts. A FIFO satisfies -e and -r and then
+# blocks until someone writes to it, which is never: not a slow account, but every
+# account, stopped, with nothing mailing until the next night finds a day-old lock.
+new_case exclude-fifo
+add_excluder_account fifoed
+add_account plain 1
+mkfifo "${CASE}/home/fifoed/.backup_exclude_paths"
+echo $((30 * 1024)) >"$STUB_DF_KB_FILE"
+RESERVE_GB=0
+RUN_TIMEOUT=60
+rc="$(run_batch)"
+unset RUN_TIMEOUT RESERVE_GB
+assert "the run finishes instead of blocking on the FIFO" "[[ '$rc' != 124 ]]"
+assert "the log says the file was refused" "grep -q 'is not a regular file' '${CASE}/batch.log'"
+assert "the account is sized from its whole home, so it is skipped" "! grep -qx fifoed '$STUB_DA_CALLS'"
+assert "the rest of the batch still ran" "grep -qx plain '$STUB_DA_CALLS'"
+
+# A symlink, even to a perfectly ordinary file, is refused too: following one would read a
+# file outside the home that DirectAdmin never would, and put lines from it in the log.
+new_case exclude-symlink-list
+add_excluder_account linkedlist
+printf 'application_backups\n' >"${CASE}/outside.txt"
+ln -s "${CASE}/outside.txt" "${CASE}/home/linkedlist/.backup_exclude_paths"
+echo $((30 * 1024)) >"$STUB_DF_KB_FILE"
+RESERVE_GB=0
+rc="$(run_batch)"
+unset RESERVE_GB
+assert "a symlinked list is not followed" "! grep -qx linkedlist '$STUB_DA_CALLS'"
+assert "the log says so" "grep -q 'is not a regular file' '${CASE}/batch.log'"
+
+# Too big to be a path list is refused whole rather than read to the cap, because a
+# cut-off last line is a different list: `domains/example.com/private` clipped to
+# `domains` names a real directory and would take the whole tree off the estimate.
+new_case exclude-oversized
+add_excluder_account fat
+# Padded so the cap lands exactly at the end of `application_backups`, leaving a truncated
+# final entry that names a real directory holding 15 MB the account keeps. Reading to the
+# cap would take that 15 MB off the estimate and start an account that does not fit, which
+# is why this is refused rather than truncated: 21839 lines of 3 bytes is 65517, and the
+# 19 characters of `application_backups` reach the 65536 the read is bounded to.
+{
+  yes zz | head -n 21839
+  printf 'application_backups/blob.bin\n'
+} >"${CASE}/home/fat/.backup_exclude_paths"
+echo $((30 * 1024)) >"$STUB_DF_KB_FILE"
+RESERVE_GB=0
+rc="$(run_batch)"
+unset RESERVE_GB
+assert "an oversized list is refused" "! grep -qx fat '$STUB_DA_CALLS'"
+assert "the log gives the size and the limit" "grep -q 'over the .* byte limit' '${CASE}/batch.log'"
+
+# ---------------------------------------------------------------------------
+echo
 echo "4. A staging directory that is not empty stops the run before it starts"
 # Leftovers mean an earlier upload failed. Archiving on top of them is the all-at-once
 # behaviour arriving by the back door.
@@ -1158,6 +1255,86 @@ nv_rc="$(run_batch --user=raal)"
 SCRIPT="$SCRIPT_SAVE"
 nv_check "a typo in --user= reports a successful run that backed up nothing" \
   "[[ '$nv_rc' == 0 && ! -s '$STUB_DA_CALLS' && ! -s '$STUB_MAIL' ]]"
+
+# NV8: accept a trailing slash. The shell expands it to the directory, so the whole tree
+# comes off the estimate for a pattern tar does not apply.
+sed 's|if \[\[ "$entry" == \*/ \]\]; then|if false; then|' "$SCRIPT" >"$NV"
+chmod +x "$NV"
+new_case nv-trailing-slash
+add_excluder_account slashed
+set_excludes slashed "application_backups/"
+echo $((30 * 1024)) >"$STUB_DF_KB_FILE"
+RESERVE_GB=0
+SCRIPT_SAVE="$SCRIPT"
+SCRIPT="$NV"
+nv_rc="$(run_batch)"
+SCRIPT="$SCRIPT_SAVE"
+unset RESERVE_GB
+nv_check "a trailing slash shrinks the estimate and the account is started" \
+  "grep -qx slashed '$STUB_DA_CALLS'"
+
+# NV9: credit hard-linked bytes. The inode is counted once by each du and subtracted in
+# full, though tar writes it out under the link the account keeps.
+sed 's|if ((linked_kb > 0)); then|if false; then|' "$SCRIPT" >"$NV"
+chmod +x "$NV"
+new_case nv-hardlink
+add_account linked 5
+add_account_data linked application_backups 15
+mkdir -p "${CASE}/home/linked/kept"
+ln "${CASE}/home/linked/application_backups/blob.bin" "${CASE}/home/linked/kept/blob.bin"
+set_excludes linked "application_backups"
+echo $((30 * 1024)) >"$STUB_DF_KB_FILE"
+RESERVE_GB=0
+SCRIPT_SAVE="$SCRIPT"
+SCRIPT="$NV"
+nv_rc="$(run_batch)"
+SCRIPT="$SCRIPT_SAVE"
+unset RESERVE_GB
+nv_check "bytes the account still reaches are subtracted and it is started" \
+  "grep -qx linked '$STUB_DA_CALLS'"
+
+# NV10: open whatever is at the path, the way a plain read from it would. Both layers go,
+# because either alone is enough to keep the batch moving -- which is the point of having
+# the timeout behind the file-type check, and the reason removing only one proves nothing.
+sed -e 's#if \[\[ -L "$list" || ! -f "$list" \]\]; then#if false; then#' \
+  -e 's#content="$(timeout "$EXCLUDE_LIST_READ_TIMEOUT" head -c "$EXCLUDE_LIST_MAX_BYTES" -- "$list" 2>/dev/null)"#content="$(cat -- "$list")"#' \
+  "$SCRIPT" >"$NV"
+chmod +x "$NV"
+new_case nv-fifo
+add_excluder_account fifoed
+mkfifo "${CASE}/home/fifoed/.backup_exclude_paths"
+echo $((30 * 1024)) >"$STUB_DF_KB_FILE"
+RESERVE_GB=0
+RUN_TIMEOUT=15
+SCRIPT_SAVE="$SCRIPT"
+SCRIPT="$NV"
+nv_rc="$(run_batch)"
+SCRIPT="$SCRIPT_SAVE"
+unset RUN_TIMEOUT RESERVE_GB
+# 124 is what timeout returns when it had to kill the run, so this is the hang itself:
+# inside the lock, before the per-account timeout exists, with no account backed up.
+nv_check "a FIFO in the account's home stops the batch until something kills it" \
+  "[[ '$nv_rc' == 124 && ! -s '$STUB_DA_CALLS' ]]"
+
+# NV11: read an oversized list up to the cap instead of refusing it, so the final entry
+# arrives truncated to a directory that exists.
+sed 's|if ((list_bytes > EXCLUDE_LIST_MAX_BYTES)); then|if false; then|' "$SCRIPT" >"$NV"
+chmod +x "$NV"
+new_case nv-oversized
+add_excluder_account fat
+{
+  yes zz | head -n 21839
+  printf 'application_backups/blob.bin\n'
+} >"${CASE}/home/fat/.backup_exclude_paths"
+echo $((30 * 1024)) >"$STUB_DF_KB_FILE"
+RESERVE_GB=0
+SCRIPT_SAVE="$SCRIPT"
+SCRIPT="$NV"
+nv_rc="$(run_batch)"
+SCRIPT="$SCRIPT_SAVE"
+unset RESERVE_GB
+nv_check "a truncated last entry names a real directory and the account is started" \
+  "grep -qx fat '$STUB_DA_CALLS'"
 
 echo
 if [[ -s "$LOCK_RACES" ]]; then

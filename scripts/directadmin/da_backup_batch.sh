@@ -116,6 +116,15 @@ PEAK_COPIES_PCT="${DA_BATCH_PEAK_COPIES_PCT:-200}"
 # answer, so an operator who does not trust the adjustment can turn it off without editing
 # this file.
 HONOUR_EXCLUDES="${DA_BATCH_HONOUR_EXCLUDES:-auto}"
+# Bounds on reading .backup_exclude_paths, which is the one input to this script that an
+# account holder owns and can rewrite between runs.
+#
+# The read happens after the batch lock is taken and before the per-account timeout starts,
+# so a read that never returns is not a slow account: it is every account, stopped, for as
+# long as the file stays that way. Nothing else in the run is reached, so nothing mails
+# until the next night's run finds the lock a day old.
+EXCLUDE_LIST_MAX_BYTES="${DA_BATCH_EXCLUDE_MAX_BYTES:-65536}"
+EXCLUDE_LIST_READ_TIMEOUT="${DA_BATCH_EXCLUDE_READ_TIMEOUT:-10}"
 WATCH_INTERVAL_SEC="${DA_BATCH_WATCH_INTERVAL:-5}"
 # How long to wait for the hook to drain the staging directory after an account finishes.
 DRAIN_TIMEOUT_SEC="${DA_BATCH_DRAIN_TIMEOUT:-1800}"
@@ -354,12 +363,54 @@ excluded_kb_for() {
     return 1
   }
 
+  # A regular file and not a symlink to one, checked before anything opens it.
+  #
+  # The account holder owns this path and can make it whatever they like. A FIFO satisfies
+  # -e and -r and then blocks the read until someone writes to it, which is never; a
+  # symlink to /dev/zero returns NUL bytes without end. Either one stops the read inside
+  # the lock, and because that is before backup_one the per-account timeout has not started
+  # -- so the whole batch hangs, and the first thing that says so is tomorrow's run finding
+  # a day-old lock. Refusing to open it costs this account its adjustment and nothing else.
+  #
+  # -L is the separate question from -f: -f follows the link, so a symlink to a regular
+  # file passes it, and following one would have this script read, and log lines from, a
+  # file outside the home that DirectAdmin never would.
+  if [[ -L "$list" || ! -f "$list" ]]; then
+    log "WARN ${list} is not a regular file; sizing ${user} from its whole home rather than opening it"
+    return 1
+  fi
+
   local real_home
   real_home="$(readlink -f -- "$home" 2>/dev/null)" || real_home=""
   [[ -n "$real_home" && -d "$real_home" ]] || {
     log "WARN could not resolve ${home}; sizing ${user} from its whole home"
     return 1
   }
+
+  # Refused rather than truncated when it is too big, because a cut-off last line is not a
+  # smaller exclusion list -- it is a different one. `domains/example.com/private` clipped
+  # to `domains` names a real directory and would take the whole tree off the estimate.
+  local list_bytes
+  list_bytes="$(stat -c %s -- "$list" 2>/dev/null)" || list_bytes=""
+  if [[ ! "$list_bytes" =~ ^[0-9]+$ ]]; then
+    log "WARN could not measure ${list}; sizing ${user} from its whole home"
+    return 1
+  fi
+  if ((list_bytes > EXCLUDE_LIST_MAX_BYTES)); then
+    log "WARN ${list} is ${list_bytes} bytes, over the ${EXCLUDE_LIST_MAX_BYTES} byte limit; sizing ${user} from its whole home"
+    return 1
+  fi
+
+  # Read in one bounded, timed operation rather than a loop reading straight from the path.
+  # The checks above describe the file as it was a moment ago, and its owner can replace it
+  # with a FIFO in between; the timeout is what makes that a lost adjustment instead of a
+  # stopped batch.
+  local content read_rc=0
+  content="$(timeout "$EXCLUDE_LIST_READ_TIMEOUT" head -c "$EXCLUDE_LIST_MAX_BYTES" -- "$list" 2>/dev/null)" || read_rc=$?
+  if ((read_rc != 0)); then
+    log "WARN could not read ${list} within ${EXCLUDE_LIST_READ_TIMEOUT}s (rc=${read_rc}); sizing ${user} from its whole home"
+    return 1
+  fi
 
   local -a wanted=()
   local entry
@@ -383,8 +434,18 @@ excluded_kb_for() {
         continue
         ;;
     esac
+    # A trailing slash is the most dangerous of these, because it is the natural way to
+    # write a directory and it reads as though it worked. The shell expands
+    # `application_backups/` to the directory, so the whole tree would come off the
+    # estimate, while tar excludes nothing for it: verified against GNU tar 1.35, where
+    # --exclude-from holding `app/` archives both `app/` and `app/file`, and `app` archives
+    # neither. Subtracting for it is the one direction that fills the volume.
+    if [[ "$entry" == */ ]]; then
+      log "NOTE ignoring '${entry}' in ${list}: a trailing slash matches no archive member, so DirectAdmin will back that path up regardless -- write it as '${entry%/}'"
+      continue
+    fi
     wanted+=("$entry")
-  done <"$list"
+  done <<<"$content"
 
   ((${#wanted[@]} > 0)) || {
     printf '0'
@@ -452,22 +513,67 @@ excluded_kb_for() {
 
   # One du run over the whole set, never a sum of one run per path. Within a single
   # invocation du counts each file once, so overlapping entries -- `domains` and
-  # `domains/example.com` -- and hard links between two excluded paths are each counted
-  # once, which is also how tar will store them. Summing separate runs double-counts both,
+  # `domains/example.com` -- are counted once. Summing separate runs double-counts them,
   # and too large a subtraction is the direction that matters: it takes the estimate below
   # the archive and waves through an account the volume cannot hold.
   local du_out du_rc=0
   du_out="$(du -sk --files0-from="$paths" 2>/dev/null)" || du_rc=$?
-  rm -f "$paths"
   if ((du_rc != 0)); then
     # A du that gave up part way through still prints what it reached, and that partial
     # total is a plausible-looking number. It is not the same as subtracting nothing, and
     # the difference only shows up as a backup that started when it should not have.
+    rm -f "$paths"
     log "WARN could not measure the paths excluded by ${list} (du rc=${du_rc}); sizing ${user} from its whole home"
     return 1
   fi
 
-  printf '%s\n' "$du_out" | awk -F'\t' '$1 ~ /^[0-9]+$/ { total += $1 } END { printf "%d", total + 0 }'
+  local excluded_kb
+  excluded_kb="$(printf '%s\n' "$du_out" | awk -F'\t' '$1 ~ /^[0-9]+$/ { total += $1 } END { printf "%d", total + 0 }')"
+
+  # Bytes an account still reaches through a second link are not bytes the archive loses.
+  #
+  # du counts a multiply-linked inode once per run, so an inode with one link inside the
+  # excluded set and another outside it is counted once by the whole-home du and once again
+  # here -- and subtracting takes it off the estimate entirely, while tar, having skipped
+  # the excluded link, writes the whole file out under the included one. Nothing about that
+  # needs the account to be hostile, and an account that is hostile can hide a volume's
+  # worth of data behind it: 20 MB of it sized as 8 KB in the check that produced this
+  # comment.
+  #
+  # Deciding it properly means knowing whether every link to each inode is inside the
+  # excluded set, which is a walk of the whole home. Not crediting any multiply-linked file
+  # is the cheap answer in the safe direction: an inode linked twice inside the excluded
+  # set really is fully excluded and is still not credited here, and the cost of that is an
+  # over-estimate, which is a named skip in the summary mail. That is also why the double
+  # counting of such an inode by find, which visits each link, is left alone.
+  local -a expaths=()
+  mapfile -t -d '' expaths <"$paths"
+  rm -f "$paths"
+
+  local blocks_file
+  blocks_file="$(mktemp)" || {
+    log "WARN could not create a temp file to check ${user}'s excluded paths for hard links; sizing it from its whole home"
+    return 1
+  }
+  local find_rc=0
+  find "${expaths[@]}" -type f -links +1 -printf '%b\n' >"$blocks_file" 2>/dev/null || find_rc=$?
+  if ((find_rc != 0)); then
+    rm -f "$blocks_file"
+    log "WARN could not check the paths excluded by ${list} for hard links (find rc=${find_rc}); sizing ${user} from its whole home"
+    return 1
+  fi
+
+  local linked_kb
+  linked_kb="$(awk '{ blocks += $1 } END { printf "%d", (blocks + 1) / 2 }' "$blocks_file")"
+  rm -f "$blocks_file"
+
+  if ((linked_kb > 0)); then
+    log "NOTE ${linked_kb} KB under ${user}'s excluded paths is hard-linked and may still be reachable from a path that is archived, so it is not being taken off the estimate"
+    excluded_kb=$((excluded_kb - linked_kb))
+    ((excluded_kb > 0)) || excluded_kb=0
+  fi
+
+  printf '%d' "$excluded_kb"
 }
 
 # Peak free space one account needs, which is not the same thing as the size of the
