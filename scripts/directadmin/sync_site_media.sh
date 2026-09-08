@@ -83,14 +83,22 @@ log() {
 
 if [[ -f "$CONFIG" ]]; then
   # shellcheck disable=SC1090
+  # Capture env-provided values first. `source` would otherwise overwrite them, and the
+  # contract matching every sibling script is that the environment wins over the file.
+  _env_bucket="${SITE_MEDIA_BUCKET-}"
+  _env_region="${SITE_MEDIA_REGION-}"
+  _env_remote="${SITE_MEDIA_REMOTE_OPTS-}"
   source "$CONFIG"
+  [[ -n "$_env_bucket" ]] && SITE_MEDIA_BUCKET="$_env_bucket"
+  [[ -n "$_env_region" ]] && SITE_MEDIA_REGION="$_env_region"
+  [[ -n "$_env_remote" ]] && SITE_MEDIA_REMOTE_OPTS="$_env_remote"
+  unset _env_bucket _env_region _env_remote
 fi
 
 # Resolved after sourcing so /etc/da-vhost-listen/vhost-listen.conf can set them.
-# Environment variables still win over the file, matching the sibling scripts.
-BUCKET="${SITE_MEDIA_BUCKET:-${BUCKET:-}}"
-REGION="${SITE_MEDIA_REGION:-${REGION:-$REGION_DEFAULT}}"
-RCLONE_REMOTE_OPTS="${SITE_MEDIA_REMOTE_OPTS:-${RCLONE_REMOTE_OPTS:-$RCLONE_REMOTE_OPTS_DEFAULT}}"
+BUCKET="${SITE_MEDIA_BUCKET:-}"
+REGION="${SITE_MEDIA_REGION:-$REGION_DEFAULT}"
+RCLONE_REMOTE_OPTS="${SITE_MEDIA_REMOTE_OPTS:-$RCLONE_REMOTE_OPTS_DEFAULT}"
 # Same guards as the sibling scripts: an address that can never receive mail is reported
 # as broken alerting rather than logged as a successful send.
 alert() {

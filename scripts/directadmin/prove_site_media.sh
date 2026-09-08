@@ -83,6 +83,7 @@ EOF
 CONF_REAL="${SANDBOX}/vhost-listen-real.conf"
 cat >"$CONF_REAL" <<EOF
 HEALTH_ALERT_TO="ops@wbat.net"
+SITE_MEDIA_BUCKET="test-bucket"
 EOF
 
 reset_world() {
@@ -95,6 +96,12 @@ reset_world() {
 teller domains/site.com/public_html/gallery
 teller domains/site.com/public_html/videos
 EOF
+  # Always rewrite CONF: proof 14 plants SITE_MEDIA_BUCKET in it, and a later sync that
+  # inherited that value wrote receipts against the wrong bucket name.
+  cat >"$CONF" <<EOF
+HEALTH_ALERT_TO="ops@wbat.test.invalid"
+EOF
+  unset USE_CONF
   export STUB_CALLS="${SANDBOX}/rclone.calls"
   export STUB_MAIL="${SANDBOX}/mail.out"
   : >"$STUB_CALLS"
@@ -247,6 +254,13 @@ rc=$(SITE_MEDIA_HOME="$HOMES" SITE_MEDIA_MANIFEST="$MANIFEST" SITE_MEDIA_CONF="$
   env -u SITE_MEDIA_BUCKET "$SCRIPT" --list >"${SANDBOX}/out" 2>&1; echo $?)
 assert "list exits zero" "[[ $rc -eq 0 ]]"
 assert "prints the bucket from the config file" "grep -q 'Bucket: from-config-bucket' '${SANDBOX}/out'"
+# And the environment still wins when both are set -- otherwise a test harness (or an
+# operator exporting SITE_MEDIA_BUCKET) would be silently overridden by the file.
+rc=$(SITE_MEDIA_HOME="$HOMES" SITE_MEDIA_MANIFEST="$MANIFEST" SITE_MEDIA_CONF="$CONF" \
+  SITE_MEDIA_LOG="${SANDBOX}/run.log" SITE_MEDIA_LOCK="${SANDBOX}/run.lock" \
+  SITE_MEDIA_STATE="$STATE" SITE_MEDIA_RCLONE="rclone" \
+  SITE_MEDIA_BUCKET="from-env-bucket" "$SCRIPT" --list >"${SANDBOX}/out" 2>&1; echo $?)
+assert "env wins over the config file" "grep -q 'Bucket: from-env-bucket' '${SANDBOX}/out'"
 
 # Non-vacuity. Each check removes one guard and confirms the corresponding proof then
 # stops holding. A proof that passes against a script with its guard deleted is proving
@@ -300,6 +314,7 @@ assert "NV2: without the path-set check the grown manifest is excluded unverifie
 reset_world
 run --sync >/dev/null
 USE_CONF="$CONF_REAL" run --write-exclusions >/dev/null
+assert "NV3 setup: exclusions are in place" "[[ -s '$exclude_file' ]]"
 cp "$SCRIPT" "$MUT"
 sed -i 's/if exclusions_in_place "\$user"; then/if false; then/' "$MUT"
 chmod +x "$MUT"
