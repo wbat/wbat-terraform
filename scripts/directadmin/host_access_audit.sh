@@ -645,13 +645,53 @@ audit_da_panel_boundary() {
 # Count only. The names are already public in this repo's history; reprinting
 # them here would add exposure without adding information.
 audit_accounts() {
-  if [ ! -r /etc/passwd ]; then
-    report SKIP "accounts/shells" "cannot read /etc/passwd"
+  local passwd="${HOST_AUDIT_PASSWD:-/etc/passwd}"
+  if [ ! -r "$passwd" ]; then
+    report SKIP "accounts/shells" "cannot read $passwd"
     return
   fi
   local n
-  n="$(awk -F: '$7 !~ /(nologin|false|sync|shutdown|halt)$/ && $3 >= 500 {c++} END {print c+0}' /etc/passwd)"
+  n="$(awk -F: '$7 !~ /(nologin|false|sync|shutdown|halt)$/ && $3 >= 500 {c++} END {print c+0}' "$passwd")"
   report OK "accounts/shells" "$n non-system accounts with a login shell (these are the names in public git history)"
+
+  # An installed key is the difference between the ssh/allowlist finding being a
+  # theoretical path and an already-built one. Counts only, no names: they are
+  # public already and reprinting them here adds exposure without information.
+  #
+  # The distinct-key count is the part that tells you what happened. One key
+  # across many accounts is something that templated them at once -- /etc/skel,
+  # or a migration that rsynced /home -- while many distinct keys are many
+  # separate provisioning events, and an unrecognised one is an incident.
+  local with_keys=0 fps="" home akf
+  while IFS=: read -r _ _ uid _ _ home shell; do
+    case "$uid" in '' | *[!0-9]*) continue ;; esac
+    [ "$uid" -ge 500 ] || continue
+    case "$shell" in *nologin | *false | *sync | *shutdown | *halt) continue ;; esac
+    akf="${home}/.ssh/authorized_keys"
+    [ -s "$akf" ] || continue
+    with_keys=$((with_keys + 1))
+    if have ssh-keygen; then
+      fps="${fps}$(ssh-keygen -l -f "$akf" 2>/dev/null | awk '{print $2}')
+"
+    fi
+  done <"$passwd"
+
+  if [ "$with_keys" -eq 0 ]; then
+    report OK "accounts/authorized-keys" "no login account has an authorized_keys file"
+    return
+  fi
+
+  local distinct=""
+  if [ -n "${fps//[[:space:]]/}" ]; then
+    distinct="$(printf '%s' "$fps" | grep -c . || true)"
+    distinct=" holding $(printf '%s' "$fps" | sort -u | grep -c . || true) distinct key(s) across ${distinct} entr(ies)"
+  fi
+
+  if [ "$with_keys" -le 1 ]; then
+    report OK "accounts/authorized-keys" "${with_keys} login account has an authorized_keys file${distinct}"
+  else
+    report WARN "accounts/authorized-keys" "${with_keys} of ${n} login accounts already have an authorized_keys file${distinct} -- each is a working shell path today, and on a DirectAdmin host the site's own PHP can add to its owner's file; ssh/allowlist is what makes a planted key inert"
+  fi
 }
 
 # --- SSM out-of-band path ----------------------------------------------------

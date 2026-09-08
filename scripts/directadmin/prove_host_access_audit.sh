@@ -558,4 +558,66 @@ chmod +x "$TMP/bin/aws"
   || { echo "FAIL: a successful query showing 0.0.0.0/0 must fail" >&2; exit 1; }
 echo "OK an unreadable security group skips, and a readable open one fails"
 
-echo "PASS: host access audit proofs (21 cases)"
+echo "== Case 22: an installed key is a built path, not a hypothetical one =="
+# The primary reported 14 shell accounts and no allowlist, which reads as a
+# theoretical escalation. Twelve of those accounts already had authorized_keys,
+# which is the same finding with the work already done. Counting shells without
+# counting installed keys hides the difference.
+mkdir -p "$TMP/homes/opsuser/.ssh" "$TMP/homes/site1/.ssh" "$TMP/homes/site2/.ssh" \
+  "$TMP/homes/nokey" "$TMP/homes/daemon"
+K1="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGuMHhVQ0Fh0OMwLIVGZ4iVQ5eXqIY4z5F1CQaGqQ0Xj op@example"
+K2="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB4TxV0kZ7l2yZ9v0X8y1KqQ8mFq4bN3sT6uW2eR5cPd site@example"
+acct_passwd() { printf '%s' "$1" >"$TMP/passwd.accts"; }
+
+# A lone operator key is the expected shape and must not warn.
+printf '%s\n' "$K1" >"$TMP/homes/opsuser/.ssh/authorized_keys"
+acct_passwd "opsuser:x:1001:1001::${TMP}/homes/opsuser:/bin/bash
+daemonx:x:1002:1002::${TMP}/homes/daemon:/sbin/nologin
+"
+acct_run() {
+  env -i PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_SSHD_CONFIG="$TMP/sshd_config.plain" \
+    HOST_AUDIT_PASSWD="$TMP/passwd.accts" HOST_AUDIT_LISTENERS="22" \
+    HOST_AUDIT_CSF_CONF="$TMP/csf.conf" HOST_AUDIT_LFD_ACTIVE=1 \
+    HOST_AUDIT_INSTANCE_ID="i-000000000000000" \
+    bash "$AUDIT" --json 2>/dev/null || true
+}
+out="$(acct_run)"
+[ "$(printf '%s' "$out" | verdict_for accounts/authorized-keys)" = "OK" ] \
+  || { echo "FAIL: a single operator key should not warn" >&2; exit 1; }
+# The nologin account must not be counted even if it somehow has a key.
+printf '%s' "$out" | grep -q '"accounts/shells"' \
+  || { echo "FAIL: shell count missing" >&2; exit 1; }
+
+# Site accounts with keys are the reported shape, and must warn.
+printf '%s\n' "$K1" >"$TMP/homes/site1/.ssh/authorized_keys"
+printf '%s\n' "$K2" >"$TMP/homes/site2/.ssh/authorized_keys"
+acct_passwd "opsuser:x:1001:1001::${TMP}/homes/opsuser:/bin/bash
+site1:x:1003:1003::${TMP}/homes/site1:/bin/bash
+site2:x:1004:1004::${TMP}/homes/site2:/bin/bash
+nokey:x:1005:1005::${TMP}/homes/nokey:/bin/bash
+daemonx:x:1002:1002::${TMP}/homes/daemon:/sbin/nologin
+"
+out="$(acct_run)"
+[ "$(printf '%s' "$out" | verdict_for accounts/authorized-keys)" = "WARN" ] \
+  || { echo "FAIL: keys installed across site accounts must warn" >&2; exit 1; }
+printf '%s' "$out" | grep -q '3 of 4 login accounts' \
+  || { echo "FAIL: should count accounts with keys against shell accounts, excluding nologin" >&2; exit 1; }
+# One key everywhere and a key per account mean different things -- a template
+# or a migration versus that many separate provisioning events -- so the
+# distinct count has to be reported, not just the number of files.
+if command -v ssh-keygen >/dev/null 2>&1; then
+  printf '%s' "$out" | grep -q '2 distinct key' \
+    || { echo "FAIL: distinct key count not reported" >&2; exit 1; }
+  printf '%s\n' "$K1" >"$TMP/homes/site2/.ssh/authorized_keys"
+  printf '%s' "$(acct_run)" | grep -q '1 distinct key' \
+    || { echo "FAIL: one key templated across accounts should read as one key" >&2; exit 1; }
+fi
+
+# And no account names in the output: they are public already, so reprinting
+# them here would add exposure without adding information.
+printf '%s' "$out" | grep -qE 'site1|site2|opsuser' \
+  && { echo "FAIL: account names must not be reprinted" >&2; exit 1; }
+echo "OK installed keys are counted, de-duplicated, and never named"
+
+echo "PASS: host access audit proofs (22 cases)"
