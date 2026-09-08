@@ -658,39 +658,52 @@ audit_accounts() {
   # theoretical path and an already-built one. Counts only, no names: they are
   # public already and reprinting them here adds exposure without information.
   #
-  # The distinct-key count is the part that tells you what happened. One key
-  # across many accounts is something that templated them at once -- /etc/skel,
-  # or a migration that rsynced /home -- while many distinct keys are many
-  # separate provisioning events, and an unrecognised one is an incident.
-  local with_keys=0 fps="" home akf
+  # Deliberately NOT filtered by login shell, unlike the count above. On the
+  # primary, DirectAdmin's `admin` holds two keys and has no login shell, so a
+  # shell-filtered scan omitted it entirely. A nologin shell blocks the
+  # interactive session and nothing else: `ssh -N -L` port forwarding and, where
+  # the subsystem is enabled, sftp both still work with that key.
+  local with_keys=0 nologin_keys=0 fps="" home shell akf
   while IFS=: read -r _ _ uid _ _ home shell; do
     case "$uid" in '' | *[!0-9]*) continue ;; esac
     [ "$uid" -ge 500 ] || continue
-    case "$shell" in *nologin | *false | *sync | *shutdown | *halt) continue ;; esac
     akf="${home}/.ssh/authorized_keys"
     [ -s "$akf" ] || continue
     with_keys=$((with_keys + 1))
+    case "$shell" in
+      *nologin | *false | *sync | *shutdown | *halt) nologin_keys=$((nologin_keys + 1)) ;;
+    esac
     if have ssh-keygen; then
-      fps="${fps}$(ssh-keygen -l -f "$akf" 2>/dev/null | awk '{print $2}')
+      fps="${fps}$(ssh-keygen -l -f "$akf" 2>/dev/null | awk '{print $2}' | sort -u)
 "
     fi
   done <"$passwd"
 
   if [ "$with_keys" -eq 0 ]; then
-    report OK "accounts/authorized-keys" "no login account has an authorized_keys file"
+    report OK "accounts/authorized-keys" "no account has an authorized_keys file"
     return
   fi
 
-  local distinct=""
+  # The distinct count says what happened; the widest count says what it costs.
+  # Six keys across fourteen accounts sounds unremarkable until one of the six
+  # is installed on all fourteen, at which case that single private key is the
+  # whole box and its blast radius is what needs managing, not the file count.
+  local detail="" distinct widest
   if [ -n "${fps//[[:space:]]/}" ]; then
     distinct="$(printf '%s' "$fps" | grep -c . || true)"
-    distinct=" holding $(printf '%s' "$fps" | sort -u | grep -c . || true) distinct key(s) across ${distinct} entr(ies)"
+    distinct="$(printf '%s' "$fps" | sort -u | grep -c . || true)"
+    widest="$(printf '%s' "$fps" | grep . | sort | uniq -c | sort -rn | awk 'NR==1 {print $1}')"
+    detail=", ${distinct} distinct key(s), the most widely installed of which is on ${widest:-?} of them"
   fi
 
-  if [ "$with_keys" -le 1 ]; then
-    report OK "accounts/authorized-keys" "${with_keys} login account has an authorized_keys file${distinct}"
+  local nologin_note=""
+  [ "$nologin_keys" -eq 0 ] \
+    || nologin_note=" ${nologin_keys} of them have no login shell, which blocks the interactive session but not port forwarding or sftp."
+
+  if [ "$with_keys" -le 1 ] && [ "${widest:-1}" -le 1 ]; then
+    report OK "accounts/authorized-keys" "${with_keys} account has an authorized_keys file${detail}"
   else
-    report WARN "accounts/authorized-keys" "${with_keys} of ${n} login accounts already have an authorized_keys file${distinct} -- each is a working shell path today, and on a DirectAdmin host the site's own PHP can add to its owner's file; ssh/allowlist is what makes a planted key inert"
+    report WARN "accounts/authorized-keys" "${with_keys} account(s) already hold an authorized_keys file${detail} -- each is a working access path today, a key on more than one account means one private key opens all of them, and on a DirectAdmin host the site's own PHP can add to its owner's file.${nologin_note} ssh/allowlist is what makes a planted or over-shared key inert"
   fi
 }
 

@@ -585,9 +585,21 @@ acct_run() {
 out="$(acct_run)"
 [ "$(printf '%s' "$out" | verdict_for accounts/authorized-keys)" = "OK" ] \
   || { echo "FAIL: a single operator key should not warn" >&2; exit 1; }
-# The nologin account must not be counted even if it somehow has a key.
 printf '%s' "$out" | grep -q '"accounts/shells"' \
   || { echo "FAIL: shell count missing" >&2; exit 1; }
+
+# A key on an account with no login shell must still be counted. On the primary,
+# DirectAdmin's `admin` holds two keys and has no login shell, and a
+# shell-filtered scan omitted it -- while nologin blocks only the interactive
+# session, not `ssh -N -L` or sftp.
+mkdir -p "$TMP/homes/daemon/.ssh"
+printf '%s\n' "$K2" >"$TMP/homes/daemon/.ssh/authorized_keys"
+out="$(acct_run)"
+[ "$(printf '%s' "$out" | verdict_for accounts/authorized-keys)" = "WARN" ] \
+  || { echo "FAIL: a key on a nologin account must not be invisible" >&2; exit 1; }
+printf '%s' "$out" | grep -q 'no login shell, which blocks the interactive session' \
+  || { echo "FAIL: the nologin caveat should be stated, not silently dropped" >&2; exit 1; }
+rm -f "$TMP/homes/daemon/.ssh/authorized_keys"
 
 # Site accounts with keys are the reported shape, and must warn.
 printf '%s\n' "$K1" >"$TMP/homes/site1/.ssh/authorized_keys"
@@ -601,17 +613,33 @@ daemonx:x:1002:1002::${TMP}/homes/daemon:/sbin/nologin
 out="$(acct_run)"
 [ "$(printf '%s' "$out" | verdict_for accounts/authorized-keys)" = "WARN" ] \
   || { echo "FAIL: keys installed across site accounts must warn" >&2; exit 1; }
-printf '%s' "$out" | grep -q '3 of 4 login accounts' \
-  || { echo "FAIL: should count accounts with keys against shell accounts, excluding nologin" >&2; exit 1; }
+printf '%s' "$out" | grep -q '3 account(s) already hold' \
+  || { echo "FAIL: should count the accounts that hold a key" >&2; exit 1; }
 # One key everywhere and a key per account mean different things -- a template
 # or a migration versus that many separate provisioning events -- so the
 # distinct count has to be reported, not just the number of files.
 if command -v ssh-keygen >/dev/null 2>&1; then
   printf '%s' "$out" | grep -q '2 distinct key' \
     || { echo "FAIL: distinct key count not reported" >&2; exit 1; }
+  # K1 is on opsuser and site1, so the widest key opens 2 of the 3.
+  printf '%s' "$out" | grep -q 'most widely installed of which is on 2 of them' \
+    || { echo "FAIL: blast radius of the most-shared key not reported" >&2; exit 1; }
+
+  # The shape the primary is actually in: one key on every account. Six keys
+  # across fourteen accounts reads as unremarkable until one opens all fourteen,
+  # so the widest count has to move even when the distinct count falls.
   printf '%s\n' "$K1" >"$TMP/homes/site2/.ssh/authorized_keys"
-  printf '%s' "$(acct_run)" | grep -q '1 distinct key' \
+  out="$(acct_run)"
+  printf '%s' "$out" | grep -q '1 distinct key' \
     || { echo "FAIL: one key templated across accounts should read as one key" >&2; exit 1; }
+  printf '%s' "$out" | grep -q 'most widely installed of which is on 3 of them' \
+    || { echo "FAIL: a single key on every account must report that radius" >&2; exit 1; }
+
+  # A duplicate line within one file is one account, not two.
+  printf '%s\n%s\n' "$K1" "$K1" >"$TMP/homes/site2/.ssh/authorized_keys"
+  printf '%s' "$(acct_run)" | grep -q 'most widely installed of which is on 3 of them' \
+    || { echo "FAIL: a repeated key in one file must not inflate its reach" >&2; exit 1; }
+  printf '%s\n' "$K1" >"$TMP/homes/site2/.ssh/authorized_keys"
 fi
 
 # And no account names in the output: they are public already, so reprinting
