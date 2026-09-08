@@ -11,6 +11,7 @@
 # only record of a backup upload is worse.
 /var/log/da-backup-s3.log
 /var/log/da-backup-batch.log
+/var/log/da-site-media.log
 /var/log/da-vhost-listen.log
 /var/log/da-disk-guard.log
 {

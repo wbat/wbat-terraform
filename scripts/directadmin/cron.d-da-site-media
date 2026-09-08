@@ -1,0 +1,19 @@
+# Off-host copy of large static website media excluded from the account backups.
+# Install: copy to /etc/cron.d/da-site-media (mode 644).
+#
+# These paths are deliberately absent from the nightly DirectAdmin account backup -- see
+# scripts/directadmin/sync_site_media.sh for why, and aws/docs/2026-09-06-primary-outage.md
+# for the account that forced it. This entry is therefore not a convenience: it is the
+# only thing that backs up that content, and if it stops running the data is unprotected
+# while every other backup keeps reporting success.
+#
+# 23:30 puts it ahead of the per-account batch run at 01:00, so a failure to protect the
+# media is mailed before the backup that omits it. The run is incremental and normally
+# transfers almost nothing -- the content it covers was measured at zero changed files in
+# 90 days for the largest directory -- so the window is ample. Cron mail is suppressed
+# because the script alerts on its own, and it alerts hardest in exactly the case that
+# matters: verification failing while the exclusions are in place.
+SHELL=/bin/bash
+PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin
+
+30 23 * * * root /usr/local/sbin/sync-site-media.sh --sync >/dev/null 2>&1

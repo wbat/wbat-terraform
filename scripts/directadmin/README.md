@@ -473,6 +473,8 @@ because commit hit 118% of RAM+swap while `%memused` still read a survivable 82%
 | `cron.d-da-disk-guard` | `/etc/cron.d/da-disk-guard` (mode 644) |
 | `da_backup_batch.sh` | `/usr/local/sbin/da-backup-batch.sh` |
 | `cron.d-da-backup-batch` | `/etc/cron.d/da-backup-batch` (mode 644) |
+| `sync_site_media.sh` | `/usr/local/sbin/sync-site-media.sh` |
+| `cron.d-da-site-media` | `/etc/cron.d/da-site-media` (mode 644) |
 | `logrotate.d-da-ops` | `/etc/logrotate.d/da-ops` (mode 644) |
 
 ## Install / update backup hooks
@@ -512,11 +514,73 @@ df -h /
 /usr/local/sbin/da-disk-guard.sh --report   # top consumers, never alerts
 ```
 
+## Site media archive (`sync_site_media.sh`)
+
+Some accounts hold more static website media than the staging disk can archive. `teller`
+is 54 GB and needs roughly twice that free during a backup against 58 GB available, so it
+had no account backup at all between 2026-07-02 and this being written. About 34 GB of it
+is galleries, videos and a document archive — measured over 90 days, the largest of them
+had **zero** of its 33,319 files change. Copying that nightly is what made the account
+unbackuppable, and it was copying identical bytes every time.
+
+This script takes that content out of the account backup and gives it a copy of its own:
+`rclone copy` to the archive bucket (`aws/global/s3-site-media-archive.tf`), verified with
+checksums, updated incrementally, and never expired.
+
+**Excluding is a separate step from copying, and it is gated.** Once a path is excluded,
+the S3 copy is the only off-host copy of live site content, so `--write-exclusions`
+refuses unless a receipt records that the same set of paths was copied and read back, from
+this bucket, within the last seven days. Add a path to the manifest without re-syncing and
+it refuses; let the receipt go stale and it refuses.
+
+```bash
+sync-site-media.sh --list                     # manifest and current sizes
+sync-site-media.sh --sync --deep-verify       # first run: read the bytes back, not just checksums
+sync-site-media.sh --write-exclusions         # only after the above succeeded
+sync-site-media.sh --verify-only              # re-check what is in S3
+```
+
+Three things it will not do. It never deletes, locally or in S3 — `rclone copy`, not
+`sync`, and the IAM role has no `s3:DeleteObject` on that bucket, so files removed from
+the host persist in the archive. It never trusts its own upload; every run verifies the
+whole path set. And it never stays quiet when verification fails while exclusions are in
+place, because that combination means live content is unprotected while every other backup
+still reports success.
+
+Manifest lives at `/etc/da-vhost-listen/site-media.conf`, one `<account> <path>` per line,
+relative to the home. Absolute paths, `..`, and **trailing slashes** are rejected — the
+same strings are written into `.backup_exclude_paths`, and GNU tar 1.35 does not exclude a
+directory given with a trailing slash, so the media would stay in the archive while the
+size gate had been told otherwise.
+
+`SITE_MEDIA_BUCKET` goes in `/etc/da-vhost-listen/vhost-listen.conf`; take it from the
+`site_media_archive_bucket_id` Terraform output. Authentication is the instance role via
+an rclone connection string, not a `rclone.conf` remote — the `s3backup` remote is an IAM
+user scoped to the backup bucket and cannot write here.
+
+### Restoring an account that uses this
+
+Restore is **two steps**, and the second is easy to forget because the first one succeeds
+on its own and looks complete:
+
+```bash
+# 1. Restore the account from its DirectAdmin archive as usual. It will come back
+#    without the excluded media -- the site will render with missing images.
+# 2. Put the media back:
+rclone copy ":s3,provider=AWS,env_auth=true,region=us-east-1:<bucket>/<account>/<path>" \
+  "/home/<account>/<path>" --checksum
+chown -R <account>:<account> "/home/<account>/<path>"
+```
+
+The paths are stored under `<bucket>/<account>/<path relative to home>`, which is the same
+layout as the manifest, so the manifest doubles as the restore checklist.
+
 ## Offline proof (no box access needed)
 
 ```bash
 ./scripts/directadmin/prove_backup_cleanup.sh
 ./scripts/directadmin/prove_backup_batch.sh
+./scripts/directadmin/prove_site_media.sh
 ```
 
 Runs the real hook against a stubbed rclone and mail in a temp sandbox, asserting both

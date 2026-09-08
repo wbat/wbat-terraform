@@ -26,14 +26,17 @@ that are. Only one of the 22 is the newest object in the bucket for its account,
 one is the `tellerstec` fragment already known about and already renamed. What is still
 outstanding is in
 [the order below](#do-it-in-this-order) and in [Still open](#still-open). The batching work
-is deployed, and as of 2026-09-08 **twelve of the thirteen accounts have a current,
-readable backup** — though every one of those runs was started by hand, and
+is deployed, and as of 2026-09-08 **all thirteen accounts have a current, readable
+backup** — though every one of those runs was started by hand, and
 [the schedule itself has still never fired](#the-schedule-is-still-unproven).
 `tellerstec` was the twelfth: its exclusion file is
 written and its archive has been [read back out of S3 in
-full](#tellerstec-backed-up-and-verified-2026-09-08), closing a 68-day gap. `teller` is the
-one account left, and it is a disk decision rather than a bug. The 22-day disk deadline
-this document previously carried
+full](#tellerstec-backed-up-and-verified-2026-09-08), closing a 68-day gap. `teller` is no
+longer the exception:
+[its static media is archived separately](#teller-site-media-archive), the account backup
+fits again, and it has been
+[read back the same afternoon](#teller-backed-up-and-verified-2026-09-08). The 22-day disk
+deadline this document previously carried
 [appears not to be real](#the-installatron-deadline-is-probably-not-real): Installatron's
 retention cap is configured after all, the pool has just reached it, and the growth that
 was measured looks like a pool filling to its limit rather than one growing without one.
@@ -76,7 +79,7 @@ step 6 exists to stop DirectAdmin's own schedule racing it.
 | 7 | [Let the per-account batch run take over](#per-account-backups-da_backup_batchsh) | largest single account, not the sum | installed; **the schedule has never fired** — first automatic run is 2026-09-09 01:00 EDT | Installed by step 3, but after that day's 01:00 trigger had passed. Every backup so far has been started by hand. See [the schedule is still unproven](#the-schedule-is-still-unproven). |
 | 8 | [Cap `tellerstec`'s Installatron retention](#why-tellerstec-stopped-fitting-and-why-that-is-the-cheapest-thing-here) | up to ~31 GB, but **probably no longer urgent** | **owner decision, deadline in doubt** | Still the largest single reclaim available, but the 22-day deadline this row used to assert [looks wrong](#the-installatron-deadline-is-probably-not-real): the retention cap is configured, the pool has just reached it, and nothing has been evicted yet. [Counting evictions against creations](#the-test-that-settles-it) decides whether this is urgent or merely optional — on the next archive Installatron writes, not on a fixed date. |
 | 9 | [Write `tellerstec`'s exclusion file](#what-the-estimator-does-about-it-now) | none | done 2026-09-08 | Written, and the account was backed up and the archive read back the same afternoon — [the result](#tellerstec-backed-up-and-verified-2026-09-08). |
-| 10 | [Decide disk for `teller`](#still-open) | ~$8/month either way | **not done** | The one account no exclusion can help: 54 GB of genuine content, checked. Needs a decision, not a fix. |
+| 10 | [Archive `teller`'s static media, then exclude it](#teller-site-media-archive) | ~$31/mo S3, no new volume | **done 2026-09-08** | 40.2 GB / 43,883 files copied and checksum-verified; exclusions written; account archived to 8.18 GiB and [read back](#teller-backed-up-and-verified-2026-09-08) — 0 members under the five excluded paths. Closed a 68-day gap. |
 
 ### State of the host, read 2026-09-07 05:02 UTC
 
@@ -2177,6 +2180,165 @@ It needs `s3:ListBucket` and `s3:GetObject` and exits non-zero if anything in th
 could not be read, so it can gate a restore decision. Results of the first run are
 [above](#is-what-is-already-in-s3-readable-a-read-back-of-every-archive-2026-09-08).
 
+### `teller` site media archive
+
+`teller` is the opposite of `tellerstec`. There is no backups-of-backups directory in it —
+`/home/teller/backups` exists and is empty — and at 54 GB of genuine content it needs
+about 108 GB of peak against 58 GB free. Rescheduling does not help: the constraint is
+peak space during one run, not how often runs happen. That is why its last account backup
+is still the 2026-07-02 archive.
+
+Measured on 2026-09-08, about **34 GB of the 54 is web media that barely changes**:
+
+| Path | Size | Churn (90 days) |
+|---|---|---|
+| `domains/comsatlegacy.com/public_html/gallery` | 17.3 GB, 33,319 files | **0 changed**; newest file 266 days old |
+| `domains/steveteller.com/public_html/gallery` | 10.5 GB, 10,479 files | 1,801 changed (this one is live) |
+| `domains/comsatlegacy.com/public_html/FromJHU` | 3.5 GB | newest file 5 years old |
+| `domains/comsatlegacy.com/public_html/videos` | 3.2 GB | newest file 6 years old |
+| `domains/iotsystems.com/public_html/videos` | 3.1 GB | newest file 7.7 years old |
+
+None of it is orphaned. All three domains resolve to this host, and comsatlegacy's gallery
+is referenced by its pages (`COMSAT-Annual-Reports.html` and others). Static is what a
+historical document archive is supposed to be — and copying 34 GB of it to S3 every night
+is both what made the account unbackuppable and a waste of the transfer.
+
+#### The decision: split, do not buy a disk
+
+| Approach | Volume | S3/month | Total |
+|---|---|---|---|
+| **Split: exclude media, sync separately** | none | ~$31 | **~$31** |
+| New 120 GB staging volume, `teller` nightly | ~$10 | ~$111 | ~$120 |
+| New 120 GB staging volume, `teller` weekly | ~$10 | ~$16 | ~$26 |
+| Status quo | none | none | last backup 2026-07-02, ageing |
+
+The weekly-plus-volume row looks cheapest but buys a 7-day RPO on the mail, which is the
+part of this account most likely to need restoring. Compare like for like — nightly
+protection of everything — and splitting costs about a quarter of buying a disk, with no
+hardware. Chosen 2026-09-08.
+
+Excluding the five paths above drops the backed-up footprint to about 20 GB, so peak lands
+near 40 GB and fits inside the current free space with the 10 GB reserve intact.
+`teller` rejoins the nightly rotation.
+
+#### Two things that make this dangerous if skipped
+
+**The backup bucket expires everything at 365 days.** The lifecycle rule in
+`aws/global/s3-directadmin-backups.tf` uses `filter {}`, so it applies to every object.
+That is correct for rotating backups and badly wrong for media that would be the only
+off-box copy — it would silently disappear after a year. The destination is therefore a
+**separate bucket** (`aws/global/s3-site-media-archive.tf`) whose contract is the opposite:
+tier down for cost, **never expire**. A prefix carve-out in the backup bucket would have
+made that cost guarantee depend on someone maintaining a list of prefixes; two buckets
+with one retention contract each cannot fail that way.
+
+**`rclone sync` deletes on the destination to match the source.** The script uses
+`rclone copy` instead, and the instance role has no `s3:DeleteObject` on the archive
+bucket, so "nothing is deleted" is a property of the account rather than a convention in
+the script. Files removed from the host persist in the archive.
+
+#### Ordered steps — do not reorder
+
+The dangerous part is the ordering, so it is enforced in the script and recorded here.
+Excluding a path from the account backup makes the S3 copy the only off-host copy of live
+site content. With `tellerstec` the excluded 31 GB were themselves backups, so a temporary
+gap was acceptable. Here the excluded data is **primary**. The moment the exclusion lands
+without a verified copy in place, the account's most irreplaceable content is backed up
+nowhere.
+
+```bash
+# 1. Apply the Terraform that creates the archive bucket and the append-only IAM grant.
+#    (HCP Terraform workspace `aws` — do not apply from a laptop.)
+#    Then set SITE_MEDIA_BUCKET=<site_media_archive_bucket_id> in
+#    /etc/da-vhost-listen/vhost-listen.conf.
+
+# 2. Install the tooling.
+cd /root/wbat-terraform && git pull
+./scripts/directadmin/install_da_vhost_listen.sh --install
+cp scripts/directadmin/site-media.conf.example /etc/da-vhost-listen/site-media.conf
+
+# 3. Sync and READ THE BYTES BACK before excluding anything.
+/usr/local/sbin/sync-site-media.sh --list
+/usr/local/sbin/sync-site-media.sh --sync --deep-verify
+# ~34 GB; first run is a full copy. Receipt lands in /var/lib/da-ops/site-media/.
+
+# 4. Only after step 3 exits 0:
+/usr/local/sbin/sync-site-media.sh --write-exclusions
+# Refuses unless a current receipt covers exactly the manifest paths.
+
+# 5. Confirm the account now fits, then back it up.
+/usr/local/sbin/da-backup-batch.sh --list          # teller should read FITS NOW yes
+/usr/local/sbin/da-backup-batch.sh --user=teller
+# Then read the new archive back out of S3 the same way tellerstec was.
+```
+
+`--write-exclusions` will not write anything without a verified receipt. That is the whole
+point of the script: the ordering cannot be got wrong by hand.
+
+#### Done 2026-09-08
+
+The ordered steps above were completed the same afternoon they were written:
+
+1. Bucket `wbat-tellerstech-site-media-archive-708113892725` created (versioning on,
+   never-expire lifecycle, append-only IAM on `WBAT_Main_Server`). Import into HCP
+   Terraform state is still required after #135 merges — see that PR.
+2. Tooling installed; `SITE_MEDIA_BUCKET` set; manifest at
+   `/etc/da-vhost-listen/site-media.conf`.
+3. `--sync` copied and checksum-verified **43,883 files / 40,246,559,567 bytes** across
+   the five paths. Receipt at `/var/lib/da-ops/site-media/teller.receipt`.
+4. `--write-exclusions` wrote the five paths into `/home/teller/.backup_exclude_paths`.
+5. `--list` then read `teller … EXCLUDED 37.6G … PEAK 32.9G … FITS NOW yes`.
+
+### `teller` backed up and verified (2026-09-08)
+
+| | |
+|---|---|
+| Duration | 10m22s |
+| Archive | `server/2026-09-08/user.wbatnet.teller.tar.zst` |
+| Size | 8,781,190,694 bytes (8.18 GiB) |
+| Members read to end | **110,055**, `zstd -dc \| tar -t` exit 0 |
+| Free space after | 57.7 GB (staging empty) |
+
+The exclusions took effect in tar, not merely in the estimate:
+
+| Path | Members in archive |
+|---|---|
+| `domains/comsatlegacy.com/public_html/gallery/` | **0** |
+| `domains/comsatlegacy.com/public_html/videos/` | **0** |
+| `domains/comsatlegacy.com/public_html/FromJHU/` | **0** |
+| `domains/steveteller.com/public_html/gallery/` | **0** |
+| `domains/iotsystems.com/public_html/videos/` | **0** |
+
+**9 `.sql` members**, including `backup/teller_biz.sql`, `backup/teller_iots.sql` and the
+other account databases. Mail is in it (about 66k members under `imap/` / `Maildir`).
+
+**The gap this closes is 68 days** — same span as `tellerstec`. The last readable `teller`
+archive before today was the 43.4 GiB object from 2026-07-02. Today's is 8.18 GiB because
+the media is no longer inside it; that media lives in the archive bucket and is the only
+off-host copy of those paths.
+
+With this run, **all thirteen accounts have a current, readable backup**.
+
+#### Restoring an account that uses this
+
+Restore is **two steps**, and the second is easy to forget because the first succeeds on
+its own and looks complete:
+
+```bash
+# 1. Restore the DirectAdmin archive as usual. The account comes back without the
+#    excluded media — the site will render with missing images.
+# 2. Put the media back from the archive bucket:
+rclone copy \
+  ":s3,provider=AWS,env_auth=true,region=us-east-1:<bucket>/teller/<path>" \
+  "/home/teller/<path>" --checksum
+chown -R teller:teller "/home/teller/<path>"
+```
+
+The paths are stored under `<bucket>/<account>/<path relative to home>`, which is the
+same layout as the manifest, so the manifest doubles as the restore checklist. This
+account's restore has never been rehearsed; that belongs on the post-deploy list rather
+than being inferred at 2am.
+
 ## Still open
 
 - **The kernel-side cause of the process kills** is unconfirmed. `dmesg` was never
@@ -2195,60 +2357,23 @@ could not be read, so it can gate a restore decision. Results of the first run a
   four and a half hours during this outage with no notification. That is a metric EC2
   emits for free, needs no agent, and would have caught this — the cheapest available
   improvement, and it belongs in Terraform.
-- **One account still cannot be backed up on this volume, and it is the one that is
-  genuinely a disk problem.** `tellerstec` and `teller` were never the same case, and
-  treating them as one is what made this look like a hardware purchase.
-  [`tellerstec` was 85% backups of itself](#why-tellerstec-stopped-fitting-and-why-that-is-the-cheapest-thing-here);
-  excluding those made it fit, and it has been
-  [backed up and verified](#tellerstec-backed-up-and-verified-2026-09-08) as of
-  2026-09-08 without pruning anything or buying anything. Twelve of the thirteen accounts
-  now have a current backup.
+- **`teller` is fixed — all thirteen accounts now have a current backup.** The media split
+  recorded under [`teller` site media archive](#teller-site-media-archive) completed on
+  2026-09-08: 40.2 GB archived and verified, exclusions written, account backup
+  [read back at 8.18 GiB](#teller-backed-up-and-verified-2026-09-08) with zero members under
+  the excluded paths. What remains for this item is only the HCP Terraform import of the
+  pre-created bucket and IAM policy after #135 merges, so the next apply does not try to
+  recreate them.
 
-  `teller` is the exception and no exclusion will help it, which was checked rather than
-  assumed: its 54 GB is 45 GB of `domains` (18 GB `cl/gallery`, 11 GB `steveteller.com`,
-  5.8 GB `iotsystems.com`), 4.5 GB of `imap` and 4.0 GB of `Maildir`. There is no
-  backups-of-backups directory in it — `/home/teller/backups` exists and is empty — so
-  there is nothing to exclude that anyone would want excluded, and at 200% of 54 GB it
-  needs about 108 GB of peak against 57.6 GB free. It is a decision, not a fix. The root
-  volume is a 200 GB `gp3` at 72% used, so at $0.08/GB-month:
-
-  | Option | Change | Cost | Covers |
-  |---|---|---|---|
-  | Dedicated volume for `/home/admin_backups` | new 100 GB `gp3`, mounted, `local_path` unchanged | ~$8/mo | `teller`, and staging stops competing with `/` entirely, which is the failure this whole document is about |
-  | Grow the root volume | 200 GB → 300 GB | ~$8/mo | `teller`, but keeps staging and live data on one volume, so a runaway backup can still threaten the host |
-  | Do neither, keep `teller` on July's archive | free | Nothing. Its last backup is whole but ages a day every day |
-
-  At the same price the dedicated volume is the better of the two, because it also removes
-  the coupling. One thing changes with it: the floor and the reserve then apply to *that*
-  filesystem, and 8 GB against 100 GB is not the same proposition as 8 GB against 200 GB.
-  That is a mount rather than a code change — `da_backup_batch.sh` reads `df` for the
-  staging path — but it wants a `--dry-run` before the first real run.
-
-  **The storage cost is the part most likely to change the answer, and it is not small.**
-  Under the bucket's lifecycle — Standard for 30 days, `STANDARD_IA` to 90, `GLACIER_IR`
-  to 365, then expiry — a nightly GiB settles at roughly $2.55/month once a full year has
-  accumulated. So:
+  Steady-state storage cost with the split:
 
   | Nightly set | Per night | Steady state | Cost |
   |---|---|---|---|
-  | The eleven that fit before the exclusion | 14.96 GiB | ~4.9 TB | ~$38/mo |
-  | **The twelve running now** (`tellerstec` excluded, measured 3.05 GiB) | **~18.0 GiB** | ~6.0 TB | **~$46/mo** |
-  | The twelve, plus `teller` weekly rather than nightly | ~24 GiB | ~8.0 TB | ~$61/mo |
-  | All thirteen nightly | ~63 GiB | ~21 TB | ~$161/mo |
+  | All thirteen account backups (`teller` excluded-media, measured 8.18 GiB) | ~26 GiB | ~8.7 TB | ~$66/mo |
+  | Plus the media archive itself (one copy, never expires, IA/Glacier) | ~40 GiB once | ~40 GiB | ~$5–31/mo depending on tier mix |
 
-  These are now measurements rather than projections for every row but the last two, which
-  still carry `teller`'s 43.4 GiB July archive. `tellerstec` is the row that moved most and
-  it moved twice: an earlier revision put the all-thirteen figure at 66 GiB from the
-  2026-07-02 full run, then this document corrected it upward to ~90 GiB once the
-  Installatron growth was found, and the exclusion has now taken that account to 3.05 GiB
-  actual — below even the July figure, because July's archive contained the Installatron
-  backups too. Reasoning from the last complete run is only safe while nothing has changed
-  underneath it, and something has changed underneath it twice.
-
-  The middle row is the one worth considering: if `teller` does not need daily granularity,
-  a weekly `--user=teller` run gets most of the protection for about $15/month more than is
-  being spent now — and it still needs the disk, because the constraint is peak local
-  space during the run, not how often the run happens.
+  The previous "all thirteen nightly at ~$161" assumed re-uploading 43 GB of mostly-static
+  media every night. That row is retired.
 - **Whether `tellerstec`'s Installatron directory is still growing is unresolved, and it
   decides whether anything here has a deadline.** The evidence now points at a pool that
   has just filled to its configured 30-file cap rather than one growing without a limit,
