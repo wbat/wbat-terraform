@@ -45,3 +45,26 @@ variable "cloudfront_origin_secret" {
   description = "Secret header value for CloudFront origin verification"
   default     = ""
 }
+
+######################################################
+# DirectAdmin panel (2222) ingress allowlist
+#
+# Keys are labels, values are CIDRs. Set the real value as a Terraform Cloud
+# workspace variable — do NOT commit it. This repository is public, and a
+# residential address is personal data even though it is not a credential.
+#
+#   da_panel_allowed_cidrs = { home = "203.0.113.10/32" }
+#
+# Not marked sensitive: these are for_each keys downstream, and Terraform
+# refuses to iterate a sensitive value. Terraform Cloud keeps the value out of
+# the repository either way, which is the exposure that matters here.
+#
+# Empty default is deliberate and safe. With no entries, no ingress rule is
+# created and nothing changes — it cannot lock anyone out by omission. See
+# aws/docs/host-access-hardening.md for the apply-then-revoke order.
+######################################################
+variable "da_panel_allowed_cidrs" {
+  description = "label => CIDR allowed to reach the DirectAdmin panel on 2222"
+  type        = map(string)
+  default     = {}
+}
