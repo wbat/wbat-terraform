@@ -1028,7 +1028,9 @@ needs no new infrastructure.
 [`da_backup_batch.sh`](../../scripts/directadmin/da_backup_batch.sh) replaces
 DirectAdmin's own schedule with a run that archives one account at a time and waits for
 `all_backups_post.sh` to upload and clear each one before starting the next. Peak local
-usage becomes the largest single account instead of the sum of all fourteen.
+usage becomes the largest single account instead of the sum of all fourteen. On this host
+that turned out to be enough for twelve accounts and not for the other two; the
+[first real run](#the-first-real-run-2026-09-07-2215-edt) has the numbers.
 
 The premise was checked before anything was built. On 2026-09-07,
 `directadmin admin-backup --destination=/home/admin_backups --user=test2` completed in
@@ -1038,17 +1040,27 @@ The engine is not broken. Only the all-at-once staging is.
 
 Two guards, because the size estimate is the part most likely to be wrong:
 
-- **Before** each account, its estimated archive plus a 10 GB reserve must fit in the free
-  space that exists at that moment. The estimate is 100% of the account's home directory,
-  which is deliberately pessimistic — July compressed 114 GB of homes into 66 GiB, about
-  58% — because overestimating skips an account and underestimating fills the volume.
+- **Before** each account, its estimated peak plus a 10 GB reserve must fit in the free
+  space that exists at that moment. The estimate is the archive — 100% of the account's
+  home directory, deliberately pessimistic against a measured 28–84% — **taken twice
+  over**, because DirectAdmin needs room for two copies rather than one. That doubling is
+  not a safety margin; it is what the tool does, and leaving it out is what let the first
+  real run start an account the volume could not hold. See
+  [the first real run](#the-first-real-run-2026-09-07-2215-edt) for the measurement.
 - **During** each account, a watchdog samples free space and kills the backup if it
   crosses an 8 GB floor. An estimate from `du` cannot know about a database that grew or a
-  compression ratio that got worse; the floor does not need to know why. The partial
-  archive is deleted rather than left behind, because the hook would otherwise upload a
-  truncated file and record it as a successful backup. The same floor is checked before
-  starting, so a volume that is already below it produces a skip that says so rather than
-  a backup that is launched and killed a second later.
+  compression ratio that got worse; the floor does not need to know why. The same floor is
+  checked before starting, so a volume that is already below it produces a skip that says
+  so rather than a backup that is launched and killed a second later.
+
+  A kill has to reach the upload hook, not just the compressor. DirectAdmin runs
+  `all_backups_post.sh` itself, from inside the `admin-backup` invocation, **including when
+  the archive step failed** — so the hook empties the staging directory before this script
+  gets control back, and deleting the partial after the child exits is too late by
+  construction. The watchdog therefore writes `/run/da-backup-abort` *before* it signals
+  anything, and the hook checks that file first and touches nothing. The script refuses to
+  start at all if it cannot write the sentinel, because a guard that is silently absent
+  looks exactly like a working one until the first floor breach.
 
 Both of those guards watch space, and a backup can fail without using any. An `rclone`
 inside the upload hook that stops making progress against S3, or DirectAdmin blocked on a
@@ -1070,10 +1082,11 @@ moved, been renamed, or become unreadable to the account cron runs this as. The 
 the one that matters: it is silent and it takes out every account at once, which is the
 2026-07-02 failure with a different mechanism.
 
-Accounts run smallest first, so a failure on `teller` — the one account most likely not to
-fit — leaves the other thirteen already safe in S3 rather than never attempted. A run that
-skips or fails anything exits non-zero and mails `HEALTH_ALERT_TO` naming the accounts
-that now have no backup.
+Accounts run smallest first, so a failure on the accounts least likely to fit leaves the
+rest already safe in S3 rather than never attempted. That ordering earned its place on the
+first real run: `tellerstec` failed, and the eleven accounts ahead of it were already
+uploaded. A run that skips or fails anything exits non-zero and mails `HEALTH_ALERT_TO`
+naming the accounts that now have no backup.
 
 ```bash
 /usr/local/sbin/da-backup-batch.sh --list      # sizes, and what fits right now
@@ -1087,9 +1100,111 @@ deleted** at Admin Level → Admin Backup/Transfer → Schedule, or the two race
 
 [`prove_backup_batch.sh`](../../scripts/directadmin/prove_backup_batch.sh) pins the
 behaviour offline against a stubbed DirectAdmin, `df` and `mail`: ordering, the headroom
-gate, the reserve, refusing to start on a dirty staging directory, waiting for the drain,
-the floor kill and its partial cleanup, and the per-account time limit. Non-vacuity checks
+gate and its doubling, the reserve, refusing to start on a dirty staging directory,
+waiting for the drain, the floor kill and its partial cleanup, the abort sentinel in all
+three of its states — written before the signal, cleared afterwards, and unwritable — and
+the per-account time limit. The stubbed DirectAdmin runs a stand-in upload hook from its
+own `TERM` handler, so the sandbox has the same ordering the host does. Non-vacuity checks
 remove each guard in turn and confirm the matching proof then fails.
+
+### The first real run: 2026-09-07 22:15 EDT
+
+Run by hand under `systemd-run`, watched throughout. It is the reason two of the guards
+above look the way they do.
+
+**Eleven of fourteen accounts were archived, uploaded, verified and cleared**, in 17m56s,
+in ascending size order, with the staging directory confirmed empty between each one:
+
+| Account | Home | Archive | Ratio |
+| --- | --- | --- | --- |
+| signera, test2, brian2, fcsar, aubrey | < 0.1 GiB each | 18.9 MiB, 612 KiB, 520 KiB, 785 KiB, 1.2 MiB | — |
+| wbat | 0.1 GiB | 21.6 MiB | — |
+| littelman1 | 0.6 GiB | 218 MiB | 35% |
+| alumnibhs | 4.2 GiB | 3.51 GiB | 84% |
+| feed2js | 4.9 GiB | 1.40 GiB | 28% |
+| admin | 6.2 GiB | 3.08 GiB | 50% |
+| wbatnet | 10.5 GiB | 6.72 GiB | 64% |
+
+14.96 GiB across 11 objects under
+`s3://wbat-tellerstech-directadmin-backups-708113892725/server/2026-09-07/`. These are the
+first account backups since 2026-07-02.
+
+Then it went wrong on `tellerstec`, and the way it went wrong was worse than failing.
+
+The pre-flight gate estimated 33.4 GiB against 59.8 GiB free and started it. At 22:49:29
+the watchdog found free space at 8.0 GiB — 51.8 GiB consumed against an estimate of 33.4 —
+and killed the process group. DirectAdmin reported `Error Compressing the backup file
+reseller.admin.tellerstec.tar.zst`, and then ran the upload hook, which found a 20.02 GiB
+fragment in the staging directory, uploaded it over eight minutes, asked `rclone` to
+confirm S3 held the same bytes, got told yes, logged `OK admin upload verified in S3`, and
+deleted the local copy. Only then did `wait` return in the batch script, whose cleanup
+found an empty directory and reported a clean kill.
+
+So S3 gained a truncated archive under exactly the name a complete one would have had, for
+the one account whose last good backup is from July. Streaming it back settles it:
+
+```
+rclone cat s3backup:…/server/2026-09-07/reseller.admin.tellerstec.tar.zst \
+  | zstd -dc | tar -tf - >/dev/null
+zstd: /*stdin*\ : Read error (39) : premature end
+tar: Unexpected EOF in archive
+```
+
+That object has been renamed to
+`reseller.admin.tellerstec.tar.zst.TRUNCATED-DO-NOT-RESTORE` rather than deleted: most of
+its content is intact and `tellerstec` has nothing newer, so it is worth keeping as a last
+resort, but not under a name anyone could mistake for a backup. The bucket's 365-day
+expiry removes it on its own.
+
+#### Where the 51.8 GiB went
+
+Measured directly, by sampling `df` and `du` every five seconds through a fresh `wbatnet`
+backup. `backup_tmpdir` is `/home/tmp` and stayed empty the whole time — the space is all
+in the destination, and this is what is in it mid-run:
+
+```
+6964039680  /home/admin_backups/wbatnet/reseller.admin.wbatnet.tar.zst
+5784296892  /home/admin_backups/wbatnet/backup/home.tar.zst
+ 405023869  /home/admin_backups/wbatnet/backup/wbatnet_domains.sql
+  40350301  /home/admin_backups/wbatnet/backup/wbatnet_dev.sql
+      …     /home/admin_backups/wbatnet/backup/{user.db,*.sql,config}
+```
+
+DirectAdmin assembles the account under `<destination>/<user>/` — `backup/home.tar.zst`
+first, then a `.sql` dump per database, then `user.db` and the config files — and only once
+all of that exists does it tar the lot into
+`<destination>/<user>/reseller.admin.<user>.tar.zst`, **in the same directory it is reading
+from**. The parts and the archive built out of them are both on disk at the same moment,
+and because the parts are already compressed the outer archive is about the same size as
+their sum:
+
+| | Home | Archive | Peak on disk | Peak ÷ archive |
+| --- | --- | --- | --- | --- |
+| wbatnet, measured | 10.50 GiB | 6.72 GiB | 12.69 GiB | 189% |
+
+Hence the 200% in the gate. It also explains why the run's own log looked so healthy: it
+records free space *between* accounts, after the drain, so it reported a steady 59.8 GiB
+for all eleven — while `wbatnet` had privately dipped to 47.1 GiB. Only the watchdog sees
+the in-flight figure.
+
+#### The two largest accounts do not fit, and cannot be made to
+
+On the corrected model, with 59.8 GiB free:
+
+| Account | Home | Peak needed | Verdict |
+| --- | --- | --- | --- |
+| tellerstec | 33.4 GiB | ~64 GiB | does not fit |
+| teller | 54.0 GiB | ~87 GiB | does not fit |
+
+`teller`'s figure is consistent with its July archive of 43.4 GB. Together they are 87.4
+GiB of the 114 GiB of homes on the host, so **per-account batching gets twelve of fourteen
+accounts and cannot get the other two.** Lowering the ratio would not help: the gate would
+stop skipping them, the floor would kill them mid-run, and — before the sentinel fix —
+each kill would publish another fragment to S3. This is a disk problem now, not a
+scheduling one. The options are to give `/home/admin_backups` its own volume, to grow the
+root volume (200 GB now, 71% used), or to accept that the two largest accounts are backed
+up by something other than DirectAdmin. It needs a decision; nothing in this repo makes
+one.
 
 ### 2. Find out what `Not implemented` refers to (CLI)
 
@@ -1250,6 +1365,25 @@ and only then deleted. The volume went from 74% to **71% used, 60 GB free**. Not
 weekly `sysbk` run restored in step 4 writes roughly 7.4 GB every Saturday, and nothing
 currently sweeps it: see the last point under "Still open".
 
+**Eleven accounts now have a backup, and two still do not.** The supervised run at 22:15
+EDT put 14.96 GiB across 11 objects into `server/2026-09-07/` — the first account backups
+since 2026-07-02 — and failed on `tellerstec` in a way that put a truncated archive into
+S3 before it was caught. Full account of it, and the measurements that came out of it, is
+under [the first real run](#the-first-real-run-2026-09-07-2215-edt). The state left behind:
+
+- `/home/admin_backups` empty, `/` at 71% used with 60 GB free, unchanged from before the
+  run.
+- The truncated object renamed to `…tar.zst.TRUNCATED-DO-NOT-RESTORE`.
+- **Nothing scheduled.** `/etc/cron.d/da-backup-batch` is not installed, and the
+  temporary copy of the script used for the supervised run has been removed from
+  `/root`. The fixes for what the run found are on the `da_backup_batch.sh` branch and are
+  not on the host — the batch script and the upload hook have to be installed together,
+  because the sentinel is written by one and honoured by the other. Until
+  `install_da_vhost_listen.sh --install` is re-run after that merges, account backups are
+  still not happening on a schedule.
+- `tellerstec` and `teller` have no current backup and will not get one from this tooling
+  without more disk.
+
 ## Re-running the evidence capture
 
 [`collect-outage-evidence.sh`](collect-outage-evidence.sh) collects everything above
@@ -1287,11 +1421,20 @@ files at all.
   four and a half hours during this outage with no notification. That is a metric EC2
   emits for free, needs no agent, and would have caught this — the cheapest available
   improvement, and it belongs in Terraform.
-- **Restore has never been rehearsed**, and the bucket's newest primary backup is from
-  2026-07-02. Whatever is restorable today is over two months stale. The daily admin
-  backup has been starting on schedule and producing nothing that whole time; see the
-  2026-09-07 state section above for the evidence and for why re-enabling it as-is would
-  fill the volume.
+- **The two largest accounts cannot be backed up on this volume.** `tellerstec` needs
+  about 64 GiB of peak local space and `teller` about 87 GiB, against 59.8 GiB free, and
+  the reason is DirectAdmin's own behaviour rather than anything schedulable — it holds
+  the assembled parts of a backup and the archive built from them on disk at the same
+  time. The other twelve accounts fit comfortably. Deciding this needs a person: a
+  dedicated volume for `/home/admin_backups`, a bigger root volume (200 GB, 71% used), or
+  a different mechanism for those two accounts. Measurements are under
+  [the first real run](#the-first-real-run-2026-09-07-2215-edt).
+- **Restore has never been rehearsed.** Eleven accounts now have a 2026-09-07 backup, but
+  nothing has been restored from any of them, and `tellerstec` and `teller` are still on
+  2026-07-02. The one thing the first real run did establish about restorability is
+  negative: `rclone check --checksum` passing does not mean an archive is readable, which
+  is why the hook now reads each one to the end before uploading it. A rehearsal would
+  answer the rest.
 - **The sweep has no trigger.** `sweep_old_system_dirs` in `all_backups_post.sh` is what
   is supposed to keep `/backup` from accumulating, but the hook only runs when
   DirectAdmin fires a backup event — which, per the point above, has not happened since
