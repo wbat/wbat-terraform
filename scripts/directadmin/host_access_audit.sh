@@ -124,7 +124,12 @@ audit_ssh() {
   pam="$(printf '%s\n' "$dump" | awk '$1=="usepam"{print $2}')"
   root_login="$(printf '%s\n' "$dump" | awk '$1=="permitrootlogin"{print $2}')"
   port="$(printf '%s\n' "$dump" | awk '$1=="port"{print $2}' | paste -sd, -)"
-  allow="$(printf '%s\n' "$dump" | awk '$1=="allowusers"||$1=="allowgroups"{print $1"="$2}' | paste -sd' ' -)"
+  # Every value, not just the first: `allowgroups sshusers admins` reported as
+  # `allowgroups=sshusers` understates who may log in, in the one check whose
+  # job is to say exactly that.
+  allow="$(printf '%s\n' "$dump" |
+    awk '$1=="allowusers"||$1=="allowgroups"{
+      v=""; for (i=2; i<=NF; i++) v = v (v ? "," : "") $i; print $1"="v}' | paste -sd' ' -)"
 
   if [ "$pw" = "no" ]; then
     report OK "ssh/password" "PasswordAuthentication no (base config; see ssh/match)"

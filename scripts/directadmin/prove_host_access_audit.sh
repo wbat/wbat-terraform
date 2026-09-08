@@ -79,7 +79,17 @@ out="$(run "$TMP/hardened")"
   || { echo "FAIL: hardened kbd-interactive not reported OK" >&2; exit 1; }
 [ "$(printf '%s' "$out" | verdict_for ssh/allowlist)" = "OK" ] \
   || { echo "FAIL: AllowGroups not detected" >&2; exit 1; }
-echo "OK hardened config reports clean on every SSH check"
+
+# Every allowed group, not just the first. Reporting `allowgroups sshusers wheel`
+# as `allowgroups=sshusers` understates who may log in, in the one check whose
+# whole job is to state that.
+printf 'port 22\npasswordauthentication no\nkbdinteractiveauthentication no\nusepam yes\npermitrootlogin no\nallowgroups sshusers wheel\nallowusers ops1 ops2\n' \
+  >"$TMP/allow-multi"
+run "$TMP/allow-multi" | grep -q 'allowgroups=sshusers,wheel' \
+  || { echo "FAIL: additional allowed groups dropped from the report" >&2; exit 1; }
+run "$TMP/allow-multi" | grep -q 'allowusers=ops1,ops2' \
+  || { echo "FAIL: additional allowed users dropped from the report" >&2; exit 1; }
+echo "OK hardened config reports clean on every SSH check, naming every allowed principal"
 
 echo "== Case 2: PasswordAuthentication yes =="
 out="$(run "$TMP/passwords-open")"
