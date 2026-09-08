@@ -26,8 +26,10 @@ that are. Only one of the 22 is the newest object in the bucket for its account,
 one is the `tellerstec` fragment already known about and already renamed. What is still
 outstanding is in
 [the order below](#do-it-in-this-order) and in [Still open](#still-open). The batching work
-is now deployed and scheduled; what remains is a disk decision for the two accounts it
-cannot reach.
+is now deployed and scheduled. Of the two accounts it cannot reach, `teller` is a disk
+decision and `tellerstec` is now a one-line exclusion file, which the size estimate
+[honours as of this branch](#what-the-estimator-does-about-it-now) and which nobody has
+written yet.
 
 ## Do it in this order
 
@@ -62,7 +64,8 @@ step 6 exists to stop DirectAdmin's own schedule racing it.
 | 5 | [Diagnose `Not implemented`](#2-find-out-what-not-implemented-refers-to-cli) | none | not done, and optional | Read-only, and no longer on the critical path — step 7 does not go through the task queue. |
 | 6 | [Delete DirectAdmin's schedule](#3-delete-directadmins-backup-schedule) | — | done 2026-09-08 | Removed from the stored job list, not the panel — see the section for why that turned out to be possible. Repairing it would have restored a full all-users run, which no longer fits. |
 | 7 | [Let the per-account batch run take over](#per-account-backups-da_backup_batchsh) | largest single account, not the sum | scheduled 2026-09-08, first automatic run 2026-09-09 01:00 EDT | Installed by step 3. Eleven of the thirteen accounts fit and now run nightly. `tellerstec` does not fit for a reason that turned out to be fixable and free — see step 8 — and `teller` needs a disk decision. |
-| 8 | [Prune `tellerstec`'s Installatron backups](#why-tellerstec-stopped-fitting-and-why-that-is-the-cheapest-thing-here) | **frees ~29 GB, and stops ~2.6 GB/day of growth** | **not done** | The largest single reclaim left, and the only item here with a deadline: at the observed rate the volume fills in roughly three weeks on its own, regardless of backups. Doing it also makes `tellerstec` fit again. |
+| 8 | [Prune `tellerstec`'s Installatron backups](#why-tellerstec-stopped-fitting-and-why-that-is-the-cheapest-thing-here) | **frees ~29 GB, and stops ~2.6 GB/day of growth** | **not done** | The largest single reclaim left, and the only item here with a deadline: at the observed rate the volume fills in roughly three weeks on its own, regardless of backups. Needs the account owner. |
+| 9 | [Write `tellerstec`'s exclusion file](#what-the-estimator-does-about-it-now) | none | **not done** | Three lines, and independent of step 8 — it does not free disk, it stops 29 GB of backups-of-backups being archived, which is what makes the account fit again tonight. The estimator honours the file as of this branch; the file itself does not exist and this repository did not create it. |
 
 ### State of the host, read 2026-09-07 05:02 UTC
 
@@ -1134,6 +1137,13 @@ Two guards, because the size estimate is the part most likely to be wrong:
   not a safety margin; it is what the tool does, and leaving it out is what let the first
   real run start an account the volume could not hold. See
   [the first real run](#the-first-real-run-2026-09-07-2215-edt) for the measurement.
+
+  The home directory is measured less whatever `/home/<account>/.backup_exclude_paths`
+  keeps out of the archive, because otherwise the gate sizes an account from disk it has
+  been told not to back up — which is
+  [why `tellerstec` is skipped](#what-the-estimator-does-about-it-now). Nothing is
+  subtracted unless DirectAdmin says it honours the file and the entry is one it would act
+  on, since an estimate that is too small starts a backup rather than skipping one.
 - **During** each account, a watchdog samples free space and kills the backup if it
   crosses an 8 GB floor. An estimate from `du` cannot know about a database that grew or a
   compression ratio that got worse; the floor does not need to know why. The same floor is
@@ -1193,6 +1203,13 @@ three of its states — written before the signal, cleared afterwards, and unwri
 the per-account time limit. The stubbed DirectAdmin runs a stand-in upload hook from its
 own `TERM` handler, so the sandbox has the same ordering the host does. Non-vacuity checks
 remove each guard in turn and confirm the matching proof then fails.
+
+The exclusion arithmetic is pinned the same way, and mostly in the negative: an exclusion
+that makes a skipped account fit, and then a leading slash that must not shrink the
+estimate, overlapping entries that must not come off twice, a glob that must be expanded,
+an entry escaping the home by `..` and by symlink, a symlink to a tree inside the home, and
+all three answers DirectAdmin can give about `allow_backup_exclude_path`. The stub answers
+`directadmin c`, so the sandbox decides that question the way the host does.
 
 ### The first real run: 2026-09-07 22:15 EDT
 
@@ -1366,6 +1383,53 @@ per-user exclusions and none is configured here — because backing up a backup 
 even when it fits. Before deleting anything, confirm with the account owner that
 Installatron's copies are not the intended restore path for those two apps; the account
 backup is not a substitute if it has been excluding them.
+
+#### What the estimator does about it now
+
+Half of why `tellerstec` is skipped is that the gate sizes it from `du -sk
+/home/tellerstec`, and an exclusion would not have changed that number by a byte. That half
+is fixed. `da_backup_batch.sh` now reads `/home/<account>/.backup_exclude_paths` — the same
+file DirectAdmin reads, and passes to tar as `--exclude-from` directly after `-C
+/home/<account>`, for the inner `home.tar` and the outer account archive alike — and takes
+what it matches off the figure the pre-flight gate compares against free space.
+
+It asks before it subtracts. `allow_backup_exclude_path` reads `1` on this host —
+`/usr/local/directadmin/directadmin c | grep allow_backup_exclude_path`, and it is not
+overridden in `/usr/local/directadmin/conf/directadmin.conf` — and where that question
+cannot be answered, or an entry is one DirectAdmin would not act on, nothing is subtracted.
+The asymmetry is deliberate: over-stating an account costs it a skip, which arrives by mail
+with the account named in it, while under-stating one starts a backup on a volume that
+cannot hold it, which is the 2026-09-07 floor breach.
+
+**There is no such file on this host, and nothing in this repository creates one.** It is
+one command, and it belongs with the decision above rather than with the tooling:
+
+```bash
+printf 'application_backups\n' > /home/tellerstec/.backup_exclude_paths
+chown tellerstec:tellerstec /home/tellerstec/.backup_exclude_paths
+chmod 600 /home/tellerstec/.backup_exclude_paths
+/usr/local/sbin/da-backup-batch.sh --list
+```
+
+The path is relative to the home, with **no leading slash and no `/home/tellerstec`
+prefix**. An absolute entry is the usual way this file is written wrong and DirectAdmin
+excludes nothing for it, so the estimator refuses to subtract for one and logs a `NOTE`
+saying why. `--list` is the confirmation rather than the file's existence: `tellerstec`
+should then show about 29 GB under `EXCLUDED` beside its 34 GB home, a peak of roughly
+10 GB instead of 66.8 GB, and `FITS NOW` reading `yes`.
+
+One caveat on that peak, because it is the one account where the ratio is carrying real
+weight. The estimate is 100% of the home, and the archive is not bounded by the home: the
+`.sql` dumps come from `/var/lib/mysql`. `tellerstec` archived to 7.7 GiB in July against
+roughly 5 GB of non-`application_backups` home, so the databases are several GiB of it, and
+the measured shape implies a peak nearer 16 GiB than the 10 GB the gate would estimate. Both
+fit inside 59.8 GB free with the 10 GB reserve, so the account runs either way, and the
+free-space floor is the guard that would catch it if that stopped being true.
+
+None of this reclaims a byte of local disk. The exclusion stops DirectAdmin archiving 29 GB
+of backups of backups and makes the account fit tonight; the ~2.6 GB/day that fills this
+volume in about three weeks is untouched by it. Pruning, and capping Installatron's
+retention, are still the items with the deadline, and both still need the account owner.
 
 ### 2. Find out what `Not implemented` refers to (CLI)
 
@@ -1866,8 +1930,18 @@ could not be read, so it can gate a restore decision. Results of the first run a
   treating them as one is what made this look like a hardware purchase:
   [`tellerstec` is 85% backups of itself](#why-tellerstec-stopped-fitting-and-why-that-is-the-cheapest-thing-here),
   and pruning them costs nothing and has to happen anyway. Only `teller` — 55 GB of real
-  mail, media and web content, 43.4 GiB archived — genuinely needs more room. For that
-  one, the root volume is a 200 GB `gp3` at 71% used, so at $0.08/GB-month:
+  mail, media and web content, 43.4 GiB archived — genuinely needs more room.
+
+  The tooling half of `tellerstec` is done and the host half is not. The size estimate now
+  subtracts what `/home/<account>/.backup_exclude_paths` keeps out of the archive, so
+  excluding `application_backups` is enough to make the account fit without pruning
+  anything or buying anything — but **that file does not exist on the host**, and until
+  someone writes it (three lines and a `chown`, in
+  [what the estimator does about it now](#what-the-estimator-does-about-it-now))
+  `tellerstec` is still sized from all 34 GB of its home and still skipped every night.
+  Writing it is not a substitute for step 8: it stops 29 GB being archived, and reclaims
+  no local disk at all. For `teller`, the root volume is a 200 GB `gp3` at 71% used, so at
+  $0.08/GB-month:
 
   | Option | Change | Cost | Covers |
   |---|---|---|---|
