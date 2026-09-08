@@ -13,6 +13,14 @@ Optional operational tooling for **EC2 root-volume shrink** via rsync and Elasti
 | [`shrink-cleanup-old.sh`](shrink-cleanup-old.sh) | Post-bake cleanup of retired source instance and volume |
 | [`directadmin/`](directadmin/) | DA ops: SES Gmail pipe (`ses_gmail_forward.md`) + post-backup S3 hooks |
 
+## Repository checks
+
+Not migration tooling — these run in CI against the Terraform in this repo:
+
+| File | Purpose |
+|------|---------|
+| [`check-sg-rule-descriptions.sh`](check-sg-rule-descriptions.sh) | Rejects security-group rule descriptions AWS will not accept. The character set is enforced by the EC2 API rather than the Terraform schema, so `terraform validate` passes and the apply is what fails; an em dash from prose is the usual cause. |
+
 ## Setup
 
 1. Install PyYAML on the source host:

@@ -17,6 +17,12 @@ jobs:
         run: terraform fmt -recursive -check
         working-directory: ./
 
+      # The EC2 API, not the Terraform schema, enforces the character set for
+      # security-group rule descriptions. `validate` passes and the apply fails,
+      # so this has to be its own check.
+      - name: Security-group rule descriptions
+        run: ./scripts/check-sg-rule-descriptions.sh aws
+
   shell:
     name: Shellcheck
     runs-on: ubuntu-latest
