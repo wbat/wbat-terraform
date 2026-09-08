@@ -26,8 +26,10 @@ that are. Only one of the 22 is the newest object in the bucket for its account,
 one is the `tellerstec` fragment already known about and already renamed. What is still
 outstanding is in
 [the order below](#do-it-in-this-order) and in [Still open](#still-open). The batching work
-is deployed and running nightly, and as of 2026-09-08 **twelve of the thirteen accounts
-have a current, readable backup**. `tellerstec` was the twelfth: its exclusion file is
+is deployed, and as of 2026-09-08 **twelve of the thirteen accounts have a current,
+readable backup** — though every one of those runs was started by hand, and
+[the schedule itself has still never fired](#the-schedule-is-still-unproven).
+`tellerstec` was the twelfth: its exclusion file is
 written and its archive has been [read back out of S3 in
 full](#tellerstec-backed-up-and-verified-2026-09-08), closing a 68-day gap. `teller` is the
 one account left, it is a disk decision rather than a bug, and the deadline that remains is
@@ -66,7 +68,7 @@ step 6 exists to stop DirectAdmin's own schedule racing it.
 | 4 | [Smoke-test DirectAdmin with one small account](#1-prove-the-backup-engine-works-without-filling-the-disk-cli) | kilobytes | done 2026-09-07 | Proves engine → hook → S3 → cleanup end to end for almost no space. |
 | 5 | [Diagnose `Not implemented`](#2-find-out-what-not-implemented-refers-to-cli) | none | not done, and optional | Read-only, and no longer on the critical path — step 7 does not go through the task queue. |
 | 6 | [Delete DirectAdmin's schedule](#3-delete-directadmins-backup-schedule) | — | done 2026-09-08 | Removed from the stored job list, not the panel — see the section for why that turned out to be possible. Repairing it would have restored a full all-users run, which no longer fits. |
-| 7 | [Let the per-account batch run take over](#per-account-backups-da_backup_batchsh) | largest single account, not the sum | done; first automatic run 2026-09-08 01:16 EDT succeeded | Installed by step 3. That run did 11 accounts, skipped 2 for space and failed none. With step 9 done it is 12, and only `teller` is left out. |
+| 7 | [Let the per-account batch run take over](#per-account-backups-da_backup_batchsh) | largest single account, not the sum | installed; **the schedule has never fired** — first automatic run is 2026-09-09 01:00 EDT | Installed by step 3, but after that day's 01:00 trigger had passed. Every backup so far has been started by hand. See [the schedule is still unproven](#the-schedule-is-still-unproven). |
 | 8 | [Prune `tellerstec`'s Installatron backups](#why-tellerstec-stopped-fitting-and-why-that-is-the-cheapest-thing-here) | **frees ~31 GB, and stops ~2.5 GB/day of growth** | **not done** | The largest single reclaim left, and still the only item here with a deadline: measured over the last seven days the growth is 2.54 GB/day against 57.7 GB free, so the volume fills in about 22 days regardless of backups. Needs the account owner. Step 9 did not change this by a byte. |
 | 9 | [Write `tellerstec`'s exclusion file](#what-the-estimator-does-about-it-now) | none | done 2026-09-08 | Written, and the account was backed up and the archive read back the same afternoon — [the result](#tellerstec-backed-up-and-verified-2026-09-08). |
 | 10 | [Decide disk for `teller`](#still-open) | ~$8/month either way | **not done** | The one account no exclusion can help: 54 GB of genuine content, checked. Needs a decision, not a fix. |
@@ -1448,6 +1450,36 @@ rather than the file's existence: `tellerstec`
 should then show about 29 GB under `EXCLUDED` beside its 34 GB home, a peak of roughly
 10 GB instead of 66.8 GB, and `FITS NOW` reading `yes`.
 
+### The schedule is still unproven
+
+Worth stating on its own, because an earlier revision of this document got it wrong and
+the mistake is an easy one to repeat: **`/etc/cron.d/da-backup-batch` has never executed.**
+Every backup taken so far — the eleven accounts on 2026-09-07 and `tellerstec` on
+2026-09-08 — was started by hand.
+
+The log reads as though it had fired, which is how the error happened. There is a run at
+`2026-09-08T01:16:10` that ends `finished in 3s: 11 done, 2 skipped, 0 failed`, and eleven
+accounts in three seconds is the tell: it is a `--dry-run`, whose per-account line is
+`would back up …` rather than `backing up …`. The run 34 seconds later is the
+`--user=wbat` smoke test. Neither is the schedule, and 01:16 is not 01:00.
+
+What settles it is cron's own log, which records executions rather than intentions:
+
+```bash
+grep -hE 'CMD .*da-backup-batch' /var/log/cron /var/log/cron-*   # no output, ever
+```
+
+That absence means something only because the same file shows cron working normally in the
+same minute — `01:00:01` on 2026-09-08 has `CMD` entries for `mrtg`,
+`da-vhost-listen-reconcile.sh`, `ses-gmail-forward-health.sh` and four others — and because
+`/var/log/cron` reaches back to 2026-09-06 with three more weeks in rotation. The cause is
+mundane: the cron file was installed at about 01:13 that morning, thirteen minutes after
+the trigger it was meant to catch.
+
+So the first genuine test of the scheduled path is **2026-09-09 01:00 EDT**, and it will be
+the first run to include `tellerstec` without anyone asking it to. Until it has been
+checked, "deployed" and "running nightly" are different claims and only the first is true.
+
 ### `tellerstec` backed up and verified (2026-09-08)
 
 Done, on the afternoon of 2026-09-08, after #128 was merged and installed. The file was
@@ -1917,8 +1949,10 @@ under [the first real run](#the-first-real-run-2026-09-07-2215-edt). The state l
 - The truncated object renamed to `…tar.zst.TRUNCATED-DO-NOT-RESTORE`.
 - **Deployed and scheduled, 2026-09-08 01:13–01:16 EDT.** `/root/wbat-terraform` is at
   `7e3d2c2` (#122), and `--verify` passes on all thirteen managed paths rather than the
-  eleven #120 had. `/etc/cron.d/da-backup-batch` is installed and runs at 01:00 daily;
-  DirectAdmin's own 05:00 schedule is
+  eleven #120 had. `/etc/cron.d/da-backup-batch` is installed and set for 01:00 daily —
+  note the install time above, which is thirteen minutes *after* that day's trigger, so
+  [the schedule had not fired as of this reading](#the-schedule-is-still-unproven) and had
+  still not fired a day later. DirectAdmin's own 05:00 schedule is
   [gone](#3-delete-directadmins-backup-schedule). The temporary copy of the script used
   for the supervised run had already been removed from `/root`.
 
@@ -2064,9 +2098,11 @@ could not be read, so it can gate a restore decision. Results of the first run a
   `sweep_old_system_dirs` in `all_backups_post.sh` is what keeps `/backup` from
   accumulating, and the hook only runs when DirectAdmin fires a backup event. That is why
   the two directories left there on 2026-09-07 had to be verified and removed by hand.
-  `/etc/cron.d/da-backup-batch` was installed on 2026-09-08 and fixes this as a side
+  `/etc/cron.d/da-backup-batch` was installed on 2026-09-08 and should fix this as a side
   effect: each nightly run fires the hook, which uploads the week and then sweeps what it
-  can confirm. What is still unverified is the sweep itself. The weekly `sysbk` run
+  can confirm. That inherits the dependency above — the sweep gets a trigger only once
+  [the schedule actually fires](#the-schedule-is-still-unproven), which it has not yet
+  done. What is still unverified is the sweep itself. The weekly `sysbk` run
   restored in step 4 adds about 7.4 GB every Saturday, and **the first Saturday after the
   deploy is 2026-09-12** — worth watching, because it is the first time that path runs
   against a directory the hook did not create.
