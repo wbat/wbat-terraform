@@ -19,23 +19,35 @@ worse ones: **no backup has reached S3 since 2026-07-02**, and the weekly system
 
 The order matters, because the obvious first move is the one that breaks the host.
 `directadmin admin-backup` with no `--user` backs up every account, and on 2026-07-02 that
-produced roughly 45 GB of archives — `user.wbatnet.teller.tar.zst` alone was 43.4 GB.
-There is **3.8 GB free**. Running a full backup to buy peace of mind would fill the root
-volume within a minute and cause the ENOSPC outage this document spends its first half
-establishing did not happen. It is also exactly how the 2026-06-28 failure went.
+produced **66.055 GiB across 13 objects** — `user.wbatnet.teller.tar.zst` alone was 43.4
+GiB. There was **3.8 GB free** when this order was written. Running a full backup to buy
+peace of mind would fill the root volume within a minute and cause the ENOSPC outage this
+document spends its first half establishing did not happen. It is also exactly how the
+2026-06-28 failure went.
+
+(An earlier revision put that first figure at "roughly 45 GB", which is `teller`'s archive
+mistaken for the whole run. The correct total is the one the bucket reports, and it is the
+number the staging arithmetic further down depends on.)
 
 So: cap the memory first because it is free and tonight is coming, then buy disk headroom,
 then touch DirectAdmin.
 
-| # | Action | Disk cost | Why here |
-|---|--------|-----------|----------|
-| 1 | [Cap the nightly cron job](#3-memory-headroom-on-the-primary--and-why-more-swap-is-the-wrong-lever) | none | The job runs at 03:45 daily and has come close every night for a week. Costs nothing and needs no disk. |
-| 2 | [Upload the old `/backup` weeks, verify, then delete](#recovering-space-safely) | **frees ~52 GB** | `rclone` streams to S3 without staging locally, so this works at 99%. Takes the volume to ~74% and gets the newest database dump off-host in the same pass. |
-| 3 | Deploy the fixed tooling: `install_da_vhost_listen.sh --install` | negligible | Nothing else uploads or cleans up, and the installed hook is hand-edited. Must be in place before a backup succeeds. |
-| 4 | [Smoke-test DirectAdmin with one small account](#1-prove-the-backup-engine-works-without-filling-the-disk-cli) | kilobytes | Proves engine → hook → S3 → cleanup end to end for almost no space. |
-| 5 | [Diagnose `Not implemented`](#2-find-out-what-not-implemented-refers-to-cli) | none | Read-only, and no longer on the critical path — step 7 does not go through the task queue. |
-| 6 | [Delete DirectAdmin's schedule](#3-delete-directadmins-backup-schedule--this-one-needs-the-panel) (panel) | — | It still fires at 05:00 every day. Repairing it would restore a full all-users run, which no longer fits. |
-| 7 | [Let the per-account batch run take over](#per-account-backups-da_backup_batchsh) | largest single account, not the sum | Installed by step 3. Twelve of fourteen accounts fit; the other two need a disk decision, not a schedule. |
+Steps 1 to 4 have since been done, and the disk is now at 71% with 59.8 GiB free. That
+did **not** make step 7 a full backup again — DirectAdmin holds an account's assembled
+parts and the archive it tars out of them on disk at the same time, so a full run needs
+around twice the 66.055 GiB of finished archives above. It has not fitted on this volume
+since July and it does not fit now. Step 7 is therefore the per-account batch run, and
+step 6 exists to stop DirectAdmin's own schedule racing it.
+
+| # | Action | Disk cost | Status | Why here |
+|---|--------|-----------|--------|----------|
+| 1 | [Cap the nightly cron job](#3-memory-headroom-on-the-primary--and-why-more-swap-is-the-wrong-lever) | none | done 2026-09-07 | The job runs at 03:45 daily and has come close every night for a week. Costs nothing and needs no disk. |
+| 2 | [Upload the old `/backup` weeks, verify, then delete](#recovering-space-safely) | **frees ~52 GB** | done 2026-09-07 | `rclone` streams to S3 without staging locally, so this works at 99%. Takes the volume to ~74% and gets the newest database dump off-host in the same pass. |
+| 3 | [Deploy the fixed tooling](#state-of-the-host-as-of-2026-09-07-2130-edt): merge, then `install_da_vhost_listen.sh --install` and `--verify` | negligible | done for #120's tooling; **re-run after #122 merges** | Nothing else uploads or cleans up, and the installed hook was hand-edited. Also installs `da-backup-batch.sh` and its cron, which is why step 6 has to happen alongside it. |
+| 4 | [Smoke-test DirectAdmin with one small account](#1-prove-the-backup-engine-works-without-filling-the-disk-cli) | kilobytes | done 2026-09-07 | Proves engine → hook → S3 → cleanup end to end for almost no space. |
+| 5 | [Diagnose `Not implemented`](#2-find-out-what-not-implemented-refers-to-cli) | none | not done, and optional | Read-only, and no longer on the critical path — step 7 does not go through the task queue. |
+| 6 | [Delete DirectAdmin's schedule](#3-delete-directadmins-backup-schedule--this-one-needs-the-panel) (panel) | — | **not done** | It still fires at 05:00 every day. Repairing it would restore a full all-users run, which no longer fits. |
+| 7 | [Let the per-account batch run take over](#per-account-backups-da_backup_batchsh) | largest single account, not the sum | **not scheduled** | Installed by step 3. Twelve of fourteen accounts fit; the other two need a disk decision, not a schedule. |
 
 ### State of the host, read 2026-09-07 05:02 UTC
 
