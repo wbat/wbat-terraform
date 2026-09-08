@@ -68,11 +68,20 @@ Before Linked IP rewrite:
 
 1. Comment out or remove the root cron line that runs the fixer.
 2. After Linked IP is correct and `nginx -t` passes, a rewrite will drop the
-   extra listens; leave the cron disabled. Retire the script once tellerstech
-   access confirms no other consumer.
+   extra listens; leave the cron disabled.
 
 If the fixer cron is left enabled **after** Linked IP adds `.71` server-wide,
 the second `listen 172.30.0.71` in tellerstec blocks can fail `nginx -t`.
+
+**Done, with one loose end.** Cron is disabled and the script is renamed
+`~/bin/fix-nginx-loopback-listeners.sh.retired`. The "confirm no other consumer"
+step was answered from the box rather than from the website repo, which stayed
+inaccessible: the on-box path search found the only other copy inside the
+WordPress plugin tree
+(`.../plugins/tellerstech-landing/scripts/fix-nginx-loopback-listeners.sh`).
+That copy is untouched, so **a plugin redeploy can reinstate the fixer** — check
+it first if the catch-all symptoms ever return. See the invariant in
+[nginx-vhost-catchall-regression.md](nginx-vhost-catchall-regression.md).
 
 ## Apply (DA-native)
 
