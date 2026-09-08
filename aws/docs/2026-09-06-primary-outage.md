@@ -16,13 +16,15 @@ worse ones: **no backup has reached S3 since 2026-07-02**, and the weekly system
 [What actually needs fixing](#what-actually-needs-fixing).
 
 **Where this stands, for a reader arriving after the fact.** The memory fix is deployed and
-the query is bounded. The system backup is producing databases again. Eleven of fourteen
-accounts got a backup on 2026-09-07, the first since July, and two of the remaining three
-do not fit on this volume at all. Chasing that surfaced a third problem worse than either
+the query is bounded. The system backup is producing databases again. Eleven of the
+thirteen accounts got a backup on 2026-09-07, the first since July, and the other two do
+not fit on this volume at all. Chasing that surfaced a third problem worse than either
 of the two above: an archive can be checksum-verified into S3 and still be unreadable, and
 [reading the whole bucket
 back](#is-what-is-already-in-s3-readable-a-read-back-of-every-archive-2026-09-08) found 22
-that are. None of them is the newest copy of anything. What is still outstanding is in
+that are. Only one of the 22 is the newest object in the bucket for its account, and that
+one is the `tellerstec` fragment already known about and already renamed. What is still
+outstanding is in
 [the order below](#do-it-in-this-order) and in [Still open](#still-open); nothing from the
 batching work is on the host yet.
 
@@ -58,7 +60,7 @@ step 6 exists to stop DirectAdmin's own schedule racing it.
 | 4 | [Smoke-test DirectAdmin with one small account](#1-prove-the-backup-engine-works-without-filling-the-disk-cli) | kilobytes | done 2026-09-07 | Proves engine → hook → S3 → cleanup end to end for almost no space. |
 | 5 | [Diagnose `Not implemented`](#2-find-out-what-not-implemented-refers-to-cli) | none | not done, and optional | Read-only, and no longer on the critical path — step 7 does not go through the task queue. |
 | 6 | [Delete DirectAdmin's schedule](#3-delete-directadmins-backup-schedule--this-one-needs-the-panel) (panel) | — | **not done** | It still fires at 05:00 every day. Repairing it would restore a full all-users run, which no longer fits. |
-| 7 | [Let the per-account batch run take over](#per-account-backups-da_backup_batchsh) | largest single account, not the sum | **not scheduled** | Installed by step 3. Twelve of fourteen accounts fit; the other two need a disk decision, not a schedule. |
+| 7 | [Let the per-account batch run take over](#per-account-backups-da_backup_batchsh) | largest single account, not the sum | **not scheduled** | Installed by step 3. Eleven of the thirteen accounts fit; the other two need a disk decision, not a schedule. |
 
 ### State of the host, read 2026-09-07 05:02 UTC
 
@@ -1097,9 +1099,22 @@ needs no new infrastructure.
 [`da_backup_batch.sh`](../../scripts/directadmin/da_backup_batch.sh) replaces
 DirectAdmin's own schedule with a run that archives one account at a time and waits for
 `all_backups_post.sh` to upload and clear each one before starting the next. Peak local
-usage becomes the largest single account instead of the sum of all fourteen. On this host
-that turned out to be enough for twelve accounts and not for the other two; the
+usage becomes the largest single account instead of the sum of all thirteen. On this host
+that turned out to be enough for eleven accounts and not for the other two; the
 [first real run](#the-first-real-run-2026-09-07-2215-edt) has the numbers.
+
+**Thirteen, and why it is easy to read as fourteen.**
+`/usr/local/directadmin/data/users` has fourteen entries, but one of them is a stray
+`fix.sh` — a 257-byte script from April 2023, owned by root, sitting among the account
+directories. It has no `user.conf`, and `known_users()` in the batch script requires one
+precisely so that name is never passed to `--user=`, where DirectAdmin would fail the
+whole batch on an account that does not exist. Counting directory entries therefore gives
+one more than the number of accounts. DirectAdmin's own lists agree on thirteen: `admin`
+itself, `wbatnet` and `tellerstec` as its resellers, `fcsar` and `wbat` under `admin`, and
+`alumnibhs`, `aubrey`, `brian2`, `feed2js`, `littelman1`, `signera`, `teller` and `test2`
+under `wbatnet`. So does the 2026-07-02 full run, which produced exactly thirteen objects.
+Eleven archived plus the two that do not fit is the whole estate, with nothing
+unaccounted for.
 
 The premise was checked before anything was built. On 2026-09-07,
 `directadmin admin-backup --destination=/home/admin_backups --user=test2` completed in
@@ -1181,8 +1196,9 @@ remove each guard in turn and confirm the matching proof then fails.
 Run by hand under `systemd-run`, watched throughout. It is the reason two of the guards
 above look the way they do.
 
-**Eleven of fourteen accounts were archived, uploaded, verified and cleared**, in 17m56s,
-in ascending size order, with the staging directory confirmed empty between each one:
+**Eleven of the thirteen accounts were archived, uploaded, verified and cleared**, in
+17m56s, in ascending size order, with the staging directory confirmed empty between each
+one:
 
 | Account | Home | Archive | Ratio |
 | --- | --- | --- | --- |
@@ -1286,8 +1302,8 @@ which comes out at 66.8 GiB for `tellerstec` and 108 GiB for `teller`. Both are 
 the table, so the gate skips both accounts a fortiori. The table is the honest lower bound;
 the gate is deliberately more pessimistic than it.
 
-Either way **per-account batching gets twelve of fourteen accounts and cannot get the other
-two.** Those two hold 87.4 GiB of the 114 GiB of homes on the host — a figure that happens
+Either way **per-account batching gets eleven of the thirteen accounts and cannot get the
+other two.** Those two hold 87.4 GiB of the 114 GiB of homes on the host — a figure that happens
 to resemble `teller`'s peak above and is not related to it. Lowering the ratio would not help: the gate would
 stop skipping them, the floor would kill them mid-run, and — before the sentinel fix —
 each kill would publish another fragment to S3. This is a disk problem now, not a
@@ -1403,7 +1419,9 @@ the only one of the two that currently covers `tellerstec` and `teller` at all.
 ## Is what is already in S3 readable? A read-back of every archive, 2026-09-08
 
 **Short answer: the backups anyone would actually restore from are intact, and 22 archives
-in the bucket are not.** None of the 22 is the newest copy of anything. The current estate
+in the bucket are not.** Every account's most recent readable archive is intact, and the
+only one of the 22 that is the newest object for its account is the `tellerstec` fragment
+this document already knew about. The current estate
 — the eleven account backups written on 2026-09-07, the thirteen from the last full run on
 2026-07-02, and all ten weekly system backups from 2026-07-04 to 2026-09-05 — read clean
 from first byte to end-of-archive marker.
