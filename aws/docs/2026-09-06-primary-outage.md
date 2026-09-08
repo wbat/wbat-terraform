@@ -15,27 +15,54 @@ worse ones: **no backup has reached S3 since 2026-07-02**, and the weekly system
 **stopped including databases** on 2026-09-05. See
 [What actually needs fixing](#what-actually-needs-fixing).
 
+**Where this stands, for a reader arriving after the fact.** The memory fix is deployed and
+the query is bounded. The system backup is producing databases again. Eleven of the
+thirteen accounts got a backup on 2026-09-07, the first since July, and the other two do
+not fit on this volume at all. Chasing that surfaced a third problem worse than either
+of the two above: an archive can be checksum-verified into S3 and still be unreadable, and
+[reading the whole bucket
+back](#is-what-is-already-in-s3-readable-a-read-back-of-every-archive-2026-09-08) found 22
+that are. Only one of the 22 is the newest object in the bucket for its account, and that
+one is the `tellerstec` fragment already known about and already renamed. What is still
+outstanding is in
+[the order below](#do-it-in-this-order) and in [Still open](#still-open). The batching work
+is now deployed and scheduled; what remains is a disk decision for the two accounts it
+cannot reach.
+
 ## Do it in this order
 
 The order matters, because the obvious first move is the one that breaks the host.
 `directadmin admin-backup` with no `--user` backs up every account, and on 2026-07-02 that
-produced roughly 45 GB of archives — `user.wbatnet.teller.tar.zst` alone was 43.4 GB.
-There is **3.8 GB free**. Running a full backup to buy peace of mind would fill the root
-volume within a minute and cause the ENOSPC outage this document spends its first half
-establishing did not happen. It is also exactly how the 2026-06-28 failure went.
+produced **66.055 GiB across 13 objects** — `user.wbatnet.teller.tar.zst` alone was 43.4
+GiB. There was **3.8 GB free** when this order was written. Running a full backup to buy
+peace of mind would fill the root volume within a minute and cause the ENOSPC outage this
+document spends its first half establishing did not happen. It is also exactly how the
+2026-06-28 failure went.
+
+(An earlier revision put that first figure at "roughly 45 GB", which is `teller`'s archive
+mistaken for the whole run. The correct total is the one the bucket reports, and it is the
+number the staging arithmetic further down depends on.)
 
 So: cap the memory first because it is free and tonight is coming, then buy disk headroom,
 then touch DirectAdmin.
 
-| # | Action | Disk cost | Why here |
-|---|--------|-----------|----------|
-| 1 | [Cap the nightly cron job](#3-memory-headroom-on-the-primary--and-why-more-swap-is-the-wrong-lever) | none | The job runs at 03:45 daily and has come close every night for a week. Costs nothing and needs no disk. |
-| 2 | [Upload the old `/backup` weeks, verify, then delete](#recovering-space-safely) | **frees ~52 GB** | `rclone` streams to S3 without staging locally, so this works at 99%. Takes the volume to ~74% and gets the newest database dump off-host in the same pass. |
-| 3 | Deploy the fixed tooling: `install_da_vhost_listen.sh --install` | negligible | Nothing else uploads or cleans up, and the installed hook is hand-edited. Must be in place before a backup succeeds. |
-| 4 | [Smoke-test DirectAdmin with one small account](#1-prove-the-backup-engine-works-without-filling-the-disk-cli) | kilobytes | Proves engine → hook → S3 → cleanup end to end for almost no space. |
-| 5 | [Diagnose `Not implemented`](#2-find-out-what-not-implemented-refers-to-cli) | none | Read-only. |
-| 6 | [Recreate the schedule](#3-recreate-the-backup-schedule--this-one-needs-the-panel) (panel) | — | Only once 2 and 4 have passed. |
-| 7 | A full all-users backup | **~45 GB** | Needs step 2 to have completed first. See the note there about peak local usage. |
+Steps 1 to 4 have since been done, and the disk is now at 71% with 59.8 GiB free. That
+did **not** make step 7 a full backup again — DirectAdmin holds an account's assembled
+parts and the archive it tars out of them on disk at the same time, so a full run needs
+around twice the 66.055 GiB of finished archives above. It has not fitted on this volume
+since July and it does not fit now. Step 7 is therefore the per-account batch run, and
+step 6 exists to stop DirectAdmin's own schedule racing it.
+
+| # | Action | Disk cost | Status | Why here |
+|---|--------|-----------|--------|----------|
+| 1 | [Cap the nightly cron job](#3-memory-headroom-on-the-primary--and-why-more-swap-is-the-wrong-lever) | none | done 2026-09-07 | The job runs at 03:45 daily and has come close every night for a week. Costs nothing and needs no disk. |
+| 2 | [Upload the old `/backup` weeks, verify, then delete](#recovering-space-safely) | **frees ~52 GB** | done 2026-09-07 | `rclone` streams to S3 without staging locally, so this works at 99%. Takes the volume to ~74% and gets the newest database dump off-host in the same pass. |
+| 3 | [Deploy the fixed tooling](#state-of-the-host-as-of-2026-09-07-2130-edt): merge, then `install_da_vhost_listen.sh --install` and `--verify` | negligible | done 2026-09-08, at #122 | Nothing else uploads or cleans up, and the installed hook was hand-edited. Also installs `da-backup-batch.sh` and its cron, which is why step 6 had to happen alongside it. |
+| 4 | [Smoke-test DirectAdmin with one small account](#1-prove-the-backup-engine-works-without-filling-the-disk-cli) | kilobytes | done 2026-09-07 | Proves engine → hook → S3 → cleanup end to end for almost no space. |
+| 5 | [Diagnose `Not implemented`](#2-find-out-what-not-implemented-refers-to-cli) | none | not done, and optional | Read-only, and no longer on the critical path — step 7 does not go through the task queue. |
+| 6 | [Delete DirectAdmin's schedule](#3-delete-directadmins-backup-schedule) | — | done 2026-09-08 | Removed from the stored job list, not the panel — see the section for why that turned out to be possible. Repairing it would have restored a full all-users run, which no longer fits. |
+| 7 | [Let the per-account batch run take over](#per-account-backups-da_backup_batchsh) | largest single account, not the sum | scheduled 2026-09-08, first automatic run 2026-09-09 01:00 EDT | Installed by step 3. Eleven of the thirteen accounts fit and now run nightly. `tellerstec` does not fit for a reason that turned out to be fixable and free — see step 8 — and `teller` needs a disk decision. |
+| 8 | [Prune `tellerstec`'s Installatron backups](#why-tellerstec-stopped-fitting-and-why-that-is-the-cheapest-thing-here) | **frees ~29 GB, and stops ~2.6 GB/day of growth** | **not done** | The largest single reclaim left, and the only item here with a deadline: at the observed rate the volume fills in roughly three weeks on its own, regardless of backups. Doing it also makes `tellerstec` fit again. |
 
 ### State of the host, read 2026-09-07 05:02 UTC
 
@@ -332,8 +359,17 @@ Sep  5 05:00:51 server dataskq[2747705]: running backup task data=map[... local_
 Sep  5 05:00:51 server dataskq[2747705]: finished task duration=66.334153ms task=action=backup&id=1
 ```
 
-66 milliseconds, no files produced. A *post*-backup hook cannot fire when the backup
-never runs, so **no hook fix restores uploads until this is repaired**. Corroborating:
+66 milliseconds, no files produced. A *post*-backup hook cannot fire when the backup never
+runs, so **no hook fix restores uploads through the scheduled path until this is
+repaired**. An earlier revision said that without the qualifier, which read as though
+nothing could produce a backup until DirectAdmin's task queue was fixed. That turned out
+to be the wrong conclusion to draw: `admin-backup --user=` runs in the foreground and does
+not go through the task queue at all, and on 2026-09-07 it archived and uploaded eleven
+accounts with `Not implemented` still failing every morning. Repairing the stored job is
+therefore not a prerequisite for having backups — see
+[the batching section](#per-account-backups-da_backup_batchsh) — and the stored job is now
+something to [delete](#3-delete-directadmins-backup-schedule) rather than repair, which
+was done on 2026-09-08. Corroborating:
 `/home/admin_backups` is empty with mtime 2026-07-02, `/var/log/da-backup-s3.log` has not
 been written since 2026-07-02 05:52, and S3 confirms it:
 
@@ -905,6 +941,21 @@ the `directadmin-backup` IAM user is deliberately not granted; its policy allows
 passes `--s3-no-check-bucket`. The 403 reads like broken credentials at one in the morning;
 list the bucket path instead of the remote root to see the real state.
 
+**A caveat on the gate below, added 2026-09-08.** `rclone check --checksum --one-way` is
+what these commands use to decide a local copy is safe to delete, and it is not sufficient
+on its own — it proves S3 holds the same bytes, not that those bytes are a whole archive.
+That is the [`tellerstec` failure](#the-first-real-run-2026-09-07-2215-edt) in miniature.
+For an upload of files that have been sitting at rest for weeks the risk is much lower than
+for one taken straight from a live producer, and
+[the read-back sweep](#is-what-is-already-in-s3-readable-a-read-back-of-every-archive-2026-09-08)
+has since confirmed all ten weeks uploaded this way are readable. But if you are following
+these commands again, read the archives back before deleting anything:
+
+```bash
+./aws/docs/verify-s3-archives.sh --quick --prefix "server/${iso}/"     # cents
+./aws/docs/verify-s3-archives.sh --full  --prefix "server/${iso}/"     # whole-object egress
+```
+
 Each week that verifies records its own path. The deletion step then reads that file rather
 than re-globbing, so a directory whose upload or checksum failed cannot be removed by the
 next command even if you paste both blocks in one go.
@@ -952,20 +1003,32 @@ That is enough headroom for the DirectAdmin steps. Then deploy the fixed tooling
 does not recur:
 
 ```bash
-cd /root/wbat-terraform && git pull
+cd /root/wbat-terraform && git fetch origin && git merge --ff-only origin/main
 sudo ./scripts/directadmin/install_da_vhost_listen.sh --install
 ./scripts/directadmin/install_da_vhost_listen.sh --verify
 /usr/local/sbin/da-disk-guard.sh --report
 ```
 
+`--ff-only` rather than `git pull`: the host checkout is a deploy target, not a place to
+resolve a merge. If it will not fast-forward, something has been edited on the box and that
+is the thing to find out about — which is the same failure `--verify` catches downstream.
+
 `--verify` matters: the primary's hook was hand-edited and matched no commit, so a merged
 fix would not otherwise have been running.
+
+Note what `--install` now covers. As well as the two hooks and the disk guard, it installs
+`da-backup-batch.sh` and `/etc/cron.d/da-backup-batch`, so running it schedules account
+backups at 01:00. That is the intended outcome, but it means DirectAdmin's own schedule
+should be [deleted](#3-delete-directadmins-backup-schedule) in the same sitting rather than
+afterwards. Both were done together on 2026-09-08.
 
 ## DirectAdmin remediation — what to run, and what needs the panel
 
 **Prerequisite: [free the disk first](#recovering-space-safely).** Everything below either
-writes archives to the root volume or is pointless without somewhere to put them, and the
-volume has 3.8 GB free.
+writes archives to the root volume or is pointless without somewhere to put them, and when
+this was written the volume had 3.8 GB free. **That step is done** — `/` is at 71% with
+59.8 GiB free — so this is here as the reason for the ordering rather than as work
+outstanding. It did not buy enough headroom for a full run; see below.
 
 ### 1. Prove the backup engine works without filling the disk (CLI)
 
@@ -997,29 +1060,312 @@ This is also the cleanest diagnostic split available:
 - **It fails the same way** → the fault is in DirectAdmin itself, and step 2's debug
   output is what to send to DA support.
 
+**This was run on 2026-09-07 and it succeeded**, which settled the split: `--user=test2`
+completed in 2.4 seconds, the hook uploaded and verified the archive and removed the local
+copy, and the whole chain took three seconds. The engine is not broken. Only the
+all-at-once staging is, which is what the batching section below addresses.
+
 **On the eventual full run — it no longer fits.** `all_backups_post.sh` is DirectAdmin's
-*all backups* hook. It fires once, after every account has been archived, so peak local
-usage is the sum of all archives at once. The last full run that completed, on 2026-07-02,
-put **66.055 GiB across 13 objects** into S3, and the accounts have grown since (`teller`
-alone is now 55 GB of the 114 GB under `/home`). The cleanup in step 2 of the order above,
-plus the `/backup` reclaim on 2026-09-07, leaves **60 GB free**. A full run therefore
-needs more space than the volume has, and
-would drive it to 100% before the hook ever gets to upload anything — the outage this
+*all backups* hook. It fires once, after every account has been archived, so every archive
+is on local disk at the same time, and on top of that DirectAdmin holds the assembled parts
+of whichever account it is currently building. The last full run that completed, on
+2026-07-02, put **66.055 GiB across 13 objects** into S3, and the accounts have grown since
+(`teller` alone is 54.0 GiB of the 114 GiB of home directories). The cleanup in step 2 of
+the order above, plus the `/backup` reclaim on 2026-09-07, leaves **59.8 GiB free**.
+
+The sum of the finished archives alone already exceeds that, so a full run fails on this
+volume before the parts overhead is even counted — and counting it makes the requirement
+worse, by roughly the size of the largest account again. Either way the run drives the
+volume to 100% before the hook ever gets to upload anything, which is the outage this
 document exists to prevent.
 
-So do not schedule a full local run on this volume. Pick one of:
+So do not schedule a full local run on this volume. Three ways out were considered:
 
-- **Batch it.** Repeated `--user=` runs, a few accounts at a time, letting the hook upload
-  and clear each batch before the next. Peak usage becomes the largest batch.
+- **Batch it.** Repeated `--user=` runs, one account at a time, letting the hook upload
+  and clear each before the next. Peak usage becomes the largest single account.
 - **Move the upload per-user.** DirectAdmin's `user_backup_post.sh` hook fires after each
-  account, so each archive is uploaded and deleted as it is produced. Peak usage becomes
-  the largest single account — 43.4 GB for `teller` at the last measurement, still large
-  but survivable. This is the better answer if `teller` keeps growing.
+  account, so each archive is uploaded and deleted as it is produced. Same peak as
+  batching — 43.4 GiB for `teller` at the last measurement, and on the corrected model
+  about twice that, which is why neither approach reaches it — but it changes which hook
+  owns the upload and therefore reopens every data-loss question `all_backups_post.sh`
+  already answers.
 - **Give it somewhere else to write.** A separate EBS volume mounted at
-  `/home/admin_backups` decouples backup staging from the root filesystem entirely.
+  `/home/admin_backups` decouples staging from the root filesystem, at ongoing cost, and
+  does nothing about an account that outgrows the new volume either.
 
-None of these are implemented. Until one is, the daily job failing is arguably protecting
-the host.
+**Batching is what was built** — see the next section. It reuses the existing hook
+unchanged, so none of the verified-before-delete work has to be re-established, and it
+needs no new infrastructure.
+
+## Per-account backups: da_backup_batch.sh
+
+[`da_backup_batch.sh`](../../scripts/directadmin/da_backup_batch.sh) replaces
+DirectAdmin's own schedule with a run that archives one account at a time and waits for
+`all_backups_post.sh` to upload and clear each one before starting the next. Peak local
+usage becomes the largest single account instead of the sum of all thirteen. On this host
+that turned out to be enough for eleven accounts and not for the other two; the
+[first real run](#the-first-real-run-2026-09-07-2215-edt) has the numbers.
+
+**Thirteen, and why it is easy to read as fourteen.**
+`/usr/local/directadmin/data/users` has fourteen entries, but one of them is a stray
+`fix.sh` — a 257-byte script from April 2023, owned by root, sitting among the account
+directories. It has no `user.conf`, and `known_users()` in the batch script requires one
+precisely so that name is never passed to `--user=`, where DirectAdmin would fail the
+whole batch on an account that does not exist. Counting directory entries therefore gives
+one more than the number of accounts. DirectAdmin's own lists agree on thirteen: `admin`
+itself, `wbatnet` and `tellerstec` as its resellers, `fcsar` and `wbat` under `admin`, and
+`alumnibhs`, `aubrey`, `brian2`, `feed2js`, `littelman1`, `signera`, `teller` and `test2`
+under `wbatnet`. So does the 2026-07-02 full run, which produced exactly thirteen objects.
+Eleven archived plus the two that do not fit is the whole estate, with nothing
+unaccounted for.
+
+The premise was checked before anything was built. On 2026-09-07,
+`directadmin admin-backup --destination=/home/admin_backups --user=test2` completed in
+2.4 seconds, produced `user.wbatnet.test2.tar.zst`, and the hook uploaded it, verified it
+against S3 and deleted the local copy — the entire chain, unmodified, in three seconds.
+The engine is not broken. Only the all-at-once staging is.
+
+Two guards, because the size estimate is the part most likely to be wrong:
+
+- **Before** each account, its estimated peak plus a 10 GB reserve must fit in the free
+  space that exists at that moment. The estimate is the archive — 100% of the account's
+  home directory, deliberately pessimistic against a measured 28–84% — **taken twice
+  over**, because DirectAdmin needs room for two copies rather than one. That doubling is
+  not a safety margin; it is what the tool does, and leaving it out is what let the first
+  real run start an account the volume could not hold. See
+  [the first real run](#the-first-real-run-2026-09-07-2215-edt) for the measurement.
+- **During** each account, a watchdog samples free space and kills the backup if it
+  crosses an 8 GB floor. An estimate from `du` cannot know about a database that grew or a
+  compression ratio that got worse; the floor does not need to know why. The same floor is
+  checked before starting, so a volume that is already below it produces a skip that says
+  so rather than a backup that is launched and killed a second later.
+
+  A kill has to reach the upload hook, not just the compressor. DirectAdmin runs
+  `all_backups_post.sh` itself, from inside the `admin-backup` invocation, **including when
+  the archive step failed** — so the hook empties the staging directory before this script
+  gets control back, and deleting the partial after the child exits is too late by
+  construction. The watchdog therefore writes `/run/da-backup-abort` *before* it signals
+  anything, and the hook checks that file first and touches nothing. The script refuses to
+  start at all if it cannot write the sentinel, because a guard that is silently absent
+  looks exactly like a working one until the first floor breach.
+
+Both of those guards watch space, and a backup can fail without using any. An `rclone`
+inside the upload hook that stops making progress against S3, or DirectAdmin blocked on a
+database lock, hangs at constant free space, and waiting on the child process is otherwise
+unbounded. A run stuck there also holds the batch lock, so every cron invocation after it
+takes the "another run holds it" branch and exits 0 — account backups would stop
+completely and nothing would mail, which is the same silence that hid the July failure for
+two months. So each account is additionally bounded by a **six-hour limit**: past it the
+process group is terminated, the archive it left behind is deleted, and the run reports
+itself incomplete. The lock branch is the other half: a holder is still skipped quietly,
+which is right for an overlap of minutes, but one that has kept the lock for more than a
+day is mailed rather than taken as a reason to exit 0 again.
+
+A run that selects **no account** is treated the same way, for the same reason. The backup
+loop reads from a generator, so an empty selection is not an error to it — it is a loop
+body that never executes, after which the summary finds nothing failed and nothing skipped
+and exits 0. A typo in `--user=` produces that, and so does a users directory that has
+moved, been renamed, or become unreadable to the account cron runs this as. The second is
+the one that matters: it is silent and it takes out every account at once, which is the
+2026-07-02 failure with a different mechanism.
+
+Accounts run smallest first, so a failure on the accounts least likely to fit leaves the
+rest already safe in S3 rather than never attempted. That ordering earned its place on the
+first real run: `tellerstec` failed, and the eleven accounts ahead of it were already
+uploaded. A run that skips or fails anything exits non-zero and mails `HEALTH_ALERT_TO`
+naming the accounts that now have no backup.
+
+```bash
+/usr/local/sbin/da-backup-batch.sh --list      # sizes, and what fits right now
+/usr/local/sbin/da-backup-batch.sh --dry-run
+/usr/local/sbin/da-backup-batch.sh --user=teller
+```
+
+`/etc/cron.d/da-backup-batch` runs it daily at 01:00 — clear of the oncallbrief pipeline
+at 03:45 and the weekly system backup at 05:00. **DirectAdmin's own schedule must be
+deleted** at Admin Level → Admin Backup/Transfer → Schedule, or the two race at 05:00.
+
+[`prove_backup_batch.sh`](../../scripts/directadmin/prove_backup_batch.sh) pins the
+behaviour offline against a stubbed DirectAdmin, `df` and `mail`: ordering, the headroom
+gate and its doubling, the reserve, refusing to start on a dirty staging directory,
+waiting for the drain, the floor kill and its partial cleanup, the abort sentinel in all
+three of its states — written before the signal, cleared afterwards, and unwritable — and
+the per-account time limit. The stubbed DirectAdmin runs a stand-in upload hook from its
+own `TERM` handler, so the sandbox has the same ordering the host does. Non-vacuity checks
+remove each guard in turn and confirm the matching proof then fails.
+
+### The first real run: 2026-09-07 22:15 EDT
+
+Run by hand under `systemd-run`, watched throughout. It is the reason two of the guards
+above look the way they do.
+
+**Eleven of the thirteen accounts were archived, uploaded, verified and cleared**, in
+17m56s, in ascending size order, with the staging directory confirmed empty between each
+one:
+
+| Account | Home | Archive | Ratio |
+| --- | --- | --- | --- |
+| signera, test2, brian2, fcsar, aubrey | < 0.1 GiB each | 18.9 MiB, 612 KiB, 520 KiB, 785 KiB, 1.2 MiB | — |
+| wbat | 0.1 GiB | 21.6 MiB | — |
+| littelman1 | 0.6 GiB | 218 MiB | 35% |
+| alumnibhs | 4.2 GiB | 3.51 GiB | 84% |
+| feed2js | 4.9 GiB | 1.40 GiB | 28% |
+| admin | 6.2 GiB | 3.08 GiB | 50% |
+| wbatnet | 10.5 GiB | 6.72 GiB | 64% |
+
+14.96 GiB across 11 objects under
+`s3://wbat-tellerstech-directadmin-backups-708113892725/server/2026-09-07/`. These are the
+first account backups since 2026-07-02.
+
+Then it went wrong on `tellerstec`, and the way it went wrong was worse than failing.
+
+The pre-flight gate estimated 33.4 GiB against 59.8 GiB free and started it. At 22:49:29
+the watchdog found free space at 8.0 GiB — 51.8 GiB consumed against an estimate of 33.4 —
+and killed the process group. DirectAdmin reported `Error Compressing the backup file
+reseller.admin.tellerstec.tar.zst`, and then ran the upload hook, which found a 20.02 GiB
+fragment in the staging directory, uploaded it over eight minutes, asked `rclone` to
+confirm S3 held the same bytes, got told yes, logged `OK admin upload verified in S3`, and
+deleted the local copy. Only then did `wait` return in the batch script, whose cleanup
+found an empty directory and reported a clean kill.
+
+So S3 gained a truncated archive under exactly the name a complete one would have had, for
+the one account whose last good backup is from July. Streaming it back settles it:
+
+```
+rclone cat s3backup:…/server/2026-09-07/reseller.admin.tellerstec.tar.zst \
+  | zstd -dc | tar -tf - >/dev/null
+zstd: /*stdin*\ : Read error (39) : premature end
+tar: Unexpected EOF in archive
+```
+
+That object has been renamed to
+`reseller.admin.tellerstec.tar.zst.TRUNCATED-DO-NOT-RESTORE` rather than deleted: most of
+its content is intact and `tellerstec` has nothing newer, so it is worth keeping as a last
+resort, but not under a name anyone could mistake for a backup. The bucket's 365-day
+expiry removes it on its own.
+
+It is less of a last resort than it looked. The 2026-07-02 archive for `tellerstec` has
+since been read end to end and is a whole archive over 57,245 members — see
+[the read-back sweep](#is-what-is-already-in-s3-readable-a-read-back-of-every-archive-2026-09-08),
+which also found that the 2026-06-29 copy of the same account is itself truncated. So the
+fallback for `tellerstec` is nine weeks stale rather than absent, and the fragment above is
+a third choice rather than a second.
+
+#### Where the 51.8 GiB went
+
+Measured directly, by sampling `df` and `du` every five seconds through a fresh `wbatnet`
+backup. `backup_tmpdir` is `/home/tmp` and stayed empty the whole time — the space is all
+in the destination, and this is what is in it mid-run:
+
+```
+6964039680  /home/admin_backups/wbatnet/reseller.admin.wbatnet.tar.zst
+5784296892  /home/admin_backups/wbatnet/backup/home.tar.zst
+ 405023869  /home/admin_backups/wbatnet/backup/wbatnet_domains.sql
+  40350301  /home/admin_backups/wbatnet/backup/wbatnet_dev.sql
+      …     /home/admin_backups/wbatnet/backup/{user.db,*.sql,config}
+```
+
+DirectAdmin assembles the account under `<destination>/<user>/` — `backup/home.tar.zst`
+first, then a `.sql` dump per database, then `user.db` and the config files — and only once
+all of that exists does it tar the lot into
+`<destination>/<user>/reseller.admin.<user>.tar.zst`, **in the same directory it is reading
+from**. The parts and the archive built out of them are both on disk at the same moment,
+and because the parts are already compressed the outer archive is about the same size as
+their sum:
+
+| | Home | Archive | Peak on disk | Peak ÷ archive |
+| --- | --- | --- | --- | --- |
+| wbatnet, measured | 10.50 GiB | 6.72 GiB | 12.69 GiB | 189% |
+
+Hence the 200% in the gate. It also explains why the run's own log looked so healthy: it
+records free space *between* accounts, after the drain, so it reported a steady 59.8 GiB
+for all eleven — while `wbatnet` had privately dipped to 47.1 GiB. Only the watchdog sees
+the in-flight figure.
+
+#### The two largest accounts do not fit, and cannot be made to
+
+On the corrected model, with 59.8 GiB free:
+
+| Account | Home | Archive | Peak needed | Verdict |
+| --- | --- | --- | --- | --- |
+| tellerstec | 33.4 GiB | ~32 GiB (inferred) | ~64 GiB | does not fit |
+| teller | 54.0 GiB | 43.4 GiB (measured) | ~87 GiB | does not fit |
+
+Both peaks are twice the archive, which is the model the `wbatnet` measurement above
+establishes. Only one of the two archive figures is measured: `teller`'s July object,
+`server/2026-07-02/user.wbatnet.teller.tar.zst`, is 46,585,095,564 bytes — 43.4 GiB, not
+43.4 GB, and the distinction matters because it is doubled to reach the peak.
+`tellerstec`'s is inferred from the killed run, which had 51.8 GiB on the volume and a
+20.02 GiB outer archive written when the floor stopped it; that leaves about 31.8 GiB of
+assembled parts, and an outer archive of roughly the same size again.
+
+The gate itself uses neither figure, because when it runs the archive does not exist yet.
+It estimates from the home directory — 100% of home for the archive, taken twice over —
+which comes out at 66.8 GiB for `tellerstec` and 108 GiB for `teller`. Both are larger than
+the table, so the gate skips both accounts a fortiori. The table is the honest lower bound;
+the gate is deliberately more pessimistic than it.
+
+Either way **per-account batching gets eleven of the thirteen accounts and cannot get the
+other two.** Those two hold 87.4 GiB of the 114 GiB of homes on the host — a figure that happens
+to resemble `teller`'s peak above and is not related to it. Lowering the ratio would not help: the gate would
+stop skipping them, the floor would kill them mid-run, and — before the sentinel fix —
+each kill would publish another fragment to S3. This is a disk problem now, not a
+scheduling one — but only half of it is a disk *purchase*, which the next section is about.
+
+### Why `tellerstec` stopped fitting, and why that is the cheapest thing here
+
+Measured 2026-09-08, prompted by a review question about the retention arithmetic. Two
+figures in this document did not reconcile, and chasing the discrepancy was more useful
+than settling it: `tellerstec` archived to **7.7 GiB** on 2026-07-02, and the fragment its
+killed run left on 2026-09-07 was already **20.0 GiB** before it was cut short. An account
+does not triple in two months by accident.
+
+It did not. Of its 34 GB home, **29 GB is `application_backups`** and 5.0 GB is everything
+else — the domains, the mail, the actual site:
+
+```
+/home/tellerstec/application_backups   30G     29 files
+/home/tellerstec/domains              4.3G
+everything else                       ~700M
+```
+
+Those files are Installatron's own application backups, driven by `/etc/cron.d/installatron`,
+about 1.1 GB per app per run for two apps, with no retention limit in evidence. 28.70 GiB
+of the 28.87 GiB total arrived **since 2026-08-28**; the remaining 0.17 GiB is a single
+file from 2024-12-08. That is roughly **2.6 GB a day**, still accumulating.
+
+Three consequences, in order of how soon they matter.
+
+**The volume fills on its own.** 59 GB free against 2.6 GB/day is about three weeks, with
+no backup involved. Everything else in this document is about a disk that filled once;
+this is a disk scheduled to fill again, and it is the only item here with a deadline.
+
+**It is why `tellerstec` no longer fits.** `.tar.gz` files do not compress, so 29 GB of
+them passes through `zstd` essentially unchanged and lands in the account archive at close
+to full size. 7.7 GiB in July plus ~29 GB of incompressible additions is the ~32 GiB the
+2026-09-07 fragment was heading for, and 200% of that is the ~64 GiB peak the gate now
+refuses. Prune them and the account archives to roughly what it did in July, needing about
+16 GiB of peak space against 59.8 GiB free — a comfortable fit, with no new volume.
+
+**It is a backup of a backup.** Every one of those files is an Installatron archive of a
+site that DirectAdmin is also archiving. Backing them up to S3 stores the same content
+twice, and at ~$2.55 per nightly GiB per month at steady state, that redundancy alone is
+about **$74/month** of the $230 figure in [Still open](#still-open).
+
+`teller` is the opposite case and worth stating so the two are not treated alike. Its 55 GB
+is 45 GB of `domains`, 4.0 GB of `Maildir` and 4.5 GB of `imap`, with 35.94 GiB across
+53,591 files already in compressed formats — real content, mostly media, with no
+application backups at all. Nothing to prune. That one is a genuine disk decision.
+
+What to do about it is a judgement call this document does not make, but the options are
+not equivalent. Deleting the old archives reclaims the 29 GB once and it returns in eleven
+days. Capping Installatron's retention is the fix that holds, and is configured per
+installation in its panel rather than on the filesystem. Excluding `application_backups`
+from the DirectAdmin account backup is worth doing either way — DirectAdmin supports
+per-user exclusions and none is configured here — because backing up a backup is waste
+even when it fits. Before deleting anything, confirm with the account owner that
+Installatron's copies are not the intended restore path for those two apps; the account
+backup is not a substitute if it has been excluding them.
 
 ### 2. Find out what `Not implemented` refers to (CLI)
 
@@ -1045,28 +1391,71 @@ Two known causes of task-queue failures worth ruling out while you are in there:
 stopped tolerating it), and a `directadmin.conf` edited on Windows so every value has
 `\r` appended.
 
-### 3. Recreate the backup schedule — this one needs the panel
+### 3. Delete DirectAdmin's backup schedule
 
-There is no documented CLI command to *create or edit a scheduled* backup. The task queue
-accepts `action=backup` for a one-off run, and `admin-backup` runs one immediately, but
-the cron entry itself is written by the GUI wizard. So if step 2 shows the stored job is
-malformed, recreate it at **Admin Level → Admin Backup/Transfer → Schedule**:
+An earlier revision of this section said to recreate this job, and the step above it in
+[the order](#do-it-in-this-order) still pointed here to say so. That was written before
+the staging arithmetic below was done, and following it now would reintroduce the failure
+the batching work exists to prevent. The stored job is `who:[all]`, so a repaired version
+of it stages every account's archive on the root volume before the upload hook gets a
+chance to remove any of them, and that needs more space than the volume has. Delete it.
 
-- **Who:** All Users
-- **When:** Cron Schedule, minute `0`, hour `5`, day of month `*`, month `*`, day of week `*`
-- **Where:** Local, path `/home/admin_backups` — must match `local_path` in the hook
-- **What:** All data
+The job is not dangerous today, which is why this is easy to leave undone: it fails in
+66 ms and produces nothing, and has done every morning since Jul 2. It is a loaded gun in
+two directions instead. Whoever eventually diagnoses `Not implemented` and fixes it gets a
+full all-users backup at 05:00 the next morning without having asked for one. And
+`/etc/cron.d/da-backup-batch`, which step 3 of the order installs, runs at 01:00 — a batch
+run that overruns into 05:00 would find DirectAdmin starting a second backup into the same
+staging directory, contending for the same hook lock.
 
-Then delete the old job so both are not queued. The scriptable equivalent, if you would
-rather not use the browser, is `CMD_API_ADMIN_BACKUP` with `action=create`; DirectAdmin
-does not document its full parameter list and suggests running DA in debug mode to
-capture what the GUI sends, so the panel is genuinely the lower-risk path here.
+**Done 2026-09-08 01:15 EDT, and not through the panel.** An earlier revision of this
+section said the panel was the only way, on the grounds that there is no documented CLI
+command to create, edit or remove a scheduled backup — the task queue accepts
+`action=backup` for a one-off and `admin-backup` runs one immediately, but the wizard owns
+the cron entry, and `CMD_API_ADMIN_BACKUP`'s parameter list is undocumented enough that
+DirectAdmin's own advice is to run the panel in debug mode and capture what it sends.
 
-After it runs, confirm the whole chain rather than just the panel's success message:
+That reasoning was about the *API*, and it skipped the simpler question of where the
+schedule is actually stored. It is a plain file,
+`/usr/local/directadmin/data/admin/backup_crons.list`, one URL-encoded job per line, read
+by `dataskq` on each pass rather than held in memory — which is why the panel leaves a
+`.bak-<timestamp>` beside it when it writes. There was exactly one job in it:
+
+```
+1=…&dayofmonth=*&dayofweek=*&hour=5&minute=0&owner=admin&type=admin&when=cron&who=all
+```
+
+So the deletion is a file edit that follows the panel's own convention, keeping the
+`diradmin:diradmin` ownership and `600` mode DirectAdmin writes:
 
 ```bash
-ls -la /home/admin_backups/                    # did files appear?
-tail -40 /var/log/da-backup-s3.log             # did the hook fire and upload?
+F=/usr/local/directadmin/data/admin/backup_crons.list
+cp -a "$F" "${F}.bak-agent-$(date +%Y%m%d%H%M%S)"   # same pattern the panel uses
+: > "$F"                                            # one job, so empty is correct
+chown diradmin:diradmin "$F" && chmod 600 "$F"
+```
+
+Emptying rather than deleting the file matters: DirectAdmin expects the path to exist, and
+an empty list is what the panel itself produces when you remove the last schedule.
+
+Confirm it is gone from the stored job list and from the daily log, rather than trusting
+either the panel's success message or the edit above:
+
+```bash
+cat /usr/local/directadmin/data/admin/backup_crons.list     # id=1 should no longer be here
+grep 'Running Backup: type=admin' /var/log/directadmin/system.log | tail -3
+```
+
+That second line is how to tell the deletion took: it has appeared at 05:00 every day from
+Aug 17 onwards, so the useful signal is the first morning it does not.
+
+Then let step 7 produce the backups. The chain to check after a batch run is the same one
+this section used to describe, pointed at the producer that now exists:
+
+```bash
+tail -40 /var/log/da-backup-batch.log          # which accounts ran, and which did not fit
+tail -40 /var/log/da-backup-s3.log             # did the hook upload and verify each one?
+ls -la /home/admin_backups/                    # and did it drain between accounts?
 aws s3 ls s3://wbat-tellerstech-directadmin-backups-708113892725/server/ | tail -5
 ```
 
@@ -1098,9 +1487,206 @@ Run the script you reverted **to**, not the one you reverted **from**.
 that produces the 55 KB config-only archive, so verifying with it reproduces the bug and
 looks like the revert failed.
 
-Note that step 3 makes this partly redundant: admin backups include databases, so once
-they work again the system backup matters mainly for server configuration. Both are worth
-having, but fix the admin backup first.
+Note that working account backups make this partly redundant: they carry the databases, so
+once the batch run is scheduled the system backup matters mainly for server configuration.
+Both are worth having. This one is already done — see
+[step 4 in the host state below](#state-of-the-host-as-of-2026-09-07-2130-edt) — and it is
+the only one of the two that currently covers `tellerstec` and `teller` at all.
+
+## Is what is already in S3 readable? A read-back of every archive, 2026-09-08
+
+**Short answer: the backups anyone would actually restore from are intact, and 22 archives
+in the bucket are not.** Every account's most recent readable archive is intact, and the
+only one of the 22 that is the newest object for its account is the `tellerstec` fragment
+this document already knew about. The current estate
+— the eleven account backups written on 2026-09-07, the thirteen from the last full run on
+2026-07-02, and all ten weekly system backups from 2026-07-04 to 2026-09-05 — read clean
+from first byte to end-of-archive marker.
+
+This had to be checked rather than assumed. The truncated `tellerstec` archive was admitted
+by a `rclone check --checksum` that was working correctly: it proved S3 held the bytes it
+was handed, which is a different claim from the archive being complete. Every object in the
+bucket was admitted under that same rule, and **none had ever been read back.** The hook
+fix reads each archive before uploading it, but that only governs objects written from now
+on.
+
+Reproducible with [`verify-s3-archives.sh`](verify-s3-archives.sh), which also has an
+offline `--self-test` that asserts its own tests fail on a truncated archive.
+
+### What was run, and what it cost
+
+The failure mode is truncation, and truncation is only visible by reading an archive to its
+end. There is no shortcut for `.tar.zst`: zstd's per-frame content checksum sits at the end
+of a stream you cannot seek into, so proving a zstd archive whole means decompressing all
+of it. Reading the entire bucket that way is **775.3 GB of egress, about $77** including
+`STANDARD_IA` retrieval, and roughly two hours at the 100–170 MB/s measured against this
+bucket. Doing it on the primary instead would avoid the egress and spend the CPU and the
+network of a `t3a.medium` that has 2 vCPU and just came back from an outage; streaming
+needs no disk, but it needs hours of the box.
+
+So the sweep was split by what each format allows, and run from outside the host:
+
+| | Objects | Bytes read | What it establishes |
+| --- | --- | --- | --- |
+| Full end-to-end read (`aws s3 cp` → decompress → `tar -t`) | 681 | 264.01 GiB | The object is a complete, well-formed archive and its member list parses to the end |
+| gzip trailer, ranged GET of the last 8 bytes | 3,483 | 27 KiB | Necessary condition for an intact `.tar.gz` — see below |
+
+**$27.33** in total ($25.51 egress, $1.82 `STANDARD_IA` retrieval, requests immaterial),
+against about $77 to read everything, and about half an hour of wall clock. Nothing was
+staged on disk anywhere: `dd` sits in each pipeline on the compressed side purely so the
+byte count is an independent assertion that the whole object was pulled, since `tar -t`
+consuming its input to end-of-stream is what makes a short count mean "gave up early"
+rather than "read and accepted".
+
+**The cheap test, and what it does not rule out.** A gzip member ends with CRC32 then
+ISIZE, the uncompressed length modulo 2^32. A tar is always a whole number of 512-byte
+blocks, and 2^32 is itself a multiple of 512, so an intact `.tar.gz` has an ISIZE congruent
+to 0 mod 512 whatever its real size; truncate the file and those four bytes become deflate
+payload, which lands on a multiple of 512 with probability 1/512. That catches truncation
+about 99.8% of the time per object for eight bytes instead of gigabytes. It does **not**
+verify the CRC, does not see corruption in the middle of a stream, and says nothing about
+whether the tar holds a plausible account. Two things bound how much that matters here: the
+612 objects of the ten live weekly trees were given *both* tests and the two agreed on
+**627 of 627** objects, and every one of the 15 `.tar.gz` objects the trailer test rejected
+was then read in full and confirmed unreadable. Nothing passed the cheap test and failed
+the expensive one.
+
+**The positive control failed, which is the point.**
+`server/2026-09-07/reseller.admin.tellerstec.tar.zst.TRUNCATED-DO-NOT-RESTORE` was read end
+to end: `zstd` reports `premature end` and `tar` reports `Unexpected EOF in archive` after
+459 members. A test that passed that object would be measuring nothing.
+
+**Coverage.** 3,537 of the bucket's 8,067 objects were tested — every object that is a
+compressed container. The remaining 4,530 are 3,467 `.md5` sidecars, 1,056 loose
+uncompressed files in an extracted copy of `teller`'s backup tree under
+`server/2026-06-30/teller/backup/`, five connectivity-test text files, and two migration
+scripts: 0.18 GiB in total. Those loose files are the one real gap — a plain file can be
+truncated as undetectably as an archive, and there is no container to parse — but they are
+a duplicate of a tree that also exists as an archive.
+
+### What reads clean
+
+| Prefix | Objects | Result |
+| --- | --- | --- |
+| `server/2026-09-07/` — the eleven new account backups | 11 | **all readable**, all with plausible account structure |
+| `server/2026-07-02/` — the last full run | 13 | **all readable** |
+| `server/2026-07-04` … `server/2026-09-05` — ten weekly system backups | 612 | **none unreadable**: 540 readable, 72 valid-but-empty |
+| `server/2026-06-30/` — top-level account archives | 11 | all readable |
+| `server/2026-06-29/` — first migration upload | 14 | 9 readable, **5 unreadable** |
+
+Readability is not the only question for an account backup — a tar can parse and still be
+the wrong thing — so each listing was also checked for structure rather than just member
+count. All 24 archives across the two current generations hold a `backup/` root, at least
+one domain directory, `public_html`, and `user.conf` or `user.db`:
+
+| Account | 2026-07-02 members / domains / SQL dumps | 2026-09-07 members / domains / SQL dumps |
+| --- | --- | --- |
+| `reseller.admin.wbatnet` | 127,674 / 21 / 12 | 127,702 / 21 / 12 |
+| `user.wbatnet.alumnibhs` | 52,580 / 1 / 0 | 52,591 / 1 / 0 |
+| `user.wbatnet.littelman1` | 31,665 / 1 / 1 | 31,678 / 1 / 1 |
+| `user.wbatnet.feed2js` | 1,758 / 2 / 0 | 1,773 / 2 / 0 |
+| `admin.root.admin` | 677 / 1 / 0 | 690 / 1 / 0 |
+| `user.wbatnet.test2`, `aubrey`, `brian2`, `signera`, `fcsar`, `admin.wbat` | 199–649 each | 210–670 each |
+| `reseller.admin.tellerstec` | 57,245 / 8 / 3 | *(truncated, 459 members)* |
+| `user.wbatnet.teller` | **151,865 / 49 / 9** | *(never attempted)* |
+
+**`tellerstec` and `teller` do have a restorable backup, and it is the July one.** The
+document has been treating that as an assumption since 2026-09-07 — "the one account whose
+last good backup is from July" — and it is now measured.
+`server/2026-07-02/reseller.admin.tellerstec.tar.zst` reads clean over 57,245 members
+across eight domains with three SQL dumps, and `user.wbatnet.teller.tar.zst`, all 43.4 GiB
+of it, reads clean over 151,865 members across 49 domains with nine SQL dumps. They are
+nine weeks stale, which is the real problem with them, but they are not empty and they are
+not fragments.
+
+The 72 valid-but-empty objects are not a defect in the sweep or in the upload. `sysbk`
+archives a fixed list of paths, several of which do not exist on this host, and archiving a
+missing path produces a well-formed 45-byte `.tar.gz` containing nothing but tar's
+end-of-archive marker. It is the same ten names every week — `custom/etc/master.passwd`,
+`custom/etc/proftpd.conf`, `custom/usr/local/frontpage`, `custom/usr/share/ssl` and so on,
+379 objects bucket-wide. Worth knowing when reading a manifest; not worth fixing.
+
+One incidental finding, recorded because the name is misleading rather than because it
+matters: `server2/2026-07-02/admin.root.admin.tar.zst` is five bytes long and contains the
+text `test`. It is a connectivity artefact wearing the name of an account archive. It has
+been left alone — it is not a truncated backup, and labelling it as one would be wrong.
+
+### The 22 archives that cannot be read, and what they have in common
+
+| Prefix | Object | Size | Members before it stops |
+| --- | --- | --- | --- |
+| `server/2026-09-07/` | `reseller.admin.tellerstec.tar.zst` *(known; the control)* | 20.02 GiB | 459 |
+| `server/2026-06-30/teller/` | `user.wbatnet.teller.tar.zst` | 43.18 GiB | 141,978 |
+| `server/2026-06-29/` | `admin.root.admin.tar.zst` | 1.95 GiB | 230 |
+| `server/2026-06-29/` | `reseller.admin.tellerstec.tar.zst` | 1.95 GiB | 22,061 |
+| `server/2026-06-29/` | `reseller.admin.wbatnet.tar.zst` | 0.30 GiB | 702 |
+| `server/2026-06-29/` | `user.wbatnet.alumnibhs.tar.zst` | 3.30 GiB | 46,765 |
+| `server/2026-06-29/` | `user.wbatnet.teller.tar.zst` | 1.81 GiB | 5,222 |
+| `server/2026-06-28/` | `custom/home/admin.tar.gz`, `custom/usr/local.tar.gz`, `mysql/full-mysql.tar.gz` | 1.92 / 4.05 / 0.59 GiB | 1,624 / 2,088 / 2,190 |
+| `server/2026-03-22` … `2026-06-21` (7 weeks) | `custom/usr/local.tar.gz` | 1.68–4.23 GiB each | 1,866–45,183 |
+| `server/2024-09-22` | `custom/usr/local.tar.gz` | 1.36 GiB | 33,802 |
+| `server/2024-10-06`, `2024-10-13` | `custom/home/admin.tar.gz` | 1.60 GiB each | 1,025 / 1,046 |
+| `server/2024-08-18`, `2024-09-29` | `mysql/full-mysql.tar.gz` | 0.12 GiB each | 562 / 875 |
+
+Every one of them fails the same way — the decompressor reaches the end of the object
+before the archive ends — and every one of them shares a property worth recording:
+
+**Their sizes are exact multiples of 4,096 bytes.** Of the 435 tested archives of 1 MiB or
+more, 22 have a size that is an exact multiple of the filesystem block size, and all 22 are
+in the table above. The other 413 are not block-aligned and not one of them failed a test.
+That separation is complete in both directions, which is more than a coincidence would give
+— a random size hits a 4 KiB boundary about once in 4,096, so 22 of 435 is four orders of
+magnitude off chance.
+
+The reading is that these files were truncated **while being written to the local disk**,
+at the last block the filesystem could give out, and then uploaded intact. That makes them
+the same failure as `tellerstec` with a different trigger: `tellerstec` was a compressor
+killed by the watchdog, and these are writes that hit a full volume. The three
+`server/2026-06-28/` objects are the strongest case, because this document already dates an
+ENOSPC episode to 2026-06-28 — "a separate episode when DirectAdmin still staged backups in
+`/tmp`" — and the `server/2026-06-29/` account archives are the migration uploading what
+that episode had left on disk. That a killed write lands on a block boundary is **inferred**
+from the arithmetic; that the objects are unreadable is observed, twice, by two independent
+tests for the `.tar.gz` half.
+
+The seven consecutive weeks of `custom/usr/local.tar.gz` are the part that is not explained
+by a single bad night. From 2026-03-22 to 2026-06-28 that one member failed every week
+while everything beside it in the same tree succeeded, and the 2024 instances are the same
+handful of large members. `/usr/local` is the largest thing `sysbk` archives after the home
+directories. Whether that is one recurring cause or a coincidence of the largest file
+meeting a tight volume each week is **not established** here.
+
+`--max-bytes` and `--prefix` on the script exist so this can be re-run cheaply: a
+`--quick` pass over the whole `.tar.gz` half of the bucket costs cents and, on this
+evidence, finds what a full read finds.
+
+### What was done about them
+
+Each of the 21 newly found objects has been renamed with a `.TRUNCATED-DO-NOT-RESTORE`
+suffix, the same treatment `tellerstec` got on 2026-09-07, and **nothing was deleted**. A
+fragment that lists 141,978 members before it stops is worth more than nothing for an
+account with no other copy of that date, and it should not sit under a name someone could
+mistake for a backup. The bucket's 365-day expiry removes them on its own.
+
+S3 has no rename, so each was a server-side copy followed by a delete of the old key, with
+the storage class carried across and both keys checked before and after. The bucket held
+8,067 objects and 775,343,444,543 bytes before and after: 21 keys added, 21 removed, no
+change in total. Two consequences worth stating. Renaming resets each object's lifecycle
+clock, so the 365-day expiry now runs from 2026-09-08 rather than from the original upload
+— a few months later than it would have been for the 2024 objects. And the `.md5` sidecars
+`sysbk` wrote alongside the affected members now name a file that no longer exists under
+that name, which is cosmetic but will look odd to anyone reading a manifest.
+
+### What this changes, and what it does not
+
+Readability is not the whole of restorability, and the distinction is worth keeping. What
+is now established is that these objects are complete, well-formed archives holding
+plausible account trees. What is **not** established is that DirectAdmin will ingest one
+and produce a working account, or that the SQL dumps inside them load. That is still
+unrehearsed, and it is the part a person has to do — see
+[Still open](#still-open). The useful change is that a rehearsal can now start from an
+archive known to be whole, so a failure would be attributable to the restore path rather
+than to the backup.
 
 ## State of the host as of 2026-09-07 21:30 EDT
 
@@ -1170,14 +1756,57 @@ raised no ticket, and the daily failure is invisible from the panel.
 Do not simply re-enable or recreate the job. As the arithmetic in step 1 now shows, a
 successful full run needs 66+ GiB of local staging against 60 GB free, so "fixing" the
 trigger without first changing where the archives are written would fill the volume at
-05:00 the next morning.
+05:00 the next morning. `da_backup_batch.sh` above is that change; DirectAdmin's schedule
+should be deleted rather than repaired.
 
 **`/backup` is empty again, and 7.4 GB came back.** `09-05-26` and `08-29-26` were the
 last two directories left there. Both were verified against S3 with
 `rclone check --checksum --one-way` — 2 and 136 files respectively, zero differences —
-and only then deleted. The volume went from 74% to **71% used, 60 GB free**. Note that the
+and only then deleted. That was a weaker justification than it read at the time, for the
+reason the `tellerstec` archive went on to demonstrate: a checksum match is a statement
+about bytes, not about completeness. Both weeks have since been read back out of S3 and are
+whole, so the decision stands on evidence rather than on the checksum alone. The volume
+went from 74% to **71% used, 60 GB free**. Note that the
 weekly `sysbk` run restored in step 4 writes roughly 7.4 GB every Saturday, and nothing
 currently sweeps it: see the last point under "Still open".
+
+**Eleven accounts now have a backup, and two still do not.** The supervised run at 22:15
+EDT put 14.96 GiB across 11 objects into `server/2026-09-07/` — the first account backups
+since 2026-07-02 — and failed on `tellerstec` in a way that put a truncated archive into
+S3 before it was caught. Full account of it, and the measurements that came out of it, is
+under [the first real run](#the-first-real-run-2026-09-07-2215-edt). The state left behind:
+
+- `/home/admin_backups` empty, `/` at 71% used with 60 GB free, unchanged from before the
+  run.
+- The truncated object renamed to `…tar.zst.TRUNCATED-DO-NOT-RESTORE`.
+- **Deployed and scheduled, 2026-09-08 01:13–01:16 EDT.** `/root/wbat-terraform` is at
+  `7e3d2c2` (#122), and `--verify` passes on all thirteen managed paths rather than the
+  eleven #120 had. `/etc/cron.d/da-backup-batch` is installed and runs at 01:00 daily;
+  DirectAdmin's own 05:00 schedule is
+  [gone](#3-delete-directadmins-backup-schedule). The temporary copy of the script used
+  for the supervised run had already been removed from `/root`.
+
+  The two fixes that came out of the run **had to be deployed together**, and were: the
+  batch script's watchdog writes `/run/da-backup-abort` before it signals anything, and it
+  is `all_backups_post.sh` that reads the sentinel and refuses to upload. Installing one
+  without the other means a floor breach either publishes another fragment to S3 (batch
+  without hook) or leaves a partial archive on disk with nothing to remove it (hook
+  without batch). A single `--install` covers both.
+- **The deployed chain was proved end to end** at 01:16 EDT with `--user=wbat`, the
+  smallest account with real content: archived to `user.admin.wbat.tar.zst`, read back
+  through `zstd -dc | tar -tf` by the hook before upload, copied to `server/2026-09-08/`,
+  `rclone check` clean, local copy removed, five seconds, no sentinel left behind. This is
+  the first run in which the integrity check was in the path.
+- **The corrected sizing changed which accounts fit**, and it is worth recording the
+  before-and-after because the old numbers are what the 2026-09-07 alert emails contain.
+  Under the old model `tellerstec` estimated at 33.4 GB and was attempted; under the
+  measured 200% model it needs about 66.8 GB of peak space and `teller` about 108.1 GB,
+  against 59.8 GB free. Eleven accounts fit, two do not, and the gate now refuses them up
+  front rather than discovering it at the floor.
+- `tellerstec` and `teller` therefore have no current backup and will not get one from
+  this tooling without more disk. Their most recent readable archives are from
+  2026-07-02 and were confirmed whole by the read-back sweep, so they are stale rather
+  than missing.
 
 ## Re-running the evidence capture
 
@@ -1198,6 +1827,19 @@ Two things it does **not** cover, both of which were answered by hand and are wo
 folding in: the `sar` memory series, and whether the DirectAdmin backup task is producing
 files at all.
 
+Archive integrity is a separate script, because it talks to S3 rather than to a host and
+because its expensive mode costs real egress:
+
+```bash
+./aws/docs/verify-s3-archives.sh --self-test                       # offline, no credentials
+./aws/docs/verify-s3-archives.sh --quick --prefix server/2026-     # cents, .tar.gz only
+./aws/docs/verify-s3-archives.sh --full  --prefix server/2026-09-07/
+```
+
+It needs `s3:ListBucket` and `s3:GetObject` and exits non-zero if anything in the sweep
+could not be read, so it can gate a restore decision. Results of the first run are
+[above](#is-what-is-already-in-s3-readable-a-read-back-of-every-archive-2026-09-08).
+
 ## Still open
 
 - **The kernel-side cause of the process kills** is unconfirmed. `dmesg` was never
@@ -1216,16 +1858,70 @@ files at all.
   four and a half hours during this outage with no notification. That is a metric EC2
   emits for free, needs no agent, and would have caught this — the cheapest available
   improvement, and it belongs in Terraform.
-- **Restore has never been rehearsed**, and the bucket's newest primary backup is from
-  2026-07-02. Whatever is restorable today is over two months stale. The daily admin
-  backup has been starting on schedule and producing nothing that whole time; see the
-  2026-09-07 state section above for the evidence and for why re-enabling it as-is would
-  fill the volume.
-- **The sweep has no trigger.** `sweep_old_system_dirs` in `all_backups_post.sh` is what
-  is supposed to keep `/backup` from accumulating, but the hook only runs when
-  DirectAdmin fires a backup event — which, per the point above, has not happened since
-  July. The two directories left there on 2026-09-07 had to be verified and removed by
-  hand. Until admin backups work, nothing sweeps `/backup` on its own, and the weekly
-  `sysbk` run restored in step 4 will start adding about 7.4 GB every Saturday.
+- **The two largest accounts cannot be backed up on this volume, but only one of them is
+  really a disk problem.** `tellerstec` needs about 64 GiB of peak local space and
+  `teller` about 87 GiB, against 59.8 GiB free, because DirectAdmin holds the assembled
+  parts of a backup and the archive built from them on disk at the same time. The other
+  eleven fit comfortably and now run nightly. The two are not the same case, though, and
+  treating them as one is what made this look like a hardware purchase:
+  [`tellerstec` is 85% backups of itself](#why-tellerstec-stopped-fitting-and-why-that-is-the-cheapest-thing-here),
+  and pruning them costs nothing and has to happen anyway. Only `teller` — 55 GB of real
+  mail, media and web content, 43.4 GiB archived — genuinely needs more room. For that
+  one, the root volume is a 200 GB `gp3` at 71% used, so at $0.08/GB-month:
+
+  | Option | Change | Cost | Covers |
+  |---|---|---|---|
+  | Dedicated volume for `/home/admin_backups` | new 100 GB `gp3`, mounted, `local_path` unchanged | ~$8/mo | `teller`, and staging stops competing with `/` entirely, which is the failure this whole document is about |
+  | Grow the root volume | 200 GB → 300 GB | ~$8/mo | `teller`, but keeps staging and live data on one volume, so a runaway backup can still threaten the host |
+  | Do neither, keep `teller` on July's archive | free | Nothing. Its last backup is whole but ages a day every day |
+
+  At the same price the dedicated volume is the better of the two, because it also removes
+  the coupling. One thing changes with it: the floor and the reserve then apply to *that*
+  filesystem, and 8 GB against 100 GB is not the same proposition as 8 GB against 200 GB.
+  That is a mount rather than a code change — `da_backup_batch.sh` reads `df` for the
+  staging path — but it wants a `--dry-run` before the first real run.
+
+  **The storage cost is the part most likely to change the answer, and it is not small.**
+  Under the bucket's lifecycle — Standard for 30 days, `STANDARD_IA` to 90, `GLACIER_IR`
+  to 365, then expiry — a nightly GiB settles at roughly $2.55/month once a full year has
+  accumulated. So:
+
+  | Nightly set | Per night | Steady state | Cost |
+  |---|---|---|---|
+  | The eleven that fit today | 14.96 GiB | ~4.9 TB | ~$38/mo |
+  | All thirteen, `tellerstec` as it is now | ~90.4 GiB | ~30 TB | **~$230/mo** |
+  | All thirteen, `tellerstec` pruned | ~66 GiB | ~22 TB | ~$168/mo |
+  | Eleven + pruned `tellerstec` nightly, `teller` weekly | ~29 GiB | ~9.7 TB | ~$74/mo |
+
+  An earlier revision of this section put the all-thirteen figure at 66 GiB, reasoning from
+  the 2026-07-02 full run, which really was 66.055 GiB. That is now wrong, and the reason
+  it is wrong is the same finding as above: in July `tellerstec` archived to 7.7 GiB, and
+  today it would archive to about 32 GiB. Reasoning from the last complete run is only safe
+  while nothing has changed underneath it. The last line of the table is the one worth
+  considering: if `teller` does not need daily granularity, a weekly `--user=` run gets
+  most of the protection for a third of the cost of doing everything nightly. Per-account
+  sizes are under [the first real run](#the-first-real-run-2026-09-07-2215-edt).
+- **Restore has never been rehearsed** — though the archives have now been read.
+  [The 2026-09-08 sweep](#is-what-is-already-in-s3-readable-a-read-back-of-every-archive-2026-09-08)
+  read every compressed object in the bucket and settled the readability half of this:
+  the eleven 2026-09-07 account backups, the thirteen from 2026-07-02 and all ten weekly
+  system backups are complete, well-formed archives holding plausible account trees, and
+  22 older archives are not and have been renamed. What is still untested is whether
+  DirectAdmin will ingest one of them and produce a working account, and whether the SQL
+  dumps inside load. A rehearsal needs somewhere to restore *to*, which on this host means
+  the same disk problem as everything else; the smallest useful version is one of the
+  sub-megabyte accounts (`test2`, `brian2`, `aubrey`) into a scratch account. The change
+  from before is that a rehearsal now starts from an archive known to be whole, so a
+  failure would be attributable to the restore path rather than to the backup.
+- **The sweep now has a trigger, and it has not yet been exercised.**
+  `sweep_old_system_dirs` in `all_backups_post.sh` is what keeps `/backup` from
+  accumulating, and the hook only runs when DirectAdmin fires a backup event. That is why
+  the two directories left there on 2026-09-07 had to be verified and removed by hand.
+  `/etc/cron.d/da-backup-batch` was installed on 2026-09-08 and fixes this as a side
+  effect: each nightly run fires the hook, which uploads the week and then sweeps what it
+  can confirm. What is still unverified is the sweep itself. The weekly `sysbk` run
+  restored in step 4 adds about 7.4 GB every Saturday, and **the first Saturday after the
+  deploy is 2026-09-12** — worth watching, because it is the first time that path runs
+  against a directory the hook did not create.
 - **`/usr/local/sbin/migrate-backups-to-s3.sh` and `verify-backups-s3.sh`** exist on the
   host, are not in this repository, and were not examined.

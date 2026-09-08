@@ -10,6 +10,7 @@
 # into an unlinked file. copytruncate can lose a line in the race; a silent hole in the
 # only record of a backup upload is worse.
 /var/log/da-backup-s3.log
+/var/log/da-backup-batch.log
 /var/log/da-vhost-listen.log
 /var/log/da-disk-guard.log
 {

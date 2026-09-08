@@ -20,6 +20,15 @@ module "kms" {
 module "sg" {
   source = "./sg"
 
+  # server.wbat.net and server2.wbat.net resolve to these, so a panel session
+  # opened from one box to the other by hostname arrives from the public
+  # address rather than the private one. Taken from the managed EIPs so the
+  # allowlist follows an address change instead of going stale.
+  primary_public_ip   = module.ec2.primary_public_ip
+  secondary_public_ip = module.ec2.secondary_public_ip
+
+  da_panel_allowed_cidrs = var.da_panel_allowed_cidrs
+
   core_tags = var.core_tags
 }
 

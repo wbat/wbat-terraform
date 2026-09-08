@@ -36,6 +36,26 @@ set -uo pipefail
 # below captures its own exit status instead.
 
 ADMIN_DIR="${DA_BACKUP_ADMIN_DIR:-/home/admin_backups}"
+# Written by da_backup_batch.sh's watchdog, immediately before it kills a backup that
+# crossed the free-space floor or the per-account time limit.
+#
+# DirectAdmin runs this hook itself, from inside the admin-backup invocation, and it runs
+# it even when the archive step failed -- so this hook is the first thing to touch the
+# wreckage of a killed backup, before the script that did the killing gets control back.
+# On 2026-09-07 that meant a 20 GiB tellerstec archive whose compressor had been killed
+# mid-stream was uploaded here, confirmed byte-for-byte against S3, logged as "upload
+# verified in S3", and deleted locally. The batch script's own cleanup then found an empty
+# directory. S3 was left holding a truncated archive under the same name a complete one
+# would have had, which is worse than the missing backup it replaced.
+ABORT_SENTINEL="${DA_BACKUP_ABORT_SENTINEL:-/run/da-backup-abort}"
+# Read each archive before uploading it, to establish that it is a whole archive.
+#
+# rclone --checksum proves S3 received the bytes that are on disk. It cannot prove those
+# bytes are a complete archive, and on 2026-09-07 it cheerfully proved a truncated one.
+# Decompressing to /dev/null is the only check that actually answers the question; it
+# needs no disk, and reading this host's whole set costs a few minutes against a backup
+# run that takes most of an hour.
+VERIFY_ARCHIVES="${DA_BACKUP_VERIFY_ARCHIVES:-1}"
 # DirectAdmin does not put system backups in the same place on every build: the primary
 # writes them to /backup, while the hook installed there had /home/backup hardcoded. That
 # directory exists and is empty, so for two months the hook logged "cleaned local system
@@ -239,11 +259,53 @@ admin_count=0
 # are reported just as loudly, since a failed delete leaves the volume filling.
 cleanup_failures=()
 
+# Archives that are on disk but could not be read all the way through. Neither uploaded
+# nor deleted: a truncated archive must not reach S3, and deleting the only copy of
+# something that might be partially recoverable is not this script's decision.
+damaged_archives=()
+
+# Whether an archive can be read from end to end. Truncation is the failure this is for --
+# a compressor that was killed, a tar that stopped mid-member, a write that hit ENOSPC --
+# and none of those are visible in the file's size or its checksum.
+#
+# The tar listing matters as much as the decompression: zstd can hold a complete,
+# well-formed frame whose contents are a tar that stops in the middle, which is what a
+# killed tar feeding a zstd that flushed cleanly produces.
+archive_is_whole() {
+  local f="$1"
+  case "$f" in
+    *.tar.zst | *.tzst)
+      command -v zstd >/dev/null 2>&1 || return 0
+      zstd -dc -- "$f" 2>/dev/null | tar -tf - >/dev/null 2>&1
+      ;;
+    *.tar.gz | *.tgz)
+      gzip -dc -- "$f" 2>/dev/null | tar -tf - >/dev/null 2>&1
+      ;;
+    *.tar)
+      tar -tf "$f" >/dev/null 2>&1
+      ;;
+    *)
+      # Not a container this knows how to open. Unreadability has not been established, so
+      # claiming damage here would strand files on disk for no reason.
+      return 0
+      ;;
+  esac
+}
+
 upload_admin() {
   [[ -d "$ADMIN_DIR" ]] || {
     log "skip admin: ${ADMIN_DIR} does not exist"
     return 0
   }
+
+  # First check, before anything is even enumerated. The batch script has already decided
+  # that whatever is in here is of unknown completeness, and it will delete it once
+  # DirectAdmin hands control back. Uploading it in the meantime is the one thing that
+  # cannot be undone.
+  if [[ -f "$ABORT_SENTINEL" ]]; then
+    log "ERROR refusing to upload anything from ${ADMIN_DIR}: ${ABORT_SENTINEL} exists, so the archive run was killed -- $(tr '\n' ' ' <"$ABORT_SENTINEL" | cut -c1-200). da-backup-batch will remove the partial archive."
+    return 1
+  fi
 
   local rc=0
   admin_list="$(mktemp)" || {
@@ -283,6 +345,43 @@ upload_admin() {
   if ((admin_count == 0)); then
     log "skip admin: no files under ${ADMIN_DIR}"
     return 0
+  fi
+
+  # Drop unreadable archives from the list rather than failing the whole run on them. The
+  # list is what gets uploaded, verified and deleted, so a file removed from it here is
+  # left on disk untouched -- and the eleven good archives beside it still reach S3, which
+  # is the difference between one lost account and a night with no backups at all.
+  if ((VERIFY_ARCHIVES == 1)); then
+    local good_list f verified=0
+    good_list="$(mktemp)" || {
+      log "ERROR could not create temp file for the verified upload list"
+      return 1
+    }
+    while IFS= read -r f; do
+      [[ -n "$f" ]] || continue
+      if archive_is_whole "${ADMIN_DIR}/${f}"; then
+        printf '%s\n' "$f" >>"$good_list"
+        verified=$((verified + 1))
+      else
+        log "ERROR ${ADMIN_DIR}/${f} could not be read to the end, so it is incomplete; NOT uploading it and NOT deleting it"
+        damaged_archives+=("${ADMIN_DIR}/${f} ($(du -h -- "${ADMIN_DIR}/${f}" 2>/dev/null | cut -f1)) -- truncated or unreadable")
+      fi
+    done <"$admin_list"
+
+    if ((${#damaged_archives[@]} > 0)); then
+      log "read ${admin_count} archive(s): ${verified} complete, ${#damaged_archives[@]} incomplete"
+    fi
+    mv -f "$good_list" "$admin_list" 2>/dev/null || {
+      log "ERROR could not install the verified upload list; keeping local copies"
+      rm -f "$good_list"
+      return 1
+    }
+    admin_count="$verified"
+
+    if ((admin_count == 0)); then
+      log "ERROR nothing under ${ADMIN_DIR} is a complete archive; nothing was uploaded"
+      return 1
+    fi
   fi
 
   log "upload ${ADMIN_DIR} (${admin_count} files, $(size_of "$ADMIN_DIR")) -> ${DEST}"
@@ -575,7 +674,7 @@ used_pct="$(disk_used_pct "$SYSTEM_ROOT")"
 used_pct="${used_pct:-0}"
 log "finished (${SYSTEM_ROOT}: $(disk_summary "$SYSTEM_ROOT"))"
 
-if ((${#failures[@]} > 0)) || ((${#cleanup_failures[@]} > 0)); then
+if ((${#failures[@]} > 0)) || ((${#cleanup_failures[@]} > 0)) || ((${#damaged_archives[@]} > 0)); then
   # Both kinds of failure leave backups on local disk, which is the condition that ends in
   # a full volume, so both mail. They are listed separately because the remedies differ:
   # an upload retries on the next run, whereas a verified-but-undeletable copy needs a
@@ -597,6 +696,20 @@ $(printf '  - %s\n' "${failures[@]}")
     fi
     detail+="Uploaded and verified in S3, but the local copy could NOT be removed. These are safe to delete by hand; find out what blocked the delete (read-only filesystem, chattr +i, I/O error):
 $(printf '  - %s\n' "${cleanup_failures[@]}")
+"
+  fi
+  if ((${#damaged_archives[@]} > 0)); then
+    log "ERROR ${#damaged_archives[@]} archive(s) could not be read to the end and were not uploaded"
+    if ((${#failures[@]} == 0 && ${#cleanup_failures[@]} == 0)); then
+      subject_what="archive verification"
+    fi
+    detail+="Could NOT be read from end to end, so they are incomplete. They were neither uploaded nor deleted -- an account whose archive is truncated has no backup, and a truncated archive in S3 under a name that looks complete is worse than an obviously missing one:
+$(printf '  - %s\n' "${damaged_archives[@]}")
+
+Usual cause is the archive run being killed part way through, by the free-space floor in
+da-backup-batch or by anything else that stopped tar or zstd. Read
+/var/log/da-backup-batch.log for what stopped it, delete these once you have, and confirm
+S3 does not already hold an earlier truncated copy of the same account.
 "
   fi
   alert "DirectAdmin backup ${subject_what} FAILED on ${HOST} (disk ${used_pct}% used)" \

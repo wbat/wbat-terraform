@@ -211,35 +211,87 @@ changes that — the provider would then treat the declared set as the complete
 set and revoke every rule you did not write down, including 80, 443 and 22.
 That is an immediate outage for all sites on the box.
 
-So express the restriction as its own resource, which does not take over the
-rest of the group:
+So the restriction is expressed as its own resources, which do not take over
+the rest of the group. That is already written, in
+[aws/us-east-1/sg/da-panel.tf](../us-east-1/sg/da-panel.tf), covering three
+kinds of source:
+
+| Source | How it is expressed | Why |
+|--------|--------------------|-----|
+| Your own addresses | `var.da_panel_allowed_cidrs`, a `label => CIDR` map | The only human path once 2222 is closed |
+| `server.wbat.net`, `server2.wbat.net` | The managed EIPs, `/32` each | A panel connection made *by hostname* between the two boxes resolves to the public address, leaves through the internet gateway, and arrives from the EIP — not the private address |
+| Either instance over the private path | A security-group self-reference | Survives a private-IP change, which this estate has already had once |
+
+### Setting your addresses
+
+`da_panel_allowed_cidrs` is declared in
+[aws/credentials.tf](../credentials.tf) with an empty default, and the real
+value belongs in a **Terraform Cloud workspace variable**, not in a commit.
+This repository is public and a residential address is personal data:
 
 ```hcl
-# aws/us-east-1/sg/default.tf
-resource "aws_vpc_security_group_ingress_rule" "da_panel" {
-  security_group_id = aws_security_group.default.id
-  description       = "DirectAdmin panel, restricted to known operator addresses"
-  ip_protocol       = "tcp"
-  from_port         = 2222
-  to_port           = 2222
-  cidr_ipv4         = var.operator_cidr
-}
+# HCP Terraform → workspace wbat-terraform-aws → Variables
+da_panel_allowed_cidrs = { home = "203.0.113.10/32" }
 ```
 
-Removing the existing world-open 2222 rule is a separate step: that rule is not
-in state, so `terraform` will not delete it. Either import it and delete it in a
-follow-up apply, or revoke it once and let the managed rule above be the only
-one. Check what is there first, and confirm the plan touches nothing else:
+The empty default is load-bearing. With no entries, no operator rule is
+created and nothing changes, so a missing variable cannot lock anyone out by
+omission.
+
+### The order that avoids locking yourself out
+
+Adding these rules **does not close 2222**. The existing `0.0.0.0/0` rule was
+created outside Terraform and is not in state, so no apply will remove it. That
+is convenient here: it means the new rules can be applied and *verified* while
+the old one is still holding the door open.
+
+1. **Set the variable and apply.** 2222 is now reachable both from the world
+   and from your allowlist. Effective access is unchanged, so this step cannot
+   break anything.
+
+2. **Check Terraform's view matches your intent**, using the output added for
+   this purpose:
 
 ```bash
-# Inspect what is currently allowed to 2222
-aws ec2 describe-security-groups --profile wbat --region us-east-1 \
-  --query "SecurityGroups[].IpPermissions[?FromPort==\`2222\`].[IpRanges[].CidrIp]" --output text
+terraform output da_panel_allowed_sources
 ```
 
-Use your fixed addresses for `operator_cidr`. If your address is dynamic,
-prefer reaching the panel through an SSM port-forward, which needs no ingress
-at all:
+3. **Prove the new rule is the one letting you in.** While both rules exist you
+   cannot tell them apart from a browser, so confirm the rule exists in AWS with
+   your address on it:
+
+```bash
+aws ec2 describe-security-groups --profile wbat --region us-east-1 \
+  --group-ids sg-0e674f4e2937c6392 \
+  --query "SecurityGroups[].IpPermissions[?FromPort==\`2222\`].[IpRanges[].[CidrIp,Description]]" \
+  --output text
+```
+
+4. **Then revoke the world-open rule**, and keep the command that puts it back
+   in your shell history before you run it:
+
+```bash
+# Undo, if you lock yourself out and want the old behaviour back immediately:
+#   aws ec2 authorize-security-group-ingress --profile wbat --region us-east-1 \
+#     --group-id sg-0e674f4e2937c6392 --protocol tcp --port 2222 --cidr 0.0.0.0/0
+aws ec2 revoke-security-group-ingress --profile wbat --region us-east-1 \
+  --group-id sg-0e674f4e2937c6392 --protocol tcp --port 2222 --cidr 0.0.0.0/0
+```
+
+5. **Load the panel from your allowed address, and from a phone on cellular.**
+   The first must work, the second must not.
+
+Do not import the world-open rule into Terraform just to delete it. Import then
+destroy is two applies where a revoke is one command, and the rule is
+`0.0.0.0/0` — there is nothing worth preserving in state.
+
+### When your address changes
+
+A residential address is dynamic, so plan for this rather than being surprised
+by it. In order of preference:
+
+- **SSM port-forward**, which needs no ingress at all and is unaffected by any
+  of the above:
 
 ```bash
 aws ssm start-session --profile wbat --region us-east-1 --target <instance-id> \
@@ -247,6 +299,27 @@ aws ssm start-session --profile wbat --region us-east-1 --target <instance-id> \
   --parameters '{"portNumber":["2222"],"localPortNumber":["2222"]}'
 # then browse https://localhost:2222
 ```
+
+- **Update the workspace variable and apply.** No PR needed, since the value
+  lives in HCP Terraform rather than in the repository.
+- **Add the address temporarily by hand**, then reconcile into the variable.
+  Anything added this way is invisible to Terraform and will outlive its
+  usefulness, so treat it as a stopgap.
+
+### Before you revoke: what else talks to 2222?
+
+Nothing on the box needs it — DirectAdmin's own outbound calls for licensing
+and updates are not ingress. What does break is anything *external* that drives
+the DirectAdmin **API** on 2222, because the API and the panel share the port:
+
+- billing or provisioning systems (WHMCS and similar) that create accounts
+- off-box backup or migration tooling
+- uptime monitors probing 2222, which will start alerting
+
+This estate hosts a `billing.` hostname, so confirm where it runs before you
+revoke. If it is on this box it uses localhost and is unaffected; if it is
+elsewhere, add its address to the allowlist in step 1 or it will fail silently
+at the next provisioning event.
 
 That is the better end state: 2222 closed to the internet entirely, reachable
 only to an authenticated AWS principal.

@@ -265,8 +265,22 @@ it never leaves a verified copy on disk. Age is not treated as evidence that a b
 safe to delete — even the old-directory sweep checks S3 first, because on the primary the
 directories it would have swept were the only copy. See
 [`aws/docs/2026-09-06-primary-outage.md`](../../aws/docs/2026-09-06-primary-outage.md) for
-what was actually broken on that host, and `prove_backup_cleanup.sh` for the seventeen
+what was actually broken on that host, and `prove_backup_cleanup.sh` for the nineteen
 behaviours that are now pinned.
+
+"Verified in S3" used to mean `rclone check --checksum` agreed with the local file, which
+says nothing about whether that file is a whole archive. On 2026-09-07 it agreed about a
+20 GiB `.tar.zst` whose compressor had been killed mid-stream, and the hook logged `OK
+admin upload verified in S3` and deleted the local copy; reading it back gives `zstd:
+premature end`. So each archive is now decompressed to `/dev/null` and its tar listed
+before it is uploaded (`DA_BACKUP_VERIFY_ARCHIVES=0` turns that off). This costs a full
+read of every archive and needs a decompressor for the format — without `zstd` installed
+the check silently passes, which is why the proof suite refuses to run without it. An
+archive that cannot be read is dropped from the upload list rather than failing the run,
+so one bad archive does not cost the other accounts their backup; it is left on disk,
+named in the alert, and the run exits non-zero. The hook also refuses to upload anything at
+all while `DA_BACKUP_ABORT_SENTINEL` (default `/run/da-backup-abort`) exists — see
+`da_backup_batch.sh` below for why that ordering matters.
 
 `system_backup_post.sh` execs `all_backups_post.sh --event=system`, and that flag is load
 bearing. The two DirectAdmin events run the same script, so without it a run cannot tell
@@ -283,6 +297,84 @@ Alerting: a run that ends with backups still on disk mails `HEALTH_ALERT_TO` fro
 `/etc/da-vhost-listen/vhost-listen.conf` — the same address the vhost tooling uses, so
 there is one per host rather than two that can disagree. There is no cooldown: backups run
 days apart, so every failed run gets its own mail.
+
+`da_backup_batch.sh` is what actually starts admin backups now, because DirectAdmin's own
+schedule cannot. DirectAdmin archives every account before the hook above gets a chance to
+upload anything, so it needs the whole set staged locally at once — 66 GiB at the last full
+run in July 2026, on a volume that has had less than that free ever since. Every nightly
+run from then until 2026-09-07 logged `Running Backup` and produced no file, with nothing
+saying so. The engine is fine; a single-account run finishes in seconds and the hook clears
+it. It is the all-at-once staging that does not fit.
+
+So this driver invokes `admin-backup --user=` one account at a time, smallest first, and
+refuses to start the next until the hook has confirmed the previous archive is in S3 and
+gone from disk. Peak local usage becomes the largest single account rather than the sum.
+Two guards, because the estimate is the part most likely to be wrong: a pre-flight check
+that the estimated peak plus `DA_BATCH_RESERVE_GB` fits in the free space that exists right
+now, and a watchdog that kills the backup if free space crosses `DA_BATCH_FLOOR_GB`
+mid-run. An account that never fits is skipped and mailed rather than attempted, because an
+account with no backup is worth saying out loud.
+
+The peak is the estimated archive taken `DA_BATCH_PEAK_COPIES_PCT` over, not the archive
+itself, because DirectAdmin needs room for two copies. It assembles the account under
+`<destination>/<user>/` — `backup/home.tar.zst`, then a `.sql` per database, then the
+config files — and only then tars all of that into the final archive *in the same
+directory*, so both exist at once. Measured on the primary: `wbatnet`, 10.50 GiB home,
+6.72 GiB archive, 12.69 GiB peak. Comparing one archive against free space is what let the
+first real run start `tellerstec` and hit the floor on it.
+
+Killing the compressor is not enough on its own, either. DirectAdmin runs
+`all_backups_post.sh` itself, from inside the `admin-backup` invocation, **including when
+the archive step failed** — so the hook empties the staging directory before this script
+gets control back, and on 2026-09-07 that is how a 20 GiB fragment reached S3, checksummed,
+logged as verified, and deleted locally. Deleting the partial afterwards cannot fix an
+ordering; the watchdog therefore writes `DA_BATCH_ABORT_SENTINEL` *before* it signals
+anything, and the hook checks that file before it touches a thing. The two halves must be
+installed together, and the script refuses to start if it cannot write the sentinel.
+
+Every account run is also bounded by `DA_BATCH_ACCOUNT_TIMEOUT`. The floor only fires when
+the volume is being consumed, and a backup can hang at constant free space — an `rclone`
+inside the hook that stops making progress, DirectAdmin blocked on a database lock. A run
+stuck there holds the batch lock, so every cron invocation after it exits quietly on the
+lock and account backups stop for good with nothing mailing. Past the limit the process
+group is terminated, the archive it left is deleted, and the run reports itself
+incomplete.
+
+The lock branch itself is the other half of that. A run that finds the lock taken still
+exits quietly, which is the right answer to two runs overlapping by minutes and the wrong
+one to a holder that never lets go — nothing else in the script runs, so the daily
+schedule would report success every night while no account was backed up. The holder
+records its start time in `${LOCK}.started`, and a run that finds one older than
+`DA_BATCH_STALE_LOCK_SEC` mails instead of skipping.
+
+A run that selects **no** account is a failure, not a run with nothing to do. The backup
+loop reads from a generator, so an empty selection is a loop body that never executes, and
+the summary would then find nothing failed and nothing skipped and exit 0 — a report of
+success for a night on which nothing was backed up. A typo in `--user=` exits 2 naming the
+account and what does exist; a users directory that has moved, been renamed, or is
+unreadable to the user cron runs this as exits 1 and mails, because that one is silent and
+hits every account at once.
+
+```bash
+/usr/local/sbin/da-backup-batch.sh --list      # accounts, sizes, what fits right now
+/usr/local/sbin/da-backup-batch.sh --dry-run   # plan without invoking DirectAdmin
+/usr/local/sbin/da-backup-batch.sh --user=teller
+```
+
+Once it is installed, delete DirectAdmin's own schedule at **Admin Level → Admin
+Backup/Transfer → Schedule**, or the two race at 05:00.
+
+| Threshold | Default | Override |
+|---|---|---|
+| Reserve left free after the estimated peak | 10 GB | `DA_BATCH_RESERVE_GB` |
+| Hard floor that kills a running backup | 8 GB | `DA_BATCH_FLOOR_GB` |
+| Estimated archive as a % of the home directory | 100% | `DA_BATCH_RATIO_PCT` |
+| Peak disk as a % of that archive | 200% | `DA_BATCH_PEAK_COPIES_PCT` |
+| Wait for the hook to clear the staging dir | 1800s | `DA_BATCH_DRAIN_TIMEOUT` |
+| Hard limit on one account's archive run | 21600s | `DA_BATCH_ACCOUNT_TIMEOUT` |
+| Grace between TERM and KILL when stopping one | 60s | `DA_BATCH_KILL_GRACE` |
+| Lock age at which a holder is reported, not skipped | 86400s | `DA_BATCH_STALE_LOCK_SEC` |
+| File that tells the hook a run was killed | `/run/da-backup-abort` | `DA_BATCH_ABORT_SENTINEL` |
 
 `da_disk_guard.sh` is the separate hourly watch for the host's resources. Nothing else in
 the account monitors disk or memory (the only CloudWatch alarms are on billing, and the
@@ -309,6 +401,8 @@ because commit hit 118% of RAM+swap while `%memused` still read a survivable 82%
 | `system_backup_post.sh` | `/usr/local/directadmin/scripts/custom/system_backup_post.sh` (mode 700) |
 | `da_disk_guard.sh` | `/usr/local/sbin/da-disk-guard.sh` |
 | `cron.d-da-disk-guard` | `/etc/cron.d/da-disk-guard` (mode 644) |
+| `da_backup_batch.sh` | `/usr/local/sbin/da-backup-batch.sh` |
+| `cron.d-da-backup-batch` | `/etc/cron.d/da-backup-batch` (mode 644) |
 | `logrotate.d-da-ops` | `/etc/logrotate.d/da-ops` (mode 644) |
 
 ## Install / update backup hooks
@@ -352,6 +446,7 @@ df -h /
 
 ```bash
 ./scripts/directadmin/prove_backup_cleanup.sh
+./scripts/directadmin/prove_backup_batch.sh
 ```
 
 Runs the real hook against a stubbed rclone and mail in a temp sandbox, asserting both

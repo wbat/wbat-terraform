@@ -1,0 +1,20 @@
+# Per-account DirectAdmin admin backups.
+# Install: copy to /etc/cron.d/da-backup-batch (mode 644).
+#
+# DirectAdmin's own scheduled admin backup stages every account before the upload hook
+# runs, which needs 66+ GiB of free space on a volume that has not had it since July 2026.
+# It has been failing silently every night since. This entry replaces it with a run that
+# archives one account at a time and lets the hook clear each one before the next starts.
+#
+# 01:00 leaves the whole run finished well before the oncallbrief pipeline at 03:45 and
+# the weekly system backup at 05:00 on Saturdays -- none of the three should be competing
+# for disk or for the backup lock. Cron mail is suppressed because the script's own
+# alerting is the single notification path; a run that ends incomplete mails
+# HEALTH_ALERT_TO with which accounts have no backup.
+#
+# Once this is running, delete DirectAdmin's own schedule at
+# Admin Level -> Admin Backup/Transfer -> Schedule, or the two will race at 05:00.
+SHELL=/bin/bash
+PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin
+
+0 1 * * * root /usr/local/sbin/da-backup-batch.sh >/dev/null 2>&1

@@ -41,6 +41,18 @@ if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
   exit 1
 fi
 
+# The hook reads each archive to the end before uploading it, and it skips that check for
+# formats it has no decompressor for. Without zstd installed, every .tar.zst fixture here
+# would be waved through unread and the proofs about incomplete archives would pass
+# without testing anything -- on a host where zstd is exactly what DirectAdmin uses.
+for tool in tar gzip zstd truncate; do
+  command -v "$tool" >/dev/null 2>&1 || {
+    echo "ERROR: ${tool} is required. The archive-integrity proofs need to build real" >&2
+    echo "       archives and damage them; without it they would silently test nothing." >&2
+    exit 1
+  }
+done
+
 SANDBOX="$(mktemp -d)"
 # Proof 9 drops the write bit on a directory to make rm fail, and rm -rf cannot remove a
 # file from a directory it cannot write to either. Restore permissions first so a failing
@@ -151,6 +163,8 @@ run_hook() {
     DA_BACKUP_CONF="${SANDBOX}/backup.conf" \
     DA_BACKUP_ALERT_USED_PCT="${DA_BACKUP_ALERT_USED_PCT:-101}" \
     DA_BACKUP_EVENT="${DA_BACKUP_EVENT:-system}" \
+    DA_BACKUP_ABORT_SENTINEL="${STUB_ABORT_SENTINEL:-${case_dir}/no-abort-sentinel}" \
+    DA_BACKUP_VERIFY_ARCHIVES="${DA_BACKUP_VERIFY_ARCHIVES:-1}" \
     "$HOOK" >"${case_dir}/stderr" 2>&1
   HOOK_RC=$?
   set -e
@@ -161,7 +175,32 @@ fail() {
   exit 1
 }
 
-make_admin_archive() { dd if=/dev/zero of="${ADMIN_DIR}/$1" bs=1k count=64 status=none; }
+# A real archive, not 64 KB of zeros.
+#
+# The hook now reads every archive to the end before uploading it, because on 2026-09-07
+# it uploaded a 20 GiB archive whose compressor had been killed mid-stream, checksummed it
+# against S3, called it verified and deleted the local copy. A fixture that is not a
+# readable archive would now be refused -- correctly -- and every proof about upload and
+# cleanup would fail for a reason that has nothing to do with what it is testing.
+make_admin_archive() {
+  local name="$1" work
+  work="$(mktemp -d)"
+  dd if=/dev/zero of="${work}/payload" bs=1k count=64 status=none
+  case "$name" in
+    *.tar.zst) tar -cf - -C "$work" payload | zstd -q -o "${ADMIN_DIR}/${name}" ;;
+    *.tar.gz) tar -czf "${ADMIN_DIR}/${name}" -C "$work" payload ;;
+    *) tar -cf "${ADMIN_DIR}/${name}" -C "$work" payload ;;
+  esac
+  rm -rf "$work"
+}
+
+# Same name, same size, but stops part way through: what a killed compressor leaves.
+make_truncated_admin_archive() {
+  local name="$1" full
+  make_admin_archive "$name"
+  full="${ADMIN_DIR}/${name}"
+  truncate -s "$(($(stat -c %s "$full") * 2 / 3))" "$full"
+}
 make_system_dir() {
   mkdir -p "${SYSTEM_ROOT}/$1/mysql"
   dd if=/dev/zero of="${SYSTEM_ROOT}/$1/mysql/db.sql.gz" bs=1k count=64 status=none
@@ -237,14 +276,16 @@ echo "== Proof 4: one failing upload must not block the other unit's cleanup =="
 fixture_4() {
   make_admin_archive user1.tar.zst
   # No system dir at all, so the system upload path is skipped rather than failed;
-  # a stray non-archive file proves cleanup is driven by the verified list, not a glob.
-  : >"${ADMIN_DIR}/partial-backup.tar"
+  # a differently-named archive proves cleanup is driven by the verified list, not a glob
+  # over .tar.zst and .tar.gz. It has to be a whole archive, because an unreadable one is
+  # now held back on purpose and would pass this proof for the wrong reason.
+  make_admin_archive legacy-name.tar
 }
 run_hook case4 fixture_4
 
 [[ ! -f "${SANDBOX}/case4/admin_backups/user1.tar.zst" ]] \
   || fail "verified admin archive left on disk"
-[[ ! -f "${SANDBOX}/case4/admin_backups/partial-backup.tar" ]] \
+[[ ! -f "${SANDBOX}/case4/admin_backups/legacy-name.tar" ]] \
   || fail "stray .tar left behind: the old name-based cleanup only matched .tar.zst/.tar.gz"
 ((HOOK_RC == 0)) || fail "hook failed on a healthy admin-only run (rc=${HOOK_RC})"
 echo "OK admin cleanup is independent, and covers files the old globs missed"
@@ -720,6 +761,76 @@ grep -q 'local-only backup' "${CASE21}/da-backup-s3.log" \
   && fail "a backup that is in S3 must not be reported as local-only:"$'\n'"$(cat "${CASE21}/da-backup-s3.log")"
 ((HOOK_RC == 0)) || fail "reclaiming a verified backup is a clean run (rc=${HOOK_RC})"
 echo "OK the sweep verifies against the recorded destination, not the name"
+
+##############################################################################
+echo "== Proof 18: an archive that cannot be read to the end must not reach S3 =="
+##############################################################################
+# 2026-09-07. The batch run's free-space watchdog killed the compressor part way through
+# tellerstec's archive. DirectAdmin responded by running this hook, which uploaded the
+# 20 GiB fragment, asked rclone to confirm S3 held the same bytes -- it did -- logged
+# "OK admin upload verified in S3", and deleted the local copy. The result was worse than
+# the missing backup it replaced: S3 held a truncated archive under exactly the name a
+# complete one would have had, and nothing anywhere said so. Streaming it back afterwards
+# ends in "zstd: premature end" and "tar: Unexpected EOF in archive".
+#
+# A checksum cannot catch that, because the bytes match. The only check that answers the
+# question is reading the archive.
+CASE18="${SANDBOX}/case18"
+fixture_18() {
+  make_admin_archive good.tar.zst
+  make_truncated_admin_archive cut-short.tar.zst
+}
+run_hook case18 fixture_18
+
+grep -q 'could not be read to the end' "${CASE18}/da-backup-s3.log" \
+  || fail "the hook did not notice a truncated archive:"$'\n'"$(cat "${CASE18}/da-backup-s3.log")"
+grep -q 'cut-short.tar.zst' "${CASE18}/rclone.calls" \
+  && fail "a truncated archive was handed to rclone"
+[[ -f "${CASE18}/admin_backups/cut-short.tar.zst" ]] \
+  || fail "the truncated archive was deleted; it is not this hook's call to destroy the only copy"
+# The whole point of filtering the list rather than failing the run: one bad archive must
+# not cost the other thirteen accounts their backup.
+grep -q 'good.tar.zst' "${CASE18}/rclone.calls" \
+  || fail "the complete archive beside it was not uploaded"
+[[ ! -f "${CASE18}/admin_backups/good.tar.zst" ]] \
+  || fail "the complete archive was uploaded but not cleaned up"
+((HOOK_RC != 0)) || fail "a truncated archive must fail the run, not pass quietly"
+grep -q 'cut-short.tar.zst' "${STUB_MAIL}" \
+  || fail "the incomplete archive was not named in the alert"
+grep -qi 'truncated or unreadable' "${STUB_MAIL}" \
+  || fail "the alert does not say what is wrong with it"
+echo "OK an incomplete archive is held back and reported, and the good ones still go"
+
+##############################################################################
+echo "== Proof 19: a killed archive run must stop this hook before it uploads =="
+##############################################################################
+# The ordering that made proof 18's failure possible in the first place. DirectAdmin runs
+# this hook from inside the admin-backup invocation, including when the archive step
+# failed, so the hook reaches the wreckage before da_backup_batch.sh -- which is the
+# process that killed it -- gets control back and can delete it. Reading the archive
+# (proof 18) catches most of that, but it costs a full pass over every file and it cannot
+# help with a fragment that happens to end on a frame boundary. So the watchdog leaves a
+# sentinel before it signals, and this hook checks it first and touches nothing.
+CASE19="${SANDBOX}/case19"
+fixture_19() {
+  # Complete and readable on purpose: the sentinel has to be enough on its own, without
+  # help from the integrity check.
+  make_admin_archive whole-but-unwanted.tar.zst
+  echo "tellerstec killed 2026-09-07T22:49:29-04:00: floor 8388608" >"${SANDBOX}/case19-sentinel"
+}
+STUB_ABORT_SENTINEL="${SANDBOX}/case19-sentinel" run_hook case19 fixture_19
+unset STUB_ABORT_SENTINEL
+
+grep -q 'refusing to upload' "${CASE19}/da-backup-s3.log" \
+  || fail "the hook uploaded from a staging directory a killed run had disowned:"$'\n'"$(cat "${CASE19}/da-backup-s3.log")"
+grep -q 'tellerstec' "${CASE19}/da-backup-s3.log" \
+  || fail "the log does not say which account, or why, so the sentinel told nobody anything"
+[[ ! -s "${CASE19}/rclone.calls" ]] \
+  || fail "rclone was called despite the abort sentinel:"$'\n'"$(cat "${CASE19}/rclone.calls")"
+[[ -f "${CASE19}/admin_backups/whole-but-unwanted.tar.zst" ]] \
+  || fail "the hook deleted an archive it never uploaded"
+((HOOK_RC != 0)) || fail "a refused upload must fail the run so it is not read as a clean night"
+echo "OK a sentinel from a killed run stops the upload before rclone is reached"
 
 echo
 echo "PASS: offline backup cleanup proofs"
