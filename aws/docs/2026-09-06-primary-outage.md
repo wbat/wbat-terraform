@@ -1006,19 +1006,69 @@ needs more space than the volume has, and
 would drive it to 100% before the hook ever gets to upload anything — the outage this
 document exists to prevent.
 
-So do not schedule a full local run on this volume. Pick one of:
+So do not schedule a full local run on this volume. Three ways out were considered:
 
-- **Batch it.** Repeated `--user=` runs, a few accounts at a time, letting the hook upload
-  and clear each batch before the next. Peak usage becomes the largest batch.
+- **Batch it.** Repeated `--user=` runs, one account at a time, letting the hook upload
+  and clear each before the next. Peak usage becomes the largest single account.
 - **Move the upload per-user.** DirectAdmin's `user_backup_post.sh` hook fires after each
-  account, so each archive is uploaded and deleted as it is produced. Peak usage becomes
-  the largest single account — 43.4 GB for `teller` at the last measurement, still large
-  but survivable. This is the better answer if `teller` keeps growing.
+  account, so each archive is uploaded and deleted as it is produced. Same peak as
+  batching, but it changes which hook owns the upload and therefore reopens every
+  data-loss question `all_backups_post.sh` already answers.
 - **Give it somewhere else to write.** A separate EBS volume mounted at
-  `/home/admin_backups` decouples backup staging from the root filesystem entirely.
+  `/home/admin_backups` decouples staging from the root filesystem, at ongoing cost, and
+  does nothing about an account that outgrows the new volume either.
 
-None of these are implemented. Until one is, the daily job failing is arguably protecting
-the host.
+**Batching is what was built** — see the next section. It reuses the existing hook
+unchanged, so none of the verified-before-delete work has to be re-established, and it
+needs no new infrastructure.
+
+## Per-account backups: da_backup_batch.sh
+
+[`da_backup_batch.sh`](../../scripts/directadmin/da_backup_batch.sh) replaces
+DirectAdmin's own schedule with a run that archives one account at a time and waits for
+`all_backups_post.sh` to upload and clear each one before starting the next. Peak local
+usage becomes the largest single account instead of the sum of all fourteen.
+
+The premise was checked before anything was built. On 2026-09-07,
+`directadmin admin-backup --destination=/home/admin_backups --user=test2` completed in
+2.4 seconds, produced `user.wbatnet.test2.tar.zst`, and the hook uploaded it, verified it
+against S3 and deleted the local copy — the entire chain, unmodified, in three seconds.
+The engine is not broken. Only the all-at-once staging is.
+
+Two guards, because the size estimate is the part most likely to be wrong:
+
+- **Before** each account, its estimated archive plus a 10 GB reserve must fit in the free
+  space that exists at that moment. The estimate is 100% of the account's home directory,
+  which is deliberately pessimistic — July compressed 114 GB of homes into 66 GiB, about
+  58% — because overestimating skips an account and underestimating fills the volume.
+- **During** each account, a watchdog samples free space and kills the backup if it
+  crosses an 8 GB floor. An estimate from `du` cannot know about a database that grew or a
+  compression ratio that got worse; the floor does not need to know why. The partial
+  archive is deleted rather than left behind, because the hook would otherwise upload a
+  truncated file and record it as a successful backup. The same floor is checked before
+  starting, so a volume that is already below it produces a skip that says so rather than
+  a backup that is launched and killed a second later.
+
+Accounts run smallest first, so a failure on `teller` — the one account most likely not to
+fit — leaves the other thirteen already safe in S3 rather than never attempted. A run that
+skips or fails anything exits non-zero and mails `HEALTH_ALERT_TO` naming the accounts
+that now have no backup.
+
+```bash
+/usr/local/sbin/da-backup-batch.sh --list      # sizes, and what fits right now
+/usr/local/sbin/da-backup-batch.sh --dry-run
+/usr/local/sbin/da-backup-batch.sh --user=teller
+```
+
+`/etc/cron.d/da-backup-batch` runs it daily at 01:00 — clear of the oncallbrief pipeline
+at 03:45 and the weekly system backup at 05:00. **DirectAdmin's own schedule must be
+deleted** at Admin Level → Admin Backup/Transfer → Schedule, or the two race at 05:00.
+
+[`prove_backup_batch.sh`](../../scripts/directadmin/prove_backup_batch.sh) pins the
+behaviour offline against a stubbed DirectAdmin, `df` and `mail`: ordering, the headroom
+gate, the reserve, refusing to start on a dirty staging directory, waiting for the drain,
+the floor kill and its partial cleanup. Three non-vacuity checks remove each guard in turn
+and confirm the matching proof then fails.
 
 ### 2. Find out what `Not implemented` refers to (CLI)
 
@@ -1166,10 +1216,10 @@ merely producing incomplete archives — it is not creating a file at all, and t
 had nothing to fire on since July. Nothing alerts on this: DirectAdmin logged no error,
 raised no ticket, and the daily failure is invisible from the panel.
 
-Do not simply re-enable or recreate the job. As the arithmetic in step 1 now shows, a
+Do not simply re-enable or recreate the job. As the arithmetic in step 1 shows, a
 successful full run needs 66+ GiB of local staging against 60 GB free, so "fixing" the
-trigger without first changing where the archives are written would fill the volume at
-05:00 the next morning.
+trigger on its own would fill the volume at 05:00 the next morning. `da_backup_batch.sh`
+above is the replacement; DirectAdmin's schedule should be deleted rather than repaired.
 
 **`/backup` is empty again, and 7.4 GB came back.** `09-05-26` and `08-29-26` were the
 last two directories left there. Both were verified against S3 with

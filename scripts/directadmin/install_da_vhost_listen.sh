@@ -78,6 +78,8 @@ MANAGED=(
   "system_backup_post.sh|${DA_CUSTOM_DIR}/system_backup_post.sh|700"
   "da_disk_guard.sh|${SBIN_DIR}/da-disk-guard.sh|755"
   "cron.d-da-disk-guard|${CRON_DIR}/da-disk-guard|644"
+  "da_backup_batch.sh|${SBIN_DIR}/da-backup-batch.sh|755"
+  "cron.d-da-backup-batch|${CRON_DIR}/da-backup-batch|644"
   "logrotate.d-da-ops|${LOGROTATE_DIR}/da-ops|644"
 )
 

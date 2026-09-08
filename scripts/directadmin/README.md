@@ -284,6 +284,40 @@ Alerting: a run that ends with backups still on disk mails `HEALTH_ALERT_TO` fro
 there is one per host rather than two that can disagree. There is no cooldown: backups run
 days apart, so every failed run gets its own mail.
 
+`da_backup_batch.sh` is what actually starts admin backups now, because DirectAdmin's own
+schedule cannot. DirectAdmin archives every account before the hook above gets a chance to
+upload anything, so it needs the whole set staged locally at once — 66 GiB at the last full
+run in July 2026, on a volume that has had less than that free ever since. Every nightly
+run from then until 2026-09-07 logged `Running Backup` and produced no file, with nothing
+saying so. The engine is fine; a single-account run finishes in seconds and the hook clears
+it. It is the all-at-once staging that does not fit.
+
+So this driver invokes `admin-backup --user=` one account at a time, smallest first, and
+refuses to start the next until the hook has confirmed the previous archive is in S3 and
+gone from disk. Peak local usage becomes the largest single account rather than the sum.
+Two guards, because the estimate is the part most likely to be wrong: a pre-flight check
+that the estimated archive plus `DA_BATCH_RESERVE_GB` fits in the free space that exists
+right now, and a watchdog that kills the backup — and deletes the partial archive, so the
+hook cannot upload a truncated one — if free space crosses `DA_BATCH_FLOOR_GB` mid-run. An
+account that never fits is skipped and mailed rather than attempted, because an account
+with no backup is worth saying out loud.
+
+```bash
+/usr/local/sbin/da-backup-batch.sh --list      # accounts, sizes, what fits right now
+/usr/local/sbin/da-backup-batch.sh --dry-run   # plan without invoking DirectAdmin
+/usr/local/sbin/da-backup-batch.sh --user=teller
+```
+
+Once it is installed, delete DirectAdmin's own schedule at **Admin Level → Admin
+Backup/Transfer → Schedule**, or the two race at 05:00.
+
+| Threshold | Default | Override |
+|---|---|---|
+| Reserve left free after the estimate | 10 GB | `DA_BATCH_RESERVE_GB` |
+| Hard floor that kills a running backup | 8 GB | `DA_BATCH_FLOOR_GB` |
+| Estimated archive as a % of the home directory | 100% | `DA_BATCH_RATIO_PCT` |
+| Wait for the hook to clear the staging dir | 1800s | `DA_BATCH_DRAIN_TIMEOUT` |
+
 `da_disk_guard.sh` is the separate hourly watch for the host's resources. Nothing else in
 the account monitors disk or memory (the only CloudWatch alarms are on billing, and the
 CloudWatch agent is not installed), so without it a filling volume or a nightly memory
@@ -309,6 +343,8 @@ because commit hit 118% of RAM+swap while `%memused` still read a survivable 82%
 | `system_backup_post.sh` | `/usr/local/directadmin/scripts/custom/system_backup_post.sh` (mode 700) |
 | `da_disk_guard.sh` | `/usr/local/sbin/da-disk-guard.sh` |
 | `cron.d-da-disk-guard` | `/etc/cron.d/da-disk-guard` (mode 644) |
+| `da_backup_batch.sh` | `/usr/local/sbin/da-backup-batch.sh` |
+| `cron.d-da-backup-batch` | `/etc/cron.d/da-backup-batch` (mode 644) |
 | `logrotate.d-da-ops` | `/etc/logrotate.d/da-ops` (mode 644) |
 
 ## Install / update backup hooks
@@ -352,6 +388,7 @@ df -h /
 
 ```bash
 ./scripts/directadmin/prove_backup_cleanup.sh
+./scripts/directadmin/prove_backup_batch.sh
 ```
 
 Runs the real hook against a stubbed rclone and mail in a temp sandbox, asserting both
