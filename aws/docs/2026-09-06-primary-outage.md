@@ -1211,6 +1211,20 @@ an entry escaping the home by `..` and by symlink, a symlink to a tree inside th
 all three answers DirectAdmin can give about `allow_backup_exclude_path`. The stub answers
 `directadmin c`, so the sandbox decides that question the way the host does.
 
+Four more came out of the review of that work, and they are the ones worth reading, because
+each is a way the estimate could be talked into being too small by the account being
+measured — which is the only direction that fills the volume. A **trailing slash**, which
+the shell resolves to a directory and tar ignores. Bytes reachable through a **hard link**
+that has one end under an excluded path and the other under a path that is archived, where
+each of the two `du` runs counts the inode once and subtracting removes it entirely: 20 MB
+of data sized at 8 KB in the check that found it. A **FIFO** left where the list should be,
+which satisfies every test the script applied and then blocks the read — inside the batch
+lock, before the per-account timeout exists, so not one slow account but every account,
+stopped, until the next night's run reports a day-old lock. And an **oversized list**, read
+to a byte cap, whose truncated final entry names a shorter path that exists:
+`domains/example.com/private` clipped to `domains`. All four now subtract nothing, and the
+proof removes each guard in turn to show the account is otherwise waved through.
+
 ### The first real run: 2026-09-07 22:15 EDT
 
 Run by hand under `systemd-run`, watched throughout. It is the reason two of the guards
@@ -1411,10 +1425,16 @@ chmod 600 /home/tellerstec/.backup_exclude_paths
 /usr/local/sbin/da-backup-batch.sh --list
 ```
 
-The path is relative to the home, with **no leading slash and no `/home/tellerstec`
-prefix**. An absolute entry is the usual way this file is written wrong and DirectAdmin
-excludes nothing for it, so the estimator refuses to subtract for one and logs a `NOTE`
-saying why. `--list` is the confirmation rather than the file's existence: `tellerstec`
+The path is relative to the home, with **no leading slash, no trailing slash and no
+`/home/tellerstec` prefix**. An absolute entry is the usual way this file is written wrong
+and DirectAdmin excludes nothing for it, so the estimator refuses to subtract for one and
+logs a `NOTE` saying why. A trailing slash is the same trap wearing a friendlier face:
+`application_backups/` is the natural way to write a directory, the shell resolves it to
+one, and GNU tar excludes nothing for it — given `app/` in an `--exclude-from` it archives
+both `app/` and `app/file`, and given `app` it archives neither. That is why the command
+above has no slash on the end, and why the estimator refuses that spelling too rather than
+quietly crediting 29 GB that the archive would still contain. `--list` is the confirmation
+rather than the file's existence: `tellerstec`
 should then show about 29 GB under `EXCLUDED` beside its 34 GB home, a peak of roughly
 10 GB instead of 66.8 GB, and `FITS NOW` reading `yes`.
 
