@@ -81,6 +81,50 @@ resource "aws_iam_role_policy" "WBAT_Main_Server-BriefsBackup" {
   })
 }
 
+# Site media archive: the off-host copy of large static website content that is
+# excluded from the nightly DirectAdmin account backups.
+#
+# Deliberately append-only — there is no s3:DeleteObject here. The sync script
+# uses copy semantics and never removes anything, and withholding the permission
+# makes that a property of the account rather than a property of the script. The
+# content is the only off-host copy of live site data, so the failure this
+# guards against is a bad run, or a compromised host, mirroring a deletion into
+# the one place the data was safe. Files that disappear from the host therefore
+# persist here, which is the correct direction for an archive to fail in.
+resource "aws_iam_role_policy" "WBAT_Main_Server-SiteMediaArchive" {
+  name = "SiteMediaArchive"
+  role = aws_iam_role.WBAT_Main_Server.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ListArchiveBucket"
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket",
+          "s3:GetBucketLocation",
+          "s3:ListBucketMultipartUploads",
+        ]
+        Resource = var.site_media_archive_bucket_arn
+      },
+      {
+        # GetObject is needed to verify: the point of this archive is that the
+        # copy can be read back, and a write-only credential cannot prove that.
+        Sid    = "WriteAndVerifyArchiveObjects"
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:AbortMultipartUpload",
+          "s3:ListMultipartUploadParts",
+        ]
+        Resource = "${var.site_media_archive_bucket_arn}/*"
+      },
+    ]
+  })
+}
+
 # Read-only SNS diagnostics: lets the server inspect the SES bounce/complaint
 # feedback topic + its subscriptions from the box (e.g. confirm the HTTPS
 # subscription is Confirmed). No publish/subscribe/modify — describe only.

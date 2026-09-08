@@ -61,3 +61,9 @@ output "ses_da_gmail_forward_secret_arn" {
   value       = module.ses.da_gmail_forward_secret_arn
   description = "Secrets Manager ARN for DirectAdmin → SES Gmail pipe"
 }
+
+# Site media archive (static website content excluded from account backups)
+output "site_media_archive_bucket_id" {
+  value       = aws_s3_bucket.site_media_archive.id
+  description = "Bucket for static site media; set SITE_MEDIA_S3_BUCKET on the host to this"
+}
