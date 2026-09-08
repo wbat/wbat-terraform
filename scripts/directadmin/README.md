@@ -479,3 +479,58 @@ backlog, so a sweep that silently fails to reclaim anything is the worst place t
 | `backup local cleanup FAILED` / `ERROR could not remove N verified file(s)` | The upload was verified but the delete failed: read-only filesystem, `chattr +i`, or an I/O error | The copies named in the mail are already in S3 and safe to `rm` by hand; then find what blocked the delete (`mount | grep ' / '`, `lsattr`, `dmesg`) |
 | `ERROR another run held /var/log/... lock` | Admin and system backups overlapped and one waited out `DA_BACKUP_LOCK_WAIT` | `pgrep -a rclone`; clear the stuck upload, then re-run the hook |
 | Disk fills with no backups in `/home` | Not the backup hook | `da-disk-guard.sh --report` for the actual consumers |
+
+## Host access posture (SSH, fail2ban, 2222)
+
+The DirectAdmin account names on this host are permanently public: this repo's git
+history holds a verbatim `nginx -T` capture. Names cannot be un-published, so the
+control is making them useless — key-only SSH, a fail2ban that demonstrably bans, and
+a 2222 that is not open to the internet.
+
+| Repo file | Install path |
+|-----------|--------------|
+| `host_access_audit.sh` | `/usr/local/sbin/host-access-audit.sh` |
+
+```bash
+sudo /usr/local/sbin/host-access-audit.sh          # read-only posture report
+sudo /usr/local/sbin/host-access-audit.sh --json   # same, for automation
+```
+
+Read-only by design: no config edits, no service restarts, no firewall changes.
+
+Exit 0 means the audit was complete *and* found nothing; 1 means at least one
+finding; 3 means it found nothing but could not run every check. Root is needed for
+the interesting checks (`sshd -T`, `fail2ban-client`, `directadmin.conf`), so an
+unprivileged run reports `SKIP` for those, counts them, prints `INCOMPLETE` and
+exits 3 — otherwise automation could accept a posture that was never inspected.
+
+Where a clean verdict would be easy but wrong, it does the harder thing:
+
+- Bare `sshd -T` prints the base config only, so a `Match User` block that
+  re-enables passwords is invisible to it. The audit re-resolves the config per
+  connection context with `sshd -T -C` and names the account, and says plainly that
+  address-keyed `Match` blocks cannot be exhausted by probing.
+- fail2ban is judged per jail. A busy sshd jail would otherwise carry a summed ban
+  count well clear of zero and vouch for a DirectAdmin or mail jail watching a
+  logpath that does not exist on this build.
+- DirectAdmin settings are read by value. `brute_force_log_scanner=0` is a key that
+  is present and a scanner that is off.
+- A running `amazon-ssm-agent` is reported as a running process, not as a recovery
+  path. Only `PingStatus: Online` from the control plane means a session can
+  actually be opened, and that is a separate check.
+
+Remediation, with the ordering and rollback that keeps an SSM session as the way back
+in, is in [aws/docs/host-access-hardening.md](../../aws/docs/host-access-hardening.md).
+
+### Offline proof
+
+```bash
+./scripts/directadmin/prove_host_access_audit.sh
+```
+
+Ten cases, every one of them a way an audit can look green while a password path
+stays open. The motivating case is `PasswordAuthentication no` with PAM
+keyboard-interactive still enabled: what most hardening checklists stop short of,
+and it leaves the box brute-forceable while the config reads as hardened. The rest
+cover `Match` blocks, skips that must not read as passes, settings that are present
+but disabled, and one fail2ban jail masking another.

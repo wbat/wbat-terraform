@@ -1039,9 +1039,10 @@ anything:
 /usr/local/directadmin/directadmin admin-backup --destination=/home/admin_backups --user=test2
 ```
 
-`test2`, `brian2` and `aubrey` were all under 2 MB in the last successful backup, so any of
-them proves the whole chain — engine writes, hook fires, objects land in S3, local copy is
-removed — for kilobytes. Check all four stages, not just the command's exit status:
+`test2` was under 2 MB in the last successful backup, so it proves the whole chain — engine
+writes, hook fires, objects land in S3, local copy is removed — for kilobytes. Any small
+account does; list candidates by size with `du -sh /home/*/` rather than hardcoding names,
+since account sizes drift. Check all four stages, not just the command's exit status:
 
 ```bash
 ls -la /home/admin_backups/                    # did the engine produce a file?

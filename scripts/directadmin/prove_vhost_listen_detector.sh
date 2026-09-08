@@ -23,14 +23,14 @@ if "$INV" --arrival 172.30.0.71 --file "$FIX" --allowlist "$ALLOW" >/tmp/prove-v
   echo "FAIL: detector returned OK on known-bad fixture" >&2
   exit 1
 fi
-grep -q 'iots.com' /tmp/prove-vhost-71.out
+grep -q 'broken-site.example' /tmp/prove-vhost-71.out
 grep -q 'FAIL invariant' /tmp/prove-vhost-71.out
-# tellerstech was hand-patched and must NOT be reported as missing .71
-if grep -q 'FAIL tellerstech.com www.tellerstech.com' /tmp/prove-vhost-71.out; then
-  echo "FAIL: tellerstech.com incorrectly flagged (it has .71 listens)" >&2
+# The hand-patched vhost carries .71 already and must NOT be reported as missing it.
+if grep -q 'FAIL patched-site.example www.patched-site.example' /tmp/prove-vhost-71.out; then
+  echo "FAIL: patched-site.example incorrectly flagged (it has .71 listens)" >&2
   exit 1
 fi
-echo "OK detector flags broken domains and spares hand-patched tellerstech.com"
+echo "OK detector flags broken domains and spares the hand-patched vhost"
 
 echo "== Proof 2: same fixture MUST pass for stale linked IP 172.30.0.87 =="
 "$INV" --arrival 172.30.0.87 --file "$FIX" --allowlist "$ALLOW" >/tmp/prove-vhost-87.out
