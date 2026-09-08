@@ -71,10 +71,21 @@ if [ -n "${TF_TOKEN_app_terraform_io:-}" ]; then
     401)
       log "WARN terraform cloud token rejected (401) -- expired or revoked; cannot read plans"
       ;;
-    *)
-      # 403/404 is the normal answer for a team or organization token, which has no user
-      # identity but can still read workspaces and runs.
+    403 | 404)
+      # The normal answer for a team or organization token, which has no user identity
+      # but can still read workspaces and runs. Only these two codes mean that.
       log "NOTE terraform cloud token present (HTTP ${tfc_code} on /account/details, expected for a team token)"
+      ;;
+    000 | "")
+      # curl could not complete the request at all -- no DNS, blocked egress, TLS failure.
+      # Says nothing about the token, so do not imply the credential path works.
+      log "WARN terraform cloud unreachable -- token unverified; cannot confirm plans are readable"
+      ;;
+    *)
+      # 429 and 5xx land here. Treating them as the team-token case would report a
+      # usable credential path on no evidence, which is the failure this check exists
+      # to prevent.
+      log "WARN terraform cloud returned unexpected HTTP ${tfc_code} -- token unverified"
       ;;
   esac
   rm -f "$tfc_body"

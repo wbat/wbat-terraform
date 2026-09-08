@@ -12,9 +12,16 @@ partial setup still yields a working agent.
 
 | Path | Grants | Credential | Revoke by |
 | --- | --- | --- | --- |
-| AWS | Whatever `bteller` can do — currently admin | `bteller` IAM key | Rotating that key (see the caveat in §1) |
-| AWS Session Manager | Root-equivalent shell on both EC2 boxes | same key | Removing the secret from the agent environment |
+| AWS | Whatever `bteller` can do — currently admin | `bteller` IAM key | Deactivating that key (see §1) |
+| AWS Session Manager | Root-equivalent shell on both EC2 boxes | same key | Same — plus ending any live session |
 | HCP Terraform | Read plans, runs, state outputs | API token | Revoking the token |
+
+Revoke at the source, not in the dashboard. Secrets are injected into an agent's
+environment **at process start**, so deleting a secret only changes what the *next* agent
+receives — a run already in flight keeps its copy of the credential and its shell.
+Deactivating the IAM key or revoking the HCP token takes effect immediately for every
+caller, running agents included. Delete the dashboard secret as well so the next agent
+does not pick it back up, and terminate active runs if you need the shell closed now.
 
 The AWS row is deliberately blunt. This setup currently reuses a human admin key rather
 than a scoped agent identity, so the honest description of the grant is "everything."
@@ -126,10 +133,14 @@ hold:
   API call cannot be attributed without correlating timestamps against agent transcripts.
   This is the loss that is hardest to reconstruct after the fact, and the main reason to
   revisit the decision if a second person ever touches the account.
-- **Revocation is coarse.** Cutting agent access means rotating `bteller`'s key, which
-  also breaks that key wherever a human uses it — local CLI profiles included. Removing
-  the secret from the agent environment is the cheap partial stop, and is the right first
-  move; treat key rotation as the real revocation.
+- **Revocation is coarse, and the obvious move does not work.** Deleting the dashboard
+  secret feels like revocation but only affects agents that start afterwards; a running
+  agent already holds the credential in its environment and keeps both admin API access
+  and its root shell. Real revocation is `aws iam update-access-key --status Inactive`,
+  which cuts every caller at once — and because this is `bteller`'s key rather than a
+  dedicated one, that also breaks the human profiles using it. In an emergency take the
+  breakage: deactivate the key, delete the secret so the next agent cannot pick it up,
+  terminate live runs, then issue yourself a fresh key.
 
 The shell grant is unchanged in kind but no longer scoped: `ssm:StartSession` lands as
 `ssm-user` with passwordless sudo, on the primary that is root on the box serving ~91
@@ -146,7 +157,9 @@ tagged ones.
    ```
 
    A separate key on the same user does not fix attribution — CloudTrail still records
-   `bteller` — but it does make revocation cheap, which is the more common need.
+   `bteller` — but it makes revocation cheap, which is the more common need: an agent-only
+   key can be deactivated instantly without taking your own CLI down with it. That turns
+   the emergency path below from disruptive into routine, so it is worth the extra minute.
 
 2. Paste into Cursor secrets, then discard the local output:
    - `AWS_ACCESS_KEY_ID`
