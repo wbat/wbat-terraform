@@ -38,7 +38,8 @@ this document previously carried
 retention cap is configured after all, the pool has just reached it, and the growth that
 was measured looks like a pool filling to its limit rather than one growing without one.
 That is stated as probable rather than settled, and
-[resolves on the morning of 2026-09-09](#the-test-that-settles-it).
+[resolves the next time Installatron actually writes an archive](#the-test-that-settles-it),
+which is not necessarily tonight.
 
 ## Do it in this order
 
@@ -73,7 +74,7 @@ step 6 exists to stop DirectAdmin's own schedule racing it.
 | 5 | [Diagnose `Not implemented`](#2-find-out-what-not-implemented-refers-to-cli) | none | not done, and optional | Read-only, and no longer on the critical path — step 7 does not go through the task queue. |
 | 6 | [Delete DirectAdmin's schedule](#3-delete-directadmins-backup-schedule) | — | done 2026-09-08 | Removed from the stored job list, not the panel — see the section for why that turned out to be possible. Repairing it would have restored a full all-users run, which no longer fits. |
 | 7 | [Let the per-account batch run take over](#per-account-backups-da_backup_batchsh) | largest single account, not the sum | installed; **the schedule has never fired** — first automatic run is 2026-09-09 01:00 EDT | Installed by step 3, but after that day's 01:00 trigger had passed. Every backup so far has been started by hand. See [the schedule is still unproven](#the-schedule-is-still-unproven). |
-| 8 | [Cap `tellerstec`'s Installatron retention](#why-tellerstec-stopped-fitting-and-why-that-is-the-cheapest-thing-here) | up to ~31 GB, but **probably no longer urgent** | **owner decision, deadline in doubt** | Still the largest single reclaim available, but the 22-day deadline this row used to assert [looks wrong](#the-installatron-deadline-is-probably-not-real): the retention cap is configured, the pool has just reached it, and nothing has been evicted yet. [A measurement on 2026-09-09](#the-test-that-settles-it) decides whether this is urgent or merely optional. |
+| 8 | [Cap `tellerstec`'s Installatron retention](#why-tellerstec-stopped-fitting-and-why-that-is-the-cheapest-thing-here) | up to ~31 GB, but **probably no longer urgent** | **owner decision, deadline in doubt** | Still the largest single reclaim available, but the 22-day deadline this row used to assert [looks wrong](#the-installatron-deadline-is-probably-not-real): the retention cap is configured, the pool has just reached it, and nothing has been evicted yet. [Counting evictions against creations](#the-test-that-settles-it) decides whether this is urgent or merely optional — on the next archive Installatron writes, not on a fixed date. |
 | 9 | [Write `tellerstec`'s exclusion file](#what-the-estimator-does-about-it-now) | none | done 2026-09-08 | Written, and the account was backed up and the archive read back the same afternoon — [the result](#tellerstec-backed-up-and-verified-2026-09-08). |
 | 10 | [Decide disk for `teller`](#still-open) | ~$8/month either way | **not done** | The one account no exclusion can help: 54 GB of genuine content, checked. Needs a decision, not a fix. |
 
@@ -1645,24 +1646,53 @@ A baseline was taken on the host at 2026-09-08 15:58:32 EDT and saved to
 | `/home/tellerstec` bytes | 37,869,325,797 |
 | oldest file | 2024-12-08, 638 days |
 
-Installatron runs again at 01:37 and 01:40. On the morning of 2026-09-09, re-read those
-same figures:
+The obvious form of this check — read the same figures tomorrow morning — does not work,
+and the reason is worth stating because it is the same class of mistake as the one this
+section exists to correct. These archives are written *ahead of auto-updates*. If neither
+application has an update waiting, the updater runs and writes nothing, which is already
+visible in the data: four updater passes a day produce two to three archives. So a check on
+a fixed date has a third outcome nobody planned for — the baseline comes back unchanged
+because nothing happened — and an unchanged baseline is exactly what "the cap binds" is
+supposed to look like. The test would confirm itself by measuring nothing.
+
+What distinguishes the two hypotheses is not a date but a ratio: **how many files are
+evicted per file created.** A pool at its cap deletes one for each one it adds. A pool
+still filling adds without deleting. That is measurable whenever the next archive appears,
+whether that is tonight or next week, and the baseline records filenames precisely so the
+comparison is exact rather than inferred from a count:
 
 ```bash
 d=/home/tellerstec/application_backups
-printf 'files=%s bytes=%s\n' "$(find "$d" -type f | wc -l)" "$(du -sb "$d" | cut -f1)"
-find "$d" -type f -printf '%T@ %f\n' | sort -n | head -1
+b=/root/installatron-baseline-2026-09-08.txt
+now=$(mktemp); base=$(mktemp)
+find "$d" -type f -printf '%f\n' | sort >"$now"
+cut -d' ' -f3- "$b" | sort >"$base"
+printf 'created=%s evicted=%s files=%s bytes=%s\n' \
+  "$(comm -23 "$now" "$base" | wc -l)" \
+  "$(comm -13 "$now" "$base" | wc -l)" \
+  "$(wc -l <"$now")" "$(du -sb "$d" | cut -f1)"
+rm -f "$now" "$base"
 ```
 
-Two outcomes, and they are not close together:
+Read `created` first, because it says whether the run is informative at all:
 
-- **Still 30 files, ~32.7 GB, and the 2024-12-08 file gone.** The cap binds, growth has
-  stopped, there is no deadline, and capping retention further becomes an optional tidy-up
-  rather than an urgent one.
-- **32 files and ~34.8 GB, with the 2024-12-08 file still present.** The cap is not being
-  enforced on these backups — plausible, since `features_autoup_backup` generates them
-  ahead of auto-updates and may not be governed by `bs_custom_limit_daily` at all — the
-  original reading stands, and the deadline is real and roughly three weeks out.
+- **`created=0`** — Installatron has not written an archive since the baseline. No
+  information either way. Leave the question open and run it again; do not read the
+  unchanged size as evidence of a cap.
+- **`created>0` and `evicted` equal to it** — the cap binds. Growth has stopped near 31 GB,
+  there is no deadline, and capping retention further becomes an optional tidy-up.
+- **`created>0` and `evicted=0`** — the cap is not being enforced on these backups, which
+  is plausible since `features_autoup_backup` generates them and may not be governed by
+  `bs_custom_limit_daily` at all. The original reading stands and the deadline is real,
+  roughly three weeks from 2026-09-08.
+- **`evicted` positive but smaller than `created`** — a cap that binds on something other
+  than a flat count of 30, most likely the weekly and monthly tiers interacting. Growth
+  slows rather than stopping, and the runway is `created - evicted` files per day at
+  ~1.05 GB each. Recompute rather than reusing either figure above.
+
+The 2024-12-08 file is the single most useful thing to watch inside that: it is the oldest
+by 638 days, so any count-based eviction takes it first. It disappearing is the cap binding;
+it surviving alongside new arrivals is the cap not binding.
 
 **Relocating them is not the easy fix it looks like.** Installatron can write backups to a
 remote location instead of the account's home, which would solve the disk problem and the
@@ -2225,9 +2255,12 @@ could not be read, so it can gate a restore decision. Results of the first run a
   which would mean no 22-day deadline and no urgency — but that is an inference from the
   fact that [nothing has been evicted
   yet](#the-installatron-deadline-is-probably-not-real), not a measurement.
-  [A baseline is recorded and the check takes one command](#the-test-that-settles-it) on
-  the morning of 2026-09-09. Until then, treat the deadline as unknown rather than as
-  either three weeks or absent.
+  [A baseline is recorded and the check takes one command](#the-test-that-settles-it), but
+  it only answers anything once Installatron has actually written a new archive — these are
+  produced ahead of auto-updates, so a quiet night produces none and the check returns the
+  baseline unchanged, which is indistinguishable from a cap that binds. Read `created`
+  before reading anything else. Until it is positive, treat the deadline as unknown rather
+  than as either three weeks or absent.
 - **Restore has never been rehearsed** — though the archives have now been read.
   [The 2026-09-08 sweep](#is-what-is-already-in-s3-readable-a-read-back-of-every-archive-2026-09-08)
   read every compressed object in the bucket and settled the readability half of this:
