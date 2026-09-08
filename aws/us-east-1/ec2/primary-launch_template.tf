@@ -1,10 +1,27 @@
 resource "aws_launch_template" "primary" {
   name = "WBAT_Primary"
 
-  disable_api_stop                     = true
-  disable_api_termination              = true
-  ebs_optimized                        = "true"
-  image_id                             = aws_ami.primary.id
+  disable_api_stop        = true
+  disable_api_termination = true
+  ebs_optimized           = "true"
+  image_id                = aws_ami.primary.id
+
+  # Advance the default version, or every fix in this file is invisible to a rebuild.
+  # Editing a launch template creates a new *version*; the default stays where it was
+  # unless told otherwise, and a rebuild that does not explicitly ask for a version gets
+  # the default. Two consequences, the second one fatal:
+  #
+  #   - The corrected cpu_credits and metadata_options would sit in a version nobody
+  #     selects.
+  #   - image_id tracks aws_ami.primary, which is re-registered (destroy-then-create) on
+  #     every apply that picks up a newer snapshot. So the old default version would point
+  #     at a *deregistered* AMI ID and fail outright with InvalidAMIID.NotFound -- turning
+  #     the DR path from stale into broken.
+  #
+  # Only primary_launch_template_id is exported, not a version, so this cannot be papered
+  # over at recovery time by selecting $Latest by hand.
+  update_default_version = true
+
   instance_initiated_shutdown_behavior = "stop"
   instance_type                        = var.primary_instance_type
   key_name                             = aws_key_pair.wbat.key_name
@@ -29,7 +46,12 @@ resource "aws_launch_template" "primary" {
   }
 
   credit_specification {
-    cpu_credits = "standard"
+    # Must match the running instance's "unlimited". The instance sets it deliberately so
+    # the WordPress server can burst without throttling; leaving "standard" here meant a
+    # DR rebuild would silently come up throttle-prone under exactly the load that
+    # follows a recovery. The secondary keeps "standard" on both sides, which is correct
+    # for a DNS-only box.
+    cpu_credits = "unlimited"
   }
 
   hibernation_options {
@@ -42,6 +64,17 @@ resource "aws_launch_template" "primary" {
 
   maintenance_options {
     auto_recovery = "default"
+  }
+
+  # Match the instance, which does not enforce IMDSv2 because Installatron's updater still
+  # uses v1 -- see primary-instance.tf. "required" here would look like a free security win
+  # and instead mean a DR rebuild silently comes up with WordPress auto-updates broken, in
+  # the one situation where nobody is watching for it. This tracks the instance: when the
+  # instance flips to "required", flip this with it.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "optional"
+    http_put_response_hop_limit = 1
   }
 
   monitoring {
