@@ -152,7 +152,12 @@ audit_ssh() {
   if [ -n "$allow" ]; then
     report OK "ssh/allowlist" "$allow"
   else
-    report WARN "ssh/allowlist" "no AllowUsers/AllowGroups -- every account with a shell can attempt SSH"
+    # Worth spelling out, because with passwords already off this reads as
+    # cosmetic and is not: a DirectAdmin home directory is writable by that
+    # site's own PHP, so a web compromise can append to ~/.ssh/authorized_keys
+    # and convert itself into interactive SSH that survives cleaning the site.
+    # An allowlist refuses the account whether or not a key was planted.
+    report WARN "ssh/allowlist" "no AllowUsers/AllowGroups -- every account with a shell may attempt SSH, and site PHP can write its own owner's ~/.ssh/authorized_keys, so a compromised site can promote itself to durable shell access"
   fi
 }
 
@@ -640,13 +645,84 @@ audit_da_panel_boundary() {
 # Count only. The names are already public in this repo's history; reprinting
 # them here would add exposure without adding information.
 audit_accounts() {
-  if [ ! -r /etc/passwd ]; then
-    report SKIP "accounts/shells" "cannot read /etc/passwd"
+  local passwd="${HOST_AUDIT_PASSWD:-/etc/passwd}"
+  if [ ! -r "$passwd" ]; then
+    report SKIP "accounts/shells" "cannot read $passwd"
     return
   fi
   local n
-  n="$(awk -F: '$7 !~ /(nologin|false|sync|shutdown|halt)$/ && $3 >= 500 {c++} END {print c+0}' /etc/passwd)"
+  n="$(awk -F: '$7 !~ /(nologin|false|sync|shutdown|halt)$/ && $3 >= 500 {c++} END {print c+0}' "$passwd")"
   report OK "accounts/shells" "$n non-system accounts with a login shell (these are the names in public git history)"
+
+  # An installed key is the difference between the ssh/allowlist finding being a
+  # theoretical path and an already-built one. Counts only, no names: they are
+  # public already and reprinting them here adds exposure without information.
+  #
+  # Deliberately NOT filtered by login shell, unlike the count above. On the
+  # primary, DirectAdmin's `admin` holds two keys and has no login shell, so a
+  # shell-filtered scan omitted it entirely. A nologin shell blocks the
+  # interactive session and nothing else: `ssh -N -L` port forwarding and, where
+  # the subsystem is enabled, sftp both still work with that key.
+  local with_keys=0 nologin_keys=0 unreadable=0 fps="" home shell akf
+  while IFS=: read -r _ _ uid _ _ home shell; do
+    case "$uid" in '' | *[!0-9]*) continue ;; esac
+    [ "$uid" -ge 500 ] || continue
+    # A `.ssh` is mode 700 and a DirectAdmin home is 711, so an unprivileged
+    # run cannot tell an absent authorized_keys from one it may not look at.
+    # Both would test false, and the answer would be a clean "no account has
+    # one" -- a false all-clear on the check that establishes whether the
+    # ssh/allowlist escalation is already built. Capability is tested rather
+    # than uid, so this stays exercisable without root.
+    if { [ -d "$home" ] && [ ! -x "$home" ]; } ||
+      { [ -d "${home}/.ssh" ] && [ ! -x "${home}/.ssh" ]; }; then
+      unreadable=$((unreadable + 1))
+      continue
+    fi
+    akf="${home}/.ssh/authorized_keys"
+    [ -s "$akf" ] || continue
+    with_keys=$((with_keys + 1))
+    case "$shell" in
+      *nologin | *false | *sync | *shutdown | *halt) nologin_keys=$((nologin_keys + 1)) ;;
+    esac
+    if have ssh-keygen; then
+      fps="${fps}$(ssh-keygen -l -f "$akf" 2>/dev/null | awk '{print $2}' | sort -u)
+"
+    fi
+  done <"$passwd"
+
+  if [ "$unreadable" -gt 0 ]; then
+    local partial=""
+    [ "$with_keys" -eq 0 ] || partial=" (a key was found on ${with_keys} of the accounts that could be read)"
+    report SKIP "accounts/authorized-keys" "could not inspect ${unreadable} account(s) whose home or .ssh is not searchable by this user${partial} -- re-run with sudo; unprivileged, an unreadable key is indistinguishable from an absent one"
+    return
+  fi
+
+  if [ "$with_keys" -eq 0 ]; then
+    report OK "accounts/authorized-keys" "no account has an authorized_keys file"
+    return
+  fi
+
+  # The distinct count says what happened; the widest count says what it costs.
+  # Six keys across fourteen accounts sounds unremarkable until one of the six
+  # is installed on all fourteen, at which case that single private key is the
+  # whole box and its blast radius is what needs managing, not the file count.
+  local detail="" distinct widest
+  if [ -n "${fps//[[:space:]]/}" ]; then
+    distinct="$(printf '%s' "$fps" | grep -c . || true)"
+    distinct="$(printf '%s' "$fps" | sort -u | grep -c . || true)"
+    widest="$(printf '%s' "$fps" | grep . | sort | uniq -c | sort -rn | awk 'NR==1 {print $1}')"
+    detail=", ${distinct} distinct key(s), the most widely installed of which is on ${widest:-?} of them"
+  fi
+
+  local nologin_note=""
+  [ "$nologin_keys" -eq 0 ] \
+    || nologin_note=" ${nologin_keys} of them have no login shell, which blocks the interactive session but not port forwarding or sftp."
+
+  if [ "$with_keys" -le 1 ] && [ "${widest:-1}" -le 1 ]; then
+    report OK "accounts/authorized-keys" "${with_keys} account has an authorized_keys file${detail}"
+  else
+    report WARN "accounts/authorized-keys" "${with_keys} account(s) already hold an authorized_keys file${detail} -- each is a working access path today, a key on more than one account means one private key opens all of them, and on a DirectAdmin host the site's own PHP can add to its owner's file.${nologin_note} ssh/allowlist is what makes a planted or over-shared key inert"
+  fi
 }
 
 # --- SSM out-of-band path ----------------------------------------------------

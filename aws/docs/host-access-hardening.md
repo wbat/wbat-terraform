@@ -22,10 +22,21 @@ Three changes make the disclosure inert:
    which cannot go key-only.
 3. **A restricted 2222** — takes the DirectAdmin panel off the open internet.
 
-A fourth is not about the names at all but shows up in the same audit: no
-datastore should be listening on a public interface. `lfd` and `fail2ban` do not
-sit in front of MySQL, and a success there is the whole dataset rather than one
-account. See [Bound is not the same as reachable](#bound-is-not-the-same-as-reachable).
+Steps 1–3 are done. Two findings remain, and neither is about guessing a name:
+
+4. **[An SSH allowlist](#4-limit-ssh-to-the-accounts-that-need-it)** — with
+   passwords already off, the risk is not guessing. Site PHP can write its own
+   owner's `~/.ssh/authorized_keys`, so any of the 14 shell accounts is a route
+   from a compromised website to durable interactive SSH. This is the largest
+   item left.
+5. **A datastore on a public interface** — not about the names at all, but it
+   shows up in the same audit. Neither `lfd` nor `fail2ban` sits in front of
+   MySQL, and a success there is the whole dataset rather than one account. See
+   [Bound is not the same as reachable](#bound-is-not-the-same-as-reachable).
+
+The plaintext mail and FTP ports are the remaining password surface now that
+SSH and 2222 are closed — see
+[The plaintext mail and FTP ports are now the last password path](#the-plaintext-mail-and-ftp-ports-are-now-the-last-password-path).
 
 ## Measure first
 
@@ -83,10 +94,17 @@ when you are already locked out.
 Confirm you can authenticate with a key **before** removing the password path,
 and confirm the account you rely on actually has a key installed:
 
+`sudo` has to be on the file test, not only on the `awk`. A pipeline runs the
+loop in the *calling* shell, and a `.ssh` directory is mode 700, so an
+unprivileged reader gets `NO-KEY` for every account whether or not a key is
+there — including in the `ssm-user` session this runbook sends you to:
+
 ```bash
 sudo awk -F: '$3>=500 && $7 !~ /(nologin|false)$/ {print $1, $6}' /etc/passwd \
-  | while read -r u h; do printf '%-16s %s\n' "$u" \
-      "$( [ -s "$h/.ssh/authorized_keys" ] && echo has-key || echo NO-KEY )"; done
+  | while read -r u h; do
+      if sudo test -s "$h/.ssh/authorized_keys"; then k=has-key; else k=NO-KEY; fi
+      printf '%-16s %s\n' "$u" "$k"
+    done
 ```
 
 Then set all three options. Setting only the first is the most common mistake
@@ -356,6 +374,164 @@ at the next provisioning event.
 That is the better end state: 2222 closed to the internet entirely, reachable
 only to an authenticated AWS principal.
 
+## 4. Limit SSH to the accounts that need it
+
+With passwords off and 2222 closed, this is the largest remaining item, and the
+audit's one-line `ssh/allowlist` warning undersells it. The problem is not brute
+force — key-only SSH is not brute-forceable. It is that **a DirectAdmin home
+directory is writable by that site's own PHP.** A compromised site can append a
+key to its owner's `~/.ssh/authorized_keys`, and `sshd` will honour it: the file
+is owned by the right user with sane permissions, which is all `StrictModes`
+asks. A web compromise then becomes an interactive shell that survives cleaning
+up the website, and nothing in the audit's other checks would notice.
+
+This host has 14 accounts with a login shell and no allowlist, so every one of
+them is that path today. An allowlist closes it by refusing the account at
+authentication time whether or not a key was planted.
+
+See which accounts could be used this way. Note the `sudo` on the file test and
+the absence of a shell filter — both matter, for reasons the next paragraph
+gives:
+
+```bash
+sudo awk -F: '$3>=500 {print $1, $6, $7}' /etc/passwd \
+  | while read -r u h s; do
+      if sudo test -s "$h/.ssh/authorized_keys"; then k=has-key; else k=no-key; fi
+      printf '%-16s %-10s %-18s %s\n' "$u" "$k" "$s" "$h"
+    done
+```
+
+On the primary, **13 accounts already have one.** The escalation is not
+hypothetical there; it is a path that is already built and only needs a private
+key. `accounts/authorized-keys` in the audit reports this as counts.
+
+Filtering by login shell would have said 12 and been wrong. DirectAdmin's
+`admin` holds two keys and has no login shell, so it is invisible to a
+shell-filtered scan — and `nologin` blocks only the interactive session, not
+`ssh -N -L` port forwarding or `sftp` where the subsystem is enabled. That is
+why the shell is *printed* here rather than used to exclude anything.
+
+### Triage before you conclude anything
+
+Twelve accounts with keys is not twelve incidents. The question is how many
+*distinct* keys there are, because that separates one event from twelve:
+
+`ssh-keygen -l` prints `bits fingerprint comment (TYPE)`, so the comment is the
+middle of the line, not the last field — and the comment is usually the only
+thing that says whose key it is:
+
+```bash
+for h in /home/*; do
+  f="$h/.ssh/authorized_keys"
+  sudo test -s "$f" || continue
+  sudo ssh-keygen -l -f "$f" 2>/dev/null | awk -v u="${h##*/}" '
+    { c = ""; for (i = 3; i < NF; i++) c = c (c ? " " : "") $i
+      printf "%-47s %-14s %-9s %s\n", $2, u, $NF, c }'
+done | sort
+```
+
+- **One fingerprint repeated across every account** means something templated
+  them at once. Check `/etc/skel/.ssh/authorized_keys` — if a key sits there,
+  every DirectAdmin account creation is still copying it, and the problem
+  regrows — and consider a migration that rsynced `/home` wholesale.
+- **A fingerprint you do not recognise** is the finding. Treat it as a possible
+  compromise rather than untidiness: note the file's mtime against your
+  DirectAdmin and web logs for that account, and do not delete it before you
+  have looked.
+
+Mtimes say whether the files arrived together or one at a time:
+
+The glob has to expand inside the privileged shell too. `sudo stat /home/*/...`
+expands in the caller's shell, which cannot see through a mode-700 `.ssh` and so
+matches nothing:
+
+```bash
+sudo sh -c "stat -c '%y  %n' /home/*/.ssh/authorized_keys 2>/dev/null" | sort
+sudo ls -la /etc/skel/.ssh/ 2>/dev/null
+```
+
+#### What this host turned out to be
+
+Not a compromise. Six distinct keys across 14 accounts, and nine of the files
+were written inside the same 250 ms on 2024-01-29 — a script, not an intrusion.
+`/etc/skel/.ssh` does not exist, so nothing is seeding new accounts and the
+pattern will not regrow. The remaining mtimes are spread over two years and
+match ordinary operator activity.
+
+The finding is a different one, and the file count hides it: **two of those six
+keys are installed on 13 and 14 accounts respectively.** Either private key is
+the entire box. One of them is on `ec2-user`, which makes it almost certainly
+the EC2 key pair, copied to every DirectAdmin account. That is what needs
+managing — not the number of files, but the blast radius of two keys. The audit
+reports it as "the most widely installed of which is on N of them" for exactly
+this reason.
+
+Two details worth knowing:
+
+- **`admin` holds two keys and has no login shell**, which is why it is absent
+  from the shell-account listing above. `nologin` blocks the interactive session
+  and nothing else: `ssh -N -L` port forwarding still works, and so does `sftp`
+  where the subsystem is enabled. Do not read a nologin shell as "this key is
+  harmless".
+- The DSA key on one account is inert — OpenSSH disabled DSA by default in 7.0
+  and removed it in 9.8 — so it is dead weight rather than a risk.
+
+The allowlist below is the control either way. It makes a planted key and an
+over-shared key inert in one directive, without first having to work out which
+of the six are safe to delete. Deleting keys is per-account, needs a decision
+each time, and is easy to get wrong; `AllowGroups` is one line with a known
+rollback and a confirmed SSM path behind it. Do it in that order.
+
+### Applying it without locking yourself out
+
+`AllowGroups` refuses everyone who is not in the group, including you, the
+moment `sshd` reloads. The gate is a **second** session: keep the one you have
+open, and never close it until a new one succeeds.
+
+```bash
+# 1. Confirm the recovery path first, from your workstation, not the box:
+aws ssm describe-instance-information --profile wbat --region us-east-1 \
+  --filters Key=InstanceIds,Values=i-0118b8ede80b52ef7 \
+  --query 'InstanceInformationList[0].PingStatus'
+
+# 2. Create the group and put the accounts that genuinely need SSH in it:
+sudo groupadd -f sshusers
+sudo usermod -aG sshusers tellerstec       # repeat for any other real operator
+
+# 3. Verify membership BEFORE writing the directive:
+getent group sshusers
+
+# 4. Then the drop-in, alongside the one from step 1:
+printf 'AllowGroups sshusers\n' | sudo tee /etc/ssh/sshd_config.d/20-allowgroups.conf
+sudo sshd -t                    # GATE: syntax must pass
+sudo systemctl reload sshd      # reload keeps existing sessions alive
+sudo sshd -T | grep -i allowgroups
+```
+
+**Then open a new SSH session from a second terminal.** If it fails, roll back
+from the session you kept open. The drop-in is root-owned and reloading `sshd`
+is privileged, so every step needs `sudo` — the operator account this procedure
+leaves you in cannot do any of it unprivileged, and discovering that mid-lockout
+is how a recoverable mistake turns into an SSM-only one:
+
+```bash
+sudo rm /etc/ssh/sshd_config.d/20-allowgroups.conf
+sudo sshd -t && sudo systemctl reload sshd
+```
+
+If you lost both sessions, the SSM session from step 1 is the way back — this is
+exactly the failure it exists for.
+
+One DirectAdmin interaction to know about: if you ever grant an account SSH
+access through the panel, it must also be in `sshusers`, or the panel will
+appear to grant access that `sshd` then refuses. That is a confusing failure to
+debug later, so it is worth a note wherever account provisioning is documented.
+
+`PermitRootLogin without-password` is the other SSH warning, and it is a smaller
+one — root has no password path, so this only matters if a root key leaks. Set it
+to `no` in the same drop-in once you have confirmed nothing automated logs in as
+root: `sudo grep -c . /root/.ssh/authorized_keys` and a look at `last root`.
+
 ## Bound is not the same as reachable
 
 The audit lists every port bound to `0.0.0.0`, then judges them against CSF's
@@ -386,11 +562,38 @@ Then `systemctl restart mysqld` (or `mariadb`) and re-run the audit;
 `exposure/datastore` should go to `OK`. Restarting the database drops open
 connections, so treat it as a brief maintenance window rather than a live edit.
 
-The plaintext mail and FTP ports (`21`, `110`, `143`) are a lower-grade version
-of the same question: they accept credentials without implicit TLS, and their
-TLS-native equivalents (`465`, `993`, `995`) are already open. Closing them is a
-client-compatibility decision, not a technical one, so the audit warns rather
-than failing.
+### The plaintext mail and FTP ports are now the last password path
+
+`21`, `110` and `143` accept credentials without implicit TLS, and their
+TLS-native equivalents (`465`, `993`, `995`) are already open. That reads like
+housekeeping, and it was, until the other doors closed. SSH is key-only, 2222 is
+off the internet — so mail and FTP are the **only** remaining places where one
+of the publicly disclosed account names can be tried with a password. They are
+in `TCP_IN` and reachable right now. `LF_FTPD=10`, `LF_POP3D=10` and
+`LF_IMAPD=10` rate-limit the attempts, which buys time rather than closing
+anything.
+
+Two separate questions, worth not conflating:
+
+1. **Is TLS mandatory, or merely available?** If STARTTLS is optional on `110`
+   and `143`, a client that fails to negotiate sends the password in clear over
+   the internet. Mandatory is the fix, and it costs nothing but a config change:
+
+```bash
+# Dovecot: disable_plaintext_auth = yes means "not without TLS", not "never"
+sudo doveconf -n disable_plaintext_auth ssl
+sudo grep -rn 'ftp_tls\|ssl_enable\|force_tls' /etc/proftpd.conf /etc/pure-ftpd.conf 2>/dev/null
+```
+
+2. **Should the plaintext ports be open at all?** That one is a
+   client-compatibility decision rather than a technical one, which is why the
+   audit warns instead of failing. Closing `110`/`143` in `TCP_IN` and leaving
+   `993`/`995` is the clean end state; FTP is usually the sticking point,
+   because customers have clients configured for `21`.
+
+If you do only one thing here, make TLS mandatory. Closing ports can wait for a
+customer-communication window; a password crossing the internet in clear cannot
+be un-sent.
 
 ## Verify
 
@@ -410,10 +613,17 @@ privilege:
 - `ssm/reachable` — the audit asks Systems Manager for `PingStatus`, which the
   instance profile normally cannot do. Run the command it prints from your
   workstation before you touch `sshd`. A running agent is not a recovery path;
-  an `Online` ping is. This is the check that decides whether step 1 is safe.
-- `ssh/match` — resolvable only with root, and only for `Match User`/`Match
-  Group` contexts. Address-keyed blocks cannot be enumerated by probing, so if
-  the audit warns `ssh/match-coverage`, read those blocks by hand.
+  an `Online` ping is. This is the check that decides whether steps 1 and 4 are
+  safe to attempt.
+- `exposure/da-panel-sg` — the security group is a control-plane fact and the
+  instance cannot read it, so this one skips **permanently** on the box rather
+  than for want of `sudo`. It is why an on-host run exits 3 even when nothing is
+  wrong. Run the printed command from a workstation to get the verdict.
+
+`ssh/match` is a third check that can skip, but only where root cannot resolve
+`sshd -T -C`; on this host it reports `OK` with no `Match` blocks. Address-keyed
+blocks cannot be enumerated by probing, so if it warns `ssh/match-coverage`,
+read those blocks by hand.
 
 Re-run after any DirectAdmin update — `update_post` hooks are the usual way an
 `sshd_config` or jail change gets quietly reverted.

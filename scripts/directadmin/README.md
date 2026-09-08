@@ -618,6 +618,17 @@ Where a clean verdict would be easy but wrong, it does the harder thing:
   that fails is a skip, never an empty rule set, because a denied
   `DescribeSecurityGroups` read as "no rule allows 2222" is an all-clear on the
   most important question here.
+- Shell accounts are counted, and so are the accounts that already hold an
+  `authorized_keys` file — with the number of *distinct* keys and, more usefully, how
+  many accounts the most widely installed of them opens. Six keys across fourteen
+  accounts reads as unremarkable until one of the six is on all fourteen, at which
+  point that single private key is the whole box. The key scan is deliberately not
+  filtered by login shell: DirectAdmin's `admin` holds keys and has none, and
+  `nologin` blocks the interactive session but not `ssh -N -L` or sftp. Names are
+  never printed, since they are public already and reprinting them adds exposure
+  without information. Run unprivileged, the scan skips rather than reporting a
+  clean sweep: a mode-700 `.ssh` makes an unreadable key indistinguishable from an
+  absent one, and "no account has a key" is the wrong way to be wrong here.
 - A running `amazon-ssm-agent` is reported as a running process, not as a recovery
   path. Only `PingStatus: Online` from the control plane means a session can
   actually be opened, and that is a separate check.
@@ -631,7 +642,7 @@ in, is in [aws/docs/host-access-hardening.md](../../aws/docs/host-access-hardeni
 ./scripts/directadmin/prove_host_access_audit.sh
 ```
 
-Twenty-one cases, every one of them a way this audit can mislead: a password path left
+Twenty-two cases, every one of them a way this audit can mislead: a password path left
 open while the report reads green, or a false alarm that sends an operator to install
 something harmful. The motivating case is `PasswordAuthentication no` with PAM
 keyboard-interactive still enabled: what most hardening checklists stop short of,

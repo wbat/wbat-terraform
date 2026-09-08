@@ -558,4 +558,116 @@ chmod +x "$TMP/bin/aws"
   || { echo "FAIL: a successful query showing 0.0.0.0/0 must fail" >&2; exit 1; }
 echo "OK an unreadable security group skips, and a readable open one fails"
 
-echo "PASS: host access audit proofs (21 cases)"
+echo "== Case 22: an installed key is a built path, not a hypothetical one =="
+# The primary reported 14 shell accounts and no allowlist, which reads as a
+# theoretical escalation. Twelve of those accounts already had authorized_keys,
+# which is the same finding with the work already done. Counting shells without
+# counting installed keys hides the difference.
+mkdir -p "$TMP/homes/opsuser/.ssh" "$TMP/homes/site1/.ssh" "$TMP/homes/site2/.ssh" \
+  "$TMP/homes/nokey" "$TMP/homes/daemon"
+K1="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGuMHhVQ0Fh0OMwLIVGZ4iVQ5eXqIY4z5F1CQaGqQ0Xj op@example"
+K2="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB4TxV0kZ7l2yZ9v0X8y1KqQ8mFq4bN3sT6uW2eR5cPd site@example"
+acct_passwd() { printf '%s' "$1" >"$TMP/passwd.accts"; }
+
+# A lone operator key is the expected shape and must not warn.
+printf '%s\n' "$K1" >"$TMP/homes/opsuser/.ssh/authorized_keys"
+acct_passwd "opsuser:x:1001:1001::${TMP}/homes/opsuser:/bin/bash
+daemonx:x:1002:1002::${TMP}/homes/daemon:/sbin/nologin
+"
+acct_run() {
+  env -i PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_SSHD_CONFIG="$TMP/sshd_config.plain" \
+    HOST_AUDIT_PASSWD="$TMP/passwd.accts" HOST_AUDIT_LISTENERS="22" \
+    HOST_AUDIT_CSF_CONF="$TMP/csf.conf" HOST_AUDIT_LFD_ACTIVE=1 \
+    HOST_AUDIT_INSTANCE_ID="i-000000000000000" \
+    bash "$AUDIT" --json 2>/dev/null || true
+}
+out="$(acct_run)"
+[ "$(printf '%s' "$out" | verdict_for accounts/authorized-keys)" = "OK" ] \
+  || { echo "FAIL: a single operator key should not warn" >&2; exit 1; }
+printf '%s' "$out" | grep -q '"accounts/shells"' \
+  || { echo "FAIL: shell count missing" >&2; exit 1; }
+
+# A key on an account with no login shell must still be counted. On the primary,
+# DirectAdmin's `admin` holds two keys and has no login shell, and a
+# shell-filtered scan omitted it -- while nologin blocks only the interactive
+# session, not `ssh -N -L` or sftp.
+mkdir -p "$TMP/homes/daemon/.ssh"
+printf '%s\n' "$K2" >"$TMP/homes/daemon/.ssh/authorized_keys"
+out="$(acct_run)"
+[ "$(printf '%s' "$out" | verdict_for accounts/authorized-keys)" = "WARN" ] \
+  || { echo "FAIL: a key on a nologin account must not be invisible" >&2; exit 1; }
+printf '%s' "$out" | grep -q 'no login shell, which blocks the interactive session' \
+  || { echo "FAIL: the nologin caveat should be stated, not silently dropped" >&2; exit 1; }
+rm -f "$TMP/homes/daemon/.ssh/authorized_keys"
+
+# Site accounts with keys are the reported shape, and must warn.
+printf '%s\n' "$K1" >"$TMP/homes/site1/.ssh/authorized_keys"
+printf '%s\n' "$K2" >"$TMP/homes/site2/.ssh/authorized_keys"
+acct_passwd "opsuser:x:1001:1001::${TMP}/homes/opsuser:/bin/bash
+site1:x:1003:1003::${TMP}/homes/site1:/bin/bash
+site2:x:1004:1004::${TMP}/homes/site2:/bin/bash
+nokey:x:1005:1005::${TMP}/homes/nokey:/bin/bash
+daemonx:x:1002:1002::${TMP}/homes/daemon:/sbin/nologin
+"
+out="$(acct_run)"
+[ "$(printf '%s' "$out" | verdict_for accounts/authorized-keys)" = "WARN" ] \
+  || { echo "FAIL: keys installed across site accounts must warn" >&2; exit 1; }
+printf '%s' "$out" | grep -q '3 account(s) already hold' \
+  || { echo "FAIL: should count the accounts that hold a key" >&2; exit 1; }
+# One key everywhere and a key per account mean different things -- a template
+# or a migration versus that many separate provisioning events -- so the
+# distinct count has to be reported, not just the number of files.
+if command -v ssh-keygen >/dev/null 2>&1; then
+  printf '%s' "$out" | grep -q '2 distinct key' \
+    || { echo "FAIL: distinct key count not reported" >&2; exit 1; }
+  # K1 is on opsuser and site1, so the widest key opens 2 of the 3.
+  printf '%s' "$out" | grep -q 'most widely installed of which is on 2 of them' \
+    || { echo "FAIL: blast radius of the most-shared key not reported" >&2; exit 1; }
+
+  # The shape the primary is actually in: one key on every account. Six keys
+  # across fourteen accounts reads as unremarkable until one opens all fourteen,
+  # so the widest count has to move even when the distinct count falls.
+  printf '%s\n' "$K1" >"$TMP/homes/site2/.ssh/authorized_keys"
+  out="$(acct_run)"
+  printf '%s' "$out" | grep -q '1 distinct key' \
+    || { echo "FAIL: one key templated across accounts should read as one key" >&2; exit 1; }
+  printf '%s' "$out" | grep -q 'most widely installed of which is on 3 of them' \
+    || { echo "FAIL: a single key on every account must report that radius" >&2; exit 1; }
+
+  # A duplicate line within one file is one account, not two.
+  printf '%s\n%s\n' "$K1" "$K1" >"$TMP/homes/site2/.ssh/authorized_keys"
+  printf '%s' "$(acct_run)" | grep -q 'most widely installed of which is on 3 of them' \
+    || { echo "FAIL: a repeated key in one file must not inflate its reach" >&2; exit 1; }
+  printf '%s\n' "$K1" >"$TMP/homes/site2/.ssh/authorized_keys"
+fi
+
+# And no account names in the output: they are public already, so reprinting
+# them here would add exposure without adding information.
+printf '%s' "$out" | grep -qE 'site1|site2|opsuser' \
+  && { echo "FAIL: account names must not be reprinted" >&2; exit 1; }
+
+# An unreadable home must not read as an empty one. A .ssh is mode 700 and a
+# DirectAdmin home is 711, so unprivileged both an absent key and a key nobody
+# may look at test false -- and the answer was a clean "no account has one",
+# a false all-clear on the check that says whether the escalation is built.
+if [ "$(id -u)" -ne 0 ]; then
+  chmod 000 "$TMP/homes/site1/.ssh"
+  out="$(acct_run)"
+  [ "$(printf '%s' "$out" | verdict_for accounts/authorized-keys)" = "SKIP" ] \
+    || { echo "FAIL: an unreadable .ssh must skip, not report no keys" >&2; exit 1; }
+  printf '%s' "$out" | grep -q 'could not inspect 1 account' \
+    || { echo "FAIL: the number of unreadable accounts should be named" >&2; exit 1; }
+  chmod 700 "$TMP/homes/site1/.ssh"
+
+  # The all-clear itself has to be unreachable while anything is unreadable.
+  rm -f "$TMP/homes/opsuser/.ssh/authorized_keys" \
+    "$TMP/homes/site1/.ssh/authorized_keys" "$TMP/homes/site2/.ssh/authorized_keys"
+  chmod 000 "$TMP/homes/site1/.ssh"
+  [ "$(acct_run | verdict_for accounts/authorized-keys)" = "SKIP" ] \
+    || { echo "FAIL: no readable keys plus an unreadable home is not an all-clear" >&2; exit 1; }
+  chmod 700 "$TMP/homes/site1/.ssh"
+fi
+echo "OK installed keys are counted, de-duplicated, never named, and never guessed"
+
+echo "PASS: host access audit proofs (22 cases)"
