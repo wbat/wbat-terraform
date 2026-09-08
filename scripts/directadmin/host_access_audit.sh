@@ -663,10 +663,21 @@ audit_accounts() {
   # shell-filtered scan omitted it entirely. A nologin shell blocks the
   # interactive session and nothing else: `ssh -N -L` port forwarding and, where
   # the subsystem is enabled, sftp both still work with that key.
-  local with_keys=0 nologin_keys=0 fps="" home shell akf
+  local with_keys=0 nologin_keys=0 unreadable=0 fps="" home shell akf
   while IFS=: read -r _ _ uid _ _ home shell; do
     case "$uid" in '' | *[!0-9]*) continue ;; esac
     [ "$uid" -ge 500 ] || continue
+    # A `.ssh` is mode 700 and a DirectAdmin home is 711, so an unprivileged
+    # run cannot tell an absent authorized_keys from one it may not look at.
+    # Both would test false, and the answer would be a clean "no account has
+    # one" -- a false all-clear on the check that establishes whether the
+    # ssh/allowlist escalation is already built. Capability is tested rather
+    # than uid, so this stays exercisable without root.
+    if { [ -d "$home" ] && [ ! -x "$home" ]; } ||
+      { [ -d "${home}/.ssh" ] && [ ! -x "${home}/.ssh" ]; }; then
+      unreadable=$((unreadable + 1))
+      continue
+    fi
     akf="${home}/.ssh/authorized_keys"
     [ -s "$akf" ] || continue
     with_keys=$((with_keys + 1))
@@ -678,6 +689,13 @@ audit_accounts() {
 "
     fi
   done <"$passwd"
+
+  if [ "$unreadable" -gt 0 ]; then
+    local partial=""
+    [ "$with_keys" -eq 0 ] || partial=" (a key was found on ${with_keys} of the accounts that could be read)"
+    report SKIP "accounts/authorized-keys" "could not inspect ${unreadable} account(s) whose home or .ssh is not searchable by this user${partial} -- re-run with sudo; unprivileged, an unreadable key is indistinguishable from an absent one"
+    return
+  fi
 
   if [ "$with_keys" -eq 0 ]; then
     report OK "accounts/authorized-keys" "no account has an authorized_keys file"

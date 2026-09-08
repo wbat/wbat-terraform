@@ -646,6 +646,28 @@ fi
 # them here would add exposure without adding information.
 printf '%s' "$out" | grep -qE 'site1|site2|opsuser' \
   && { echo "FAIL: account names must not be reprinted" >&2; exit 1; }
-echo "OK installed keys are counted, de-duplicated, and never named"
+
+# An unreadable home must not read as an empty one. A .ssh is mode 700 and a
+# DirectAdmin home is 711, so unprivileged both an absent key and a key nobody
+# may look at test false -- and the answer was a clean "no account has one",
+# a false all-clear on the check that says whether the escalation is built.
+if [ "$(id -u)" -ne 0 ]; then
+  chmod 000 "$TMP/homes/site1/.ssh"
+  out="$(acct_run)"
+  [ "$(printf '%s' "$out" | verdict_for accounts/authorized-keys)" = "SKIP" ] \
+    || { echo "FAIL: an unreadable .ssh must skip, not report no keys" >&2; exit 1; }
+  printf '%s' "$out" | grep -q 'could not inspect 1 account' \
+    || { echo "FAIL: the number of unreadable accounts should be named" >&2; exit 1; }
+  chmod 700 "$TMP/homes/site1/.ssh"
+
+  # The all-clear itself has to be unreachable while anything is unreadable.
+  rm -f "$TMP/homes/opsuser/.ssh/authorized_keys" \
+    "$TMP/homes/site1/.ssh/authorized_keys" "$TMP/homes/site2/.ssh/authorized_keys"
+  chmod 000 "$TMP/homes/site1/.ssh"
+  [ "$(acct_run | verdict_for accounts/authorized-keys)" = "SKIP" ] \
+    || { echo "FAIL: no readable keys plus an unreadable home is not an all-clear" >&2; exit 1; }
+  chmod 700 "$TMP/homes/site1/.ssh"
+fi
+echo "OK installed keys are counted, de-duplicated, never named, and never guessed"
 
 echo "PASS: host access audit proofs (22 cases)"
