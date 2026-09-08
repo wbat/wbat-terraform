@@ -33,7 +33,7 @@ resource "aws_vpc_security_group_ingress_rule" "da_panel_operator" {
   for_each = var.da_panel_allowed_cidrs
 
   security_group_id = aws_security_group.default.id
-  description       = "DirectAdmin panel 2222 — ${each.key}"
+  description       = "DirectAdmin panel 2222 - ${each.key}"
   ip_protocol       = "tcp"
   from_port         = 2222
   to_port           = 2222
@@ -52,7 +52,7 @@ resource "aws_vpc_security_group_ingress_rule" "da_panel_servers" {
   for_each = local.da_panel_server_cidrs
 
   security_group_id = aws_security_group.default.id
-  description       = "DirectAdmin panel 2222 — ${each.key} (public path)"
+  description       = "DirectAdmin panel 2222 - ${each.key} (public path)"
   ip_protocol       = "tcp"
   from_port         = 2222
   to_port           = 2222
@@ -73,7 +73,7 @@ resource "aws_vpc_security_group_ingress_rule" "da_panel_servers" {
 # caused the catch-all vhost regression.
 resource "aws_vpc_security_group_ingress_rule" "da_panel_self" {
   security_group_id            = aws_security_group.default.id
-  description                  = "DirectAdmin panel 2222 — instances in this security group (private path)"
+  description                  = "DirectAdmin panel 2222 - instances in this security group (private path)"
   ip_protocol                  = "tcp"
   from_port                    = 2222
   to_port                      = 2222
