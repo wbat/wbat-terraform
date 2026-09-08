@@ -23,7 +23,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
+        # zstd is what DirectAdmin compresses backups with, and the archive-integrity
+        # proofs build real .tar.zst fixtures and truncate them. Without it those proofs
+        # would skip the check they exist to test and still print OK.
+        run: sudo apt-get update && sudo apt-get install -y shellcheck zstd
       - name: bash -n
         run: |
           set -euo pipefail
