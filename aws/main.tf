@@ -62,5 +62,7 @@ module "us-east-1" {
   instance_profile-WBAT_Main_Server      = module.global.instance_profile-WBAT_Main_Server
   instance_profile_name-WBAT_Main_Server = module.global.instance_profile_name-WBAT_Main_Server
 
+  da_panel_allowed_cidrs = var.da_panel_allowed_cidrs
+
   core_tags = local.tags
 }
