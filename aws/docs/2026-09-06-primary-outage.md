@@ -32,9 +32,14 @@ readable backup** — though every one of those runs was started by hand, and
 `tellerstec` was the twelfth: its exclusion file is
 written and its archive has been [read back out of S3 in
 full](#tellerstec-backed-up-and-verified-2026-09-08), closing a 68-day gap. `teller` is the
-one account left, it is a disk decision rather than a bug, and the deadline that remains is
-not a backup deadline at all — Installatron is writing 2.54 GB a day into `tellerstec` and
-the volume fills in about 22 days on its own.
+one account left, and it is a disk decision rather than a bug. The 22-day disk deadline
+this document previously carried
+[appears not to be real](#the-installatron-deadline-is-probably-not-real): Installatron's
+retention cap is configured after all, the pool has just reached it, and the growth that
+was measured looks like a pool filling to its limit rather than one growing without one.
+That is stated as probable rather than settled, and
+[resolves the next time Installatron actually writes an archive](#the-test-that-settles-it),
+which is not necessarily tonight.
 
 ## Do it in this order
 
@@ -69,7 +74,7 @@ step 6 exists to stop DirectAdmin's own schedule racing it.
 | 5 | [Diagnose `Not implemented`](#2-find-out-what-not-implemented-refers-to-cli) | none | not done, and optional | Read-only, and no longer on the critical path — step 7 does not go through the task queue. |
 | 6 | [Delete DirectAdmin's schedule](#3-delete-directadmins-backup-schedule) | — | done 2026-09-08 | Removed from the stored job list, not the panel — see the section for why that turned out to be possible. Repairing it would have restored a full all-users run, which no longer fits. |
 | 7 | [Let the per-account batch run take over](#per-account-backups-da_backup_batchsh) | largest single account, not the sum | installed; **the schedule has never fired** — first automatic run is 2026-09-09 01:00 EDT | Installed by step 3, but after that day's 01:00 trigger had passed. Every backup so far has been started by hand. See [the schedule is still unproven](#the-schedule-is-still-unproven). |
-| 8 | [Prune `tellerstec`'s Installatron backups](#why-tellerstec-stopped-fitting-and-why-that-is-the-cheapest-thing-here) | **frees ~31 GB, and stops ~2.5 GB/day of growth** | **not done** | The largest single reclaim left, and still the only item here with a deadline: measured over the last seven days the growth is 2.54 GB/day against 57.7 GB free, so the volume fills in about 22 days regardless of backups. Needs the account owner. Step 9 did not change this by a byte. |
+| 8 | [Cap `tellerstec`'s Installatron retention](#why-tellerstec-stopped-fitting-and-why-that-is-the-cheapest-thing-here) | up to ~31 GB, but **probably no longer urgent** | **owner decision, deadline in doubt** | Still the largest single reclaim available, but the 22-day deadline this row used to assert [looks wrong](#the-installatron-deadline-is-probably-not-real): the retention cap is configured, the pool has just reached it, and nothing has been evicted yet. [Counting evictions against creations](#the-test-that-settles-it) decides whether this is urgent or merely optional — on the next archive Installatron writes, not on a fixed date. |
 | 9 | [Write `tellerstec`'s exclusion file](#what-the-estimator-does-about-it-now) | none | done 2026-09-08 | Written, and the account was backed up and the archive read back the same afternoon — [the result](#tellerstec-backed-up-and-verified-2026-09-08). |
 | 10 | [Decide disk for `teller`](#still-open) | ~$8/month either way | **not done** | The one account no exclusion can help: 54 GB of genuine content, checked. Needs a decision, not a fix. |
 
@@ -1373,15 +1378,15 @@ everything else                       ~700M
 ```
 
 Those files are Installatron's own application backups, driven by `/etc/cron.d/installatron`,
-about 1.1 GB per app per run for two apps, with no retention limit in evidence. 28.70 GiB
-of the 28.87 GiB total arrived **since 2026-08-28**; the remaining 0.17 GiB is a single
-file from 2024-12-08. That is roughly **2.6 GB a day**, still accumulating.
+about 1.1 GB per app per run for two apps. 28.70 GiB of the 28.87 GiB total arrived
+**since 2026-08-28**; the remaining 0.17 GiB is a single file from 2024-12-08. That is
+roughly **2.6 GB a day** over the window measured.
 
-Three consequences, in order of how soon they matter.
-
-**The volume fills on its own.** 59 GB free against 2.6 GB/day is about three weeks, with
-no backup involved. Everything else in this document is about a disk that filled once;
-this is a disk scheduled to fill again, and it is the only item here with a deadline.
+That reading is now believed to be wrong, or rather right about the arithmetic and wrong
+about what it implies — see
+[the deadline is probably not real](#the-installatron-deadline-is-probably-not-real)
+below, which was written a day later against the retention settings themselves rather than
+against the file dates. The two consequences that survive it are these.
 
 **It is why `tellerstec` no longer fits.** `.tar.gz` files do not compress, so 29 GB of
 them passes through `zstd` essentially unchanged and lands in the account archive at close
@@ -1480,6 +1485,55 @@ So the first genuine test of the scheduled path is **2026-09-09 01:00 EDT**, and
 the first run to include `tellerstec` without anyone asking it to. Until it has been
 checked, "deployed" and "running nightly" are different claims and only the first is true.
 
+#### What has been proven, without waiting for 01:00
+
+The claim above is about the payload, not the plumbing, and the plumbing can be tested at
+any hour. On 2026-09-08 a second cron file was written scheduling the same script two
+minutes out, differing only in that it passed `--list`, which reads and archives nothing:
+
+```
+50 15 * * * root /usr/local/sbin/da-backup-batch.sh --list >/tmp/cron-selftest.out 2>&1
+```
+
+Cron ran it:
+
+```
+Sep  8 15:50:01 server CROND[1681164]: (root) CMD (/usr/local/sbin/da-backup-batch.sh --list …)
+Sep  8 15:50:08 server CROND[1681156]: (root) CMDEND (…)
+```
+
+Seven seconds, exit clean, and the expected thirteen-row table in the output file. The test
+file was then removed. That rules out the failure modes that would otherwise only surface
+at 01:00 — a cron file cron declines to parse, a name it skips, a script that is not
+executable, a `PATH` that is wrong under cron's minimal environment, or a script that needs
+a terminal. What remains untested is the run itself, which is a matter of the payload
+taking twenty-odd minutes rather than seven seconds.
+
+The same output is the current statement of what fits:
+
+```
+ACCOUNT                HOME   EXCLUDED       PEAK FITS NOW
+tellerstec            35.5G      30.5G       9.9G yes
+wbatnet               10.5G          -      21.0G yes
+teller                54.0G          -     108.1G NO
+```
+
+`tellerstec` at 9.9 GB of peak instead of 66.8 GB is the exclusion working, read back out
+of the scheduled path rather than an interactive one. Twelve accounts fit; `teller` does
+not, which is [the decision that is left](#still-open).
+
+#### One thing cleaned up along the way
+
+Reading `/var/log/cron` closely enough to prove a negative made an unrelated nuisance
+obvious. Two files in `/var/spool/cron` were not crontabs of any user —
+`root.bak-da-vhost` and `tellerstec.bak-20260701`, both saved there by earlier maintenance
+— and cron treats every file in that directory as a user's crontab, so it logged
+`ORPHAN (no passwd entry)` for each, once a minute, about 2,900 lines a day. Harmless in
+itself, but the noise was in the one log this document now depends on to show whether the
+backup schedule fired. Both were moved to `/root/crontab-backups/`, leaving fifteen files
+in the spool that each map to a real user. No live crontab was touched: root still carries
+the corrected `0 5 * * 6 /usr/local/sysbk/sysbk -q`.
+
 ### `tellerstec` backed up and verified (2026-09-08)
 
 Done, on the afternoon of 2026-09-08, after #128 was merged and installed. The file was
@@ -1529,11 +1583,124 @@ the measured shape implies a peak nearer 16 GiB than the 10 GB the gate would es
 fit inside 59.8 GB free with the 10 GB reserve, so the account runs either way, and the
 free-space floor is the guard that would catch it if that stopped being true.
 
-The exclusion makes the account fit; it does not slow the growth that fills the volume.
-Measured over the seven days to 2026-09-08 that growth is **2.54 GB/day** — 17.81 GB, from
-the four daily runs of `33 1,7,13,19 * * * /usr/local/installatron/lib/cron.updater.sh` —
-against 57.7 GB free, which is **about 22 days**. Pruning and capping Installatron's
-retention are still the items with the deadline, and both still need the account owner.
+The exclusion makes the account fit; it does not by itself slow the growth in that
+directory. Measured over the seven days to 2026-09-08 that growth is **2.54 GB/day** —
+17.81 GB, from the four daily runs of
+`33 1,7,13,19 * * * /usr/local/installatron/lib/cron.updater.sh`. Read on its own that
+number says the volume fills in about 22 days. Read against Installatron's own retention
+settings it says something else, and the next section is that reading.
+
+### The Installatron deadline is probably not real
+
+Every previous statement in this document about `tellerstec`'s growth was inferred from
+file dates: count the bytes that arrived in seven days, divide, extrapolate. That method
+cannot tell a directory growing without a limit apart from one filling up to a limit it has
+not reached yet. Asking Installatron directly settles which of the two this is, and the
+answer changes the urgency.
+
+**The retention cap is configured, and it was never absent.** The earlier claim of "no
+retention limit in evidence" was a failure to look in the right place — it is not on the
+filesystem, it is in Installatron's settings, readable without the panel:
+
+```bash
+/usr/local/installatron/installatron --set </dev/null | grep bs_custom_limit
+```
+
+```
+"bs_custom_limit_daily": "30",
+"bs_custom_limit_weekly": "52",
+"bs_custom_limit_monthly": "120",
+```
+
+The `</dev/null` is not decoration. The CLI reads standard input, and without it a
+heredoc-driven session feeds the rest of the script into Installatron as arguments.
+
+**The pool is sitting exactly on the daily cap.** 30 files, 30.5 GiB, against a
+`bs_custom_limit_daily` of 30. Two apps back up two to three times a day at ~1.05 GB each,
+so 30 files is about eleven days of history, and the retained set does span 2026-08-28 to
+2026-09-08 — eleven days.
+
+**Nothing has ever been evicted.** This is the part that matters, and it is a single
+observation. The oldest file in the directory is
+`app_learn-tellerstech-com_..._2024-12-09_00-35-11.tar.gz`, **638 days old**. Count-based
+eviction removes the oldest first. If the cap had ever bound, that file would have been the
+first thing deleted, and it is still there. So the pool has not been evicting and holding
+steady — it has been filling, and it reached 30 in the last day or so.
+
+If that is right, growth stops on its own at roughly 31–32 GB, each new backup displacing
+the oldest, and there is no 22-day deadline. The 2.54 GB/day was real but temporary: it
+measured the last stretch of a pool filling to its cap. The corroborating detail is that in
+the 24 hours to 2026-09-08 15:58 the directory gained two files and lost none, which is
+what a pool that has not started evicting looks like.
+
+#### The test that settles it
+
+Inference is not measurement, so this is recorded as probable and left to resolve itself.
+A baseline was taken on the host at 2026-09-08 15:58:32 EDT and saved to
+`/root/installatron-baseline-2026-09-08.txt`:
+
+| | |
+|---|---|
+| files in `application_backups` | 30 |
+| bytes | 32,746,089,692 |
+| `/home/tellerstec` bytes | 37,869,325,797 |
+| oldest file | 2024-12-08, 638 days |
+
+The obvious form of this check — read the same figures tomorrow morning — does not work,
+and the reason is worth stating because it is the same class of mistake as the one this
+section exists to correct. These archives are written *ahead of auto-updates*. If neither
+application has an update waiting, the updater runs and writes nothing, which is already
+visible in the data: four updater passes a day produce two to three archives. So a check on
+a fixed date has a third outcome nobody planned for — the baseline comes back unchanged
+because nothing happened — and an unchanged baseline is exactly what "the cap binds" is
+supposed to look like. The test would confirm itself by measuring nothing.
+
+What distinguishes the two hypotheses is not a date but a ratio: **how many files are
+evicted per file created.** A pool at its cap deletes one for each one it adds. A pool
+still filling adds without deleting. That is measurable whenever the next archive appears,
+whether that is tonight or next week, and the baseline records filenames precisely so the
+comparison is exact rather than inferred from a count:
+
+```bash
+d=/home/tellerstec/application_backups
+b=/root/installatron-baseline-2026-09-08.txt
+now=$(mktemp); base=$(mktemp)
+find "$d" -type f -printf '%f\n' | sort >"$now"
+cut -d' ' -f3- "$b" | sort >"$base"
+printf 'created=%s evicted=%s files=%s bytes=%s\n' \
+  "$(comm -23 "$now" "$base" | wc -l)" \
+  "$(comm -13 "$now" "$base" | wc -l)" \
+  "$(wc -l <"$now")" "$(du -sb "$d" | cut -f1)"
+rm -f "$now" "$base"
+```
+
+Read `created` first, because it says whether the run is informative at all:
+
+- **`created=0`** — Installatron has not written an archive since the baseline. No
+  information either way. Leave the question open and run it again; do not read the
+  unchanged size as evidence of a cap.
+- **`created>0` and `evicted` equal to it** — the cap binds. Growth has stopped near 31 GB,
+  there is no deadline, and capping retention further becomes an optional tidy-up.
+- **`created>0` and `evicted=0`** — the cap is not being enforced on these backups, which
+  is plausible since `features_autoup_backup` generates them and may not be governed by
+  `bs_custom_limit_daily` at all. The original reading stands and the deadline is real,
+  roughly three weeks from 2026-09-08.
+- **`evicted` positive but smaller than `created`** — a cap that binds on something other
+  than a flat count of 30, most likely the weekly and monthly tiers interacting. Growth
+  slows rather than stopping, and the runway is `created - evicted` files per day at
+  ~1.05 GB each. Recompute rather than reusing either figure above.
+
+The 2024-12-08 file is the single most useful thing to watch inside that: it is the oldest
+by 638 days, so any count-based eviction takes it first. It disappearing is the cap binding;
+it surviving alongside new arrivals is the cap not binding.
+
+**Relocating them is not the easy fix it looks like.** Installatron can write backups to a
+remote location instead of the account's home, which would solve the disk problem and the
+never-backed-up problem together, but this build offers `dropbox`, `ftp`, `ftps`, `gdrive`,
+`rackspace`, `sftp` and `webdav` — **no S3**. The bucket everything else in this document
+uses is not a destination it can reach without standing up an SFTP or WebDAV front end for
+it, which is more moving parts than the problem justifies. If the pool turns out to be
+capped, the right answer is to leave it alone.
 
 ### 2. Find out what `Not implemented` refers to (CLI)
 
@@ -2082,6 +2249,18 @@ could not be read, so it can gate a restore decision. Results of the first run a
   a weekly `--user=teller` run gets most of the protection for about $15/month more than is
   being spent now — and it still needs the disk, because the constraint is peak local
   space during the run, not how often the run happens.
+- **Whether `tellerstec`'s Installatron directory is still growing is unresolved, and it
+  decides whether anything here has a deadline.** The evidence now points at a pool that
+  has just filled to its configured 30-file cap rather than one growing without a limit,
+  which would mean no 22-day deadline and no urgency — but that is an inference from the
+  fact that [nothing has been evicted
+  yet](#the-installatron-deadline-is-probably-not-real), not a measurement.
+  [A baseline is recorded and the check takes one command](#the-test-that-settles-it), but
+  it only answers anything once Installatron has actually written a new archive — these are
+  produced ahead of auto-updates, so a quiet night produces none and the check returns the
+  baseline unchanged, which is indistinguishable from a cap that binds. Read `created`
+  before reading anything else. Until it is positive, treat the deadline as unknown rather
+  than as either three weeks or absent.
 - **Restore has never been rehearsed** — though the archives have now been read.
   [The 2026-09-08 sweep](#is-what-is-already-in-s3-readable-a-read-back-of-every-archive-2026-09-08)
   read every compressed object in the bucket and settled the readability half of this:
