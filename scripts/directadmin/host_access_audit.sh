@@ -119,34 +119,46 @@ user_groups() {
 # overstates exposure. The opposite mistake, calling a live account refused, is
 # the one that would tell an operator a working key is inert.
 ssh_admits() {
-  local u="$1" pat g ok groups
+  local u="$1"
   [ "$SSH_ALLOW_RESOLVED" -eq 1 ] || return 2
 
-  if [ -n "$SSH_ALLOW_USERS" ]; then
-    ok=1
-    for pat in $SSH_ALLOW_USERS; do
-      case "$pat" in *'!'* | *@*) return 2 ;; esac
-      # shellcheck disable=SC2254 # unquoted on purpose: sshd honours wildcards
-      case "$u" in $pat) ok=0 ;; esac
-    done
-    [ "$ok" -eq 0 ] || return 1
-  fi
-
-  if [ -n "$SSH_ALLOW_GROUPS" ]; then
-    groups="$(user_groups "$u")" || return 2
-    [ -n "$groups" ] || return 2
-    ok=1
-    for pat in $SSH_ALLOW_GROUPS; do
-      case "$pat" in *'!'*) return 2 ;; esac
-      for g in $groups; do
+  # OpenSSH permits `*` and `?` in AllowUsers/AllowGroups
+  # (sshd_config(5)). An unquoted `for pat in $SSH_ALLOW_USERS` expands those
+  # against the working directory before the case comparison, so `AllowUsers
+  # user*` run from a directory containing `userjunk` iterates the pathname
+  # instead of the pattern and reports two key-bearing matches as refused -- a
+  # false all-clear. Matching runs in a subshell with pathname expansion off;
+  # the unquoted `$pat` in `case` is still what makes the wildcard match.
+  # (No `local` here: a bare subshell is not a function, and the subshell
+  # already keeps these assignments out of the caller's environment.)
+  (
+    set -f
+    pat= g= ok= groups=
+    if [ -n "$SSH_ALLOW_USERS" ]; then
+      ok=1
+      for pat in $SSH_ALLOW_USERS; do
+        case "$pat" in *'!'* | *@*) exit 2 ;; esac
         # shellcheck disable=SC2254 # unquoted on purpose: sshd honours wildcards
-        case "$g" in $pat) ok=0 ;; esac
+        case "$u" in $pat) ok=0 ;; esac
       done
-    done
-    [ "$ok" -eq 0 ] || return 1
-  fi
+      [ "$ok" -eq 0 ] || exit 1
+    fi
 
-  return 0
+    if [ -n "$SSH_ALLOW_GROUPS" ]; then
+      groups="$(user_groups "$u")" || exit 2
+      [ -n "$groups" ] || exit 2
+      ok=1
+      for pat in $SSH_ALLOW_GROUPS; do
+        case "$pat" in *'!'*) exit 2 ;; esac
+        for g in $groups; do
+          # shellcheck disable=SC2254 # unquoted on purpose: sshd honours wildcards
+          case "$g" in $pat) ok=0 ;; esac
+        done
+      done
+      [ "$ok" -eq 0 ] || exit 1
+    fi
+    exit 0
+  )
 }
 
 # Effective config for one connection context, or empty if it cannot be taken.
@@ -825,12 +837,17 @@ audit_accounts() {
   # Six keys across fourteen accounts sounds unremarkable until one of the six
   # is installed on all fourteen, at which case that single private key is the
   # whole box and its blast radius is what needs managing, not the file count.
-  local detail="" distinct widest widest_fp top
+  local detail="" distinct widest widest_fps shared_on_live=0 fp
   if [ -n "${fps//[[:space:]]/}" ]; then
     distinct="$(printf '%s' "$fps" | sort -u | grep -c . || true)"
-    top="$(printf '%s' "$fps" | grep . | sort | uniq -c | sort -rn | head -1)"
-    widest="$(printf '%s' "$top" | awk '{print $1}')"
-    widest_fp="$(printf '%s' "$top" | awk '{print $2}')"
+    # Every fingerprint that ties for the maximum count, not just the first
+    # of them. `head -1` after `sort -rn` is arbitrary among ties, and testing
+    # only that one against fps_live can miss: a tied fingerprint that sits
+    # only on refused accounts would silence the warning while another with
+    # the same reach sits on an admitted one.
+    widest="$(printf '%s' "$fps" | grep . | sort | uniq -c | sort -rn | awk 'NR==1 {print $1}')"
+    widest_fps="$(printf '%s' "$fps" | grep . | sort | uniq -c |
+      awk -v w="${widest:-0}" '$1 == w {print $2}')"
     detail=", ${distinct} distinct key(s), the most widely installed of which is on ${widest:-?} of them"
   fi
 
@@ -881,10 +898,22 @@ audit_accounts() {
   # it does nothing about a key that is on an admitted account *and* on a dozen
   # others: that private key still opens a session, and its reach is what a leak
   # costs. On the primary this is the EC2 key pair, copied to every account and
-  # left on the operator's.
-  if [ -n "${widest_fp:-}" ] && [ "${widest:-1}" -gt 1 ] \
-    && printf '%s' "$fps_live" | grep -qxF "$widest_fp"; then
-    gate="${gate} The most widely installed key is also on an admitted account, so its reach is not neutralised: one leaked private key still opens a session."
+  # left on the operator's. Every fingerprint that ties for the maximum count
+  # is tested -- picking one of a tie at random is how a refused-only fingerprint
+  # would silence the warning while an equally widespread live one stayed quiet.
+  if [ -n "${widest_fps:-}" ] && [ "${widest:-1}" -gt 1 ]; then
+    while IFS= read -r fp; do
+      [ -n "$fp" ] || continue
+      if printf '%s' "$fps_live" | grep -qxF "$fp"; then
+        shared_on_live=1
+        break
+      fi
+    done <<EOF
+${widest_fps}
+EOF
+    if [ "$shared_on_live" -eq 1 ]; then
+      gate="${gate} The most widely installed key is also on an admitted account, so its reach is not neutralised: one leaked private key still opens a session."
+    fi
   fi
 
   report WARN "accounts/authorized-keys" "${with_keys} account(s) hold an authorized_keys file${detail}.${gate}${nologin_note}"

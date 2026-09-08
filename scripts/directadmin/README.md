@@ -654,7 +654,7 @@ in, is in [aws/docs/host-access-hardening.md](../../aws/docs/host-access-hardeni
 ./scripts/directadmin/prove_host_access_audit.sh
 ```
 
-Twenty-four cases, every one of them a way this audit can mislead: a password path left
+Twenty-six cases, every one of them a way this audit can mislead: a password path left
 open while the report reads green, or a false alarm that sends an operator to install
 something harmful. The motivating case is `PasswordAuthentication no` with PAM
 keyboard-interactive still enabled: what most hardening checklists stop short of,
@@ -684,3 +684,11 @@ reverse direction just as hard, because calling a live key inert would be the au
 vouching for access it never checked: an allowlist that refuses nobody, a shared key
 still sitting on an admitted account, and group membership that cannot be resolved all
 have to keep warning.
+
+Cases 25 and 26 close two quieter ways the same reclassification can still lie.
+Case 25 is a working-directory trap: OpenSSH permits `*` in `AllowUsers`, and an
+unquoted `for` over that pattern expands against cwd before the match, so
+`AllowUsers user*` run next to a file named `userjunk` reported the matching
+accounts as refused. Case 26 is a tie: two fingerprints at the same maximum reach,
+one only on refused accounts and one on an admitted account — keeping only
+`head -1` of that tie can silence the live one.

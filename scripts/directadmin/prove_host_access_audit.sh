@@ -832,4 +832,87 @@ printf '%s' "$out" | grep -q 'admits root' \
   || { echo "FAIL: key-only root with no allowlist is still a finding" >&2; exit 1; }
 echo "OK root login is judged on whether a root session can authenticate at all"
 
-echo "PASS: host access audit proofs (24 cases)"
+echo "== Case 25: AllowUsers wildcards must not expand against the filesystem =="
+# OpenSSH permits `*` and `?` in AllowUsers (sshd_config(5)). The matcher used
+# to iterate `for pat in $SSH_ALLOW_USERS` with pathname expansion on, so a
+# pattern like `user*` run from a directory containing `userjunk` became the
+# pathname `userjunk` before the case comparison -- and two key-bearing accounts
+# that the pattern admits were reported as refused. That is a false all-clear
+# on the check that says whether an installed key still authenticates.
+mkdir -p "$TMP/homes/user01/.ssh" "$TMP/homes/user02/.ssh" "$TMP/globcwd"
+printf '%s\n' "$K1" >"$TMP/homes/user01/.ssh/authorized_keys"
+printf '%s\n' "$K1" >"$TMP/homes/user02/.ssh/authorized_keys"
+# The pathname that would steal the pattern under an expanding for-loop.
+touch "$TMP/globcwd/userjunk"
+acct_passwd "user01:x:1101:1101::${TMP}/homes/user01:/bin/bash
+user02:x:1102:1102::${TMP}/homes/user02:/bin/bash
+"
+cat >"$TMP/user-groups" <<'EOF'
+user01:user01
+user02:user02
+root:root
+EOF
+cat >"$TMP/allow-wildcard" <<'EOF'
+port 22
+passwordauthentication no
+kbdinteractiveauthentication no
+usepam yes
+permitrootlogin no
+allowusers user*
+EOF
+# cwd is the trap: without set -f the pattern expands here before matching.
+out="$(
+  cd "$TMP/globcwd" &&
+    env -i PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+      HOST_AUDIT_SSHD_T_FILE="$TMP/allow-wildcard" HOST_AUDIT_SSHD_CONFIG="$TMP/sshd_config.plain" \
+      HOST_AUDIT_PASSWD="$TMP/passwd.accts" HOST_AUDIT_LISTENERS="22" \
+      HOST_AUDIT_USER_GROUPS_FILE="$TMP/user-groups" \
+      HOST_AUDIT_CSF_CONF="$TMP/csf.conf" HOST_AUDIT_LFD_ACTIVE=1 \
+      HOST_AUDIT_INSTANCE_ID="i-000000000000000" \
+      bash "$AUDIT" --json 2>/dev/null || true
+)"
+[ "$(printf '%s' "$out" | verdict_for accounts/authorized-keys)" = "WARN" ] \
+  || { echo "FAIL: AllowUsers user* must still admit user01/user02 when cwd has userjunk" >&2; exit 1; }
+printf '%s' "$out" | grep -q 'not narrowing anything here\|admits 2 of them' \
+  || { echo "FAIL: both wildcard matches should still count as live" >&2; exit 1; }
+# And the pattern itself must still match -- a set -f that also broke case
+# matching would refuse everyone and look like the bug from the other side.
+printf '%s' "$out" | grep -q 'admits none of them' \
+  && { echo "FAIL: set -f must not stop the wildcard matching the account name" >&2; exit 1; }
+echo "OK AllowUsers wildcards match account names, not pathnames in cwd"
+
+echo "== Case 26: every fingerprint tied for widest reach must be tested =="
+# Two keys on the same number of accounts, one only on refused accounts and one
+# on an admitted account. Taking `head -1` after sorting by count keeps an
+# arbitrary member of the tie; if that member is the refused-only key, the
+# live one is never checked against fps_live and the reach caveat is silently
+# dropped. Preserve and test every fingerprint at the maximum count.
+mkdir -p "$TMP/homes/site3/.ssh"
+printf '%s\n' "$K2" >"$TMP/homes/opsuser/.ssh/authorized_keys"   # admitted
+printf '%s\n' "$K1" >"$TMP/homes/site1/.ssh/authorized_keys"     # refused
+printf '%s\n' "$K1" >"$TMP/homes/site2/.ssh/authorized_keys"     # refused
+printf '%s\n' "$K2" >"$TMP/homes/site3/.ssh/authorized_keys"     # refused
+acct_passwd "opsuser:x:1001:1001::${TMP}/homes/opsuser:/bin/bash
+site1:x:1003:1003::${TMP}/homes/site1:/bin/bash
+site2:x:1004:1004::${TMP}/homes/site2:/bin/bash
+site3:x:1005:1005::${TMP}/homes/site3:/bin/bash
+"
+cat >"$TMP/user-groups" <<'EOF'
+opsuser:opsuser,sshusers
+site1:site1
+site2:site2
+site3:site3
+root:root
+EOF
+# Both keys are on exactly 2 accounts. K1 is refused-only; K2 is on the
+# admitted opsuser. Either one could be head -1 depending on fingerprint order.
+out="$(allow_run)"
+printf '%s' "$out" | grep -q 'most widely installed of which is on 2 of them' \
+  || { echo "FAIL: tied keys should both count as widest" >&2; exit 1; }
+printf '%s' "$out" | grep -q 'most widely installed key is also on an admitted account' \
+  || { echo "FAIL: a tied live key must not be silenced by a tied refused-only peer" >&2; exit 1; }
+[ "$(printf '%s' "$out" | verdict_for accounts/authorized-keys)" = "WARN" ] \
+  || { echo "FAIL: a live shared key among a tie is still a finding" >&2; exit 1; }
+echo "OK every fingerprint at the maximum reach is tested, not just one of a tie"
+
+echo "PASS: host access audit proofs (26 cases)"
