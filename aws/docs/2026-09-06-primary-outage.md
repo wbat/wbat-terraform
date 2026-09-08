@@ -62,6 +62,7 @@ step 6 exists to stop DirectAdmin's own schedule racing it.
 | 5 | [Diagnose `Not implemented`](#2-find-out-what-not-implemented-refers-to-cli) | none | not done, and optional | Read-only, and no longer on the critical path — step 7 does not go through the task queue. |
 | 6 | [Delete DirectAdmin's schedule](#3-delete-directadmins-backup-schedule) | — | done 2026-09-08 | Removed from the stored job list, not the panel — see the section for why that turned out to be possible. Repairing it would have restored a full all-users run, which no longer fits. |
 | 7 | [Let the per-account batch run take over](#per-account-backups-da_backup_batchsh) | largest single account, not the sum | **not scheduled** | Installed by step 3. Eleven of the thirteen accounts fit; the other two need a disk decision, not a schedule. |
+| 8 | [Prune `tellerstec`'s Installatron backups](#why-tellerstec-stopped-fitting-and-why-that-is-the-cheapest-thing-here) | **frees ~29 GB, and stops ~2.6 GB/day of growth** | **not done** | The largest single reclaim left, and the only item here with a deadline: at the observed rate the volume fills in roughly three weeks on its own, regardless of backups. Doing it also makes `tellerstec` fit again. |
 
 ### State of the host, read 2026-09-07 05:02 UTC
 
@@ -1309,10 +1310,62 @@ other two.** Those two hold 87.4 GiB of the 114 GiB of homes on the host — a f
 to resemble `teller`'s peak above and is not related to it. Lowering the ratio would not help: the gate would
 stop skipping them, the floor would kill them mid-run, and — before the sentinel fix —
 each kill would publish another fragment to S3. This is a disk problem now, not a
-scheduling one. The options are to give `/home/admin_backups` its own volume, to grow the
-root volume (200 GB now, 71% used), or to accept that the two largest accounts are backed
-up by something other than DirectAdmin. It needs a decision; nothing in this repo makes
-one.
+scheduling one — but only half of it is a disk *purchase*, which the next section is about.
+
+### Why `tellerstec` stopped fitting, and why that is the cheapest thing here
+
+Measured 2026-09-08, prompted by a review question about the retention arithmetic. Two
+figures in this document did not reconcile, and chasing the discrepancy was more useful
+than settling it: `tellerstec` archived to **7.7 GiB** on 2026-07-02, and the fragment its
+killed run left on 2026-09-07 was already **20.0 GiB** before it was cut short. An account
+does not triple in two months by accident.
+
+It did not. Of its 34 GB home, **29 GB is `application_backups`** and 5.0 GB is everything
+else — the domains, the mail, the actual site:
+
+```
+/home/tellerstec/application_backups   30G     29 files
+/home/tellerstec/domains              4.3G
+everything else                       ~700M
+```
+
+Those files are Installatron's own application backups, driven by `/etc/cron.d/installatron`,
+about 1.1 GB per app per run for two apps, with no retention limit in evidence. 28.70 GiB
+of the 28.87 GiB total arrived **since 2026-08-28**; the remaining 0.17 GiB is a single
+file from 2024-12-08. That is roughly **2.6 GB a day**, still accumulating.
+
+Three consequences, in order of how soon they matter.
+
+**The volume fills on its own.** 59 GB free against 2.6 GB/day is about three weeks, with
+no backup involved. Everything else in this document is about a disk that filled once;
+this is a disk scheduled to fill again, and it is the only item here with a deadline.
+
+**It is why `tellerstec` no longer fits.** `.tar.gz` files do not compress, so 29 GB of
+them passes through `zstd` essentially unchanged and lands in the account archive at close
+to full size. 7.7 GiB in July plus ~29 GB of incompressible additions is the ~32 GiB the
+2026-09-07 fragment was heading for, and 200% of that is the ~64 GiB peak the gate now
+refuses. Prune them and the account archives to roughly what it did in July, needing about
+16 GiB of peak space against 59.8 GiB free — a comfortable fit, with no new volume.
+
+**It is a backup of a backup.** Every one of those files is an Installatron archive of a
+site that DirectAdmin is also archiving. Backing them up to S3 stores the same content
+twice, and at ~$2.55 per nightly GiB per month at steady state, that redundancy alone is
+about **$74/month** of the $230 figure in [Still open](#still-open).
+
+`teller` is the opposite case and worth stating so the two are not treated alike. Its 55 GB
+is 45 GB of `domains`, 4.0 GB of `Maildir` and 4.5 GB of `imap`, with 35.94 GiB across
+53,591 files already in compressed formats — real content, mostly media, with no
+application backups at all. Nothing to prune. That one is a genuine disk decision.
+
+What to do about it is a judgement call this document does not make, but the options are
+not equivalent. Deleting the old archives reclaims the 29 GB once and it returns in eleven
+days. Capping Installatron's retention is the fix that holds, and is configured per
+installation in its panel rather than on the filesystem. Excluding `application_backups`
+from the DirectAdmin account backup is worth doing either way — DirectAdmin supports
+per-user exclusions and none is configured here — because backing up a backup is waste
+even when it fits. Before deleting anything, confirm with the account owner that
+Installatron's copies are not the intended restore path for those two apps; the account
+backup is not a substitute if it has been excluding them.
 
 ### 2. Find out what `Not implemented` refers to (CLI)
 
@@ -1805,36 +1858,49 @@ could not be read, so it can gate a restore decision. Results of the first run a
   four and a half hours during this outage with no notification. That is a metric EC2
   emits for free, needs no agent, and would have caught this — the cheapest available
   improvement, and it belongs in Terraform.
-- **The two largest accounts cannot be backed up on this volume.** `tellerstec` needs
-  about 64 GiB of peak local space and `teller` about 87 GiB, against 59.8 GiB free, and
-  the reason is DirectAdmin's own behaviour rather than anything schedulable — it holds
-  the assembled parts of a backup and the archive built from them on disk at the same
-  time. The other eleven fit comfortably, and now run nightly. Deciding this needs a
-  person, so here is the arithmetic rather than a recommendation. The root volume is a
-  200 GB `gp3` at 71% used, so at $0.08/GB-month the three options price out as:
+- **The two largest accounts cannot be backed up on this volume, but only one of them is
+  really a disk problem.** `tellerstec` needs about 64 GiB of peak local space and
+  `teller` about 87 GiB, against 59.8 GiB free, because DirectAdmin holds the assembled
+  parts of a backup and the archive built from them on disk at the same time. The other
+  eleven fit comfortably and now run nightly. The two are not the same case, though, and
+  treating them as one is what made this look like a hardware purchase:
+  [`tellerstec` is 85% backups of itself](#why-tellerstec-stopped-fitting-and-why-that-is-the-cheapest-thing-here),
+  and pruning them costs nothing and has to happen anyway. Only `teller` — 55 GB of real
+  mail, media and web content, 43.4 GiB archived — genuinely needs more room. For that
+  one, the root volume is a 200 GB `gp3` at 71% used, so at $0.08/GB-month:
 
   | Option | Change | Cost | Covers |
   |---|---|---|---|
-  | Dedicated volume for `/home/admin_backups` | new 150 GB `gp3`, mounted, `local_path` unchanged | ~$12/mo | Both accounts, one at a time. Staging stops competing with `/` entirely, which is the failure this whole document is about. |
-  | Grow the root volume | 200 GB → 320 GB | ~$9.60/mo | Both, but keeps staging and live data on one volume, so a runaway backup can still threaten the host. |
-  | Shrink the accounts | `teller` is 54 GB of home | free | Nothing on its own — 54 GB of mail and web content does not obviously compress away, and this is a customer conversation rather than an ops change. |
+  | Dedicated volume for `/home/admin_backups` | new 100 GB `gp3`, mounted, `local_path` unchanged | ~$8/mo | `teller`, and staging stops competing with `/` entirely, which is the failure this whole document is about |
+  | Grow the root volume | 200 GB → 300 GB | ~$8/mo | `teller`, but keeps staging and live data on one volume, so a runaway backup can still threaten the host |
+  | Do neither, keep `teller` on July's archive | free | Nothing. Its last backup is whole but ages a day every day |
 
-  The dedicated volume is the only one that also removes the coupling, which is worth the
-  $2.40/month difference. Note that a separate volume means the free-space floor and the
-  reserve have to be measured against *that* filesystem rather than `/`; `da_backup_batch.sh`
-  reads `df` for the staging path, so this is a mount, not a code change — but it should be
-  verified with `--dry-run` before the first real run, because a floor of 8 GB against a
-  150 GB volume is a different proposition than against a 200 GB one.
+  At the same price the dedicated volume is the better of the two, because it also removes
+  the coupling. One thing changes with it: the floor and the reserve then apply to *that*
+  filesystem, and 8 GB against 100 GB is not the same proposition as 8 GB against 200 GB.
+  That is a mount rather than a code change — `da_backup_batch.sh` reads `df` for the
+  staging path — but it wants a `--dry-run` before the first real run.
 
-  **There is a second-order cost worth knowing before adding the two big accounts.** The
-  eleven that fit are 14.96 GiB a night. Under the bucket's lifecycle — Standard for 30
-  days, `STANDARD_IA` to 90, `GLACIER_IR` to 365, then expiry — that settles at roughly
-  4.9 TB and about $38/month once a full year has accumulated. Adding `tellerstec` and
-  `teller` takes the nightly figure to about 66 GiB, which settles nearer 21 TB and
-  **about $170/month**. If the two big accounts do not need daily granularity, giving them
-  a weekly `--user=` run instead of a nightly one gets most of the protection for about a
-  seventh of the storage. Measurements are under
-  [the first real run](#the-first-real-run-2026-09-07-2215-edt).
+  **The storage cost is the part most likely to change the answer, and it is not small.**
+  Under the bucket's lifecycle — Standard for 30 days, `STANDARD_IA` to 90, `GLACIER_IR`
+  to 365, then expiry — a nightly GiB settles at roughly $2.55/month once a full year has
+  accumulated. So:
+
+  | Nightly set | Per night | Steady state | Cost |
+  |---|---|---|---|
+  | The eleven that fit today | 14.96 GiB | ~4.9 TB | ~$38/mo |
+  | All thirteen, `tellerstec` as it is now | ~90.4 GiB | ~30 TB | **~$230/mo** |
+  | All thirteen, `tellerstec` pruned | ~66 GiB | ~22 TB | ~$168/mo |
+  | Eleven + pruned `tellerstec` nightly, `teller` weekly | ~29 GiB | ~9.7 TB | ~$74/mo |
+
+  An earlier revision of this section put the all-thirteen figure at 66 GiB, reasoning from
+  the 2026-07-02 full run, which really was 66.055 GiB. That is now wrong, and the reason
+  it is wrong is the same finding as above: in July `tellerstec` archived to 7.7 GiB, and
+  today it would archive to about 32 GiB. Reasoning from the last complete run is only safe
+  while nothing has changed underneath it. The last line of the table is the one worth
+  considering: if `teller` does not need daily granularity, a weekly `--user=` run gets
+  most of the protection for a third of the cost of doing everything nightly. Per-account
+  sizes are under [the first real run](#the-first-real-run-2026-09-07-2215-edt).
 - **Restore has never been rehearsed** — though the archives have now been read.
   [The 2026-09-08 sweep](#is-what-is-already-in-s3-readable-a-read-back-of-every-archive-2026-09-08)
   read every compressed object in the bucket and settled the readability half of this:
