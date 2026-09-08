@@ -367,8 +367,8 @@ not go through the task queue at all, and on 2026-09-07 it archived and uploaded
 accounts with `Not implemented` still failing every morning. Repairing the stored job is
 therefore not a prerequisite for having backups — see
 [the batching section](#per-account-backups-da_backup_batchsh) — and the stored job is now
-something to [delete](#3-delete-directadmins-backup-schedule--this-one-needs-the-panel)
-rather than repair. Corroborating:
+something to [delete](#3-delete-directadmins-backup-schedule) rather than repair, which
+was done on 2026-09-08. Corroborating:
 `/home/admin_backups` is empty with mtime 2026-07-02, `/var/log/da-backup-s3.log` has not
 been written since 2026-07-02 05:52, and S3 confirms it:
 
@@ -1018,8 +1018,8 @@ fix would not otherwise have been running.
 Note what `--install` now covers. As well as the two hooks and the disk guard, it installs
 `da-backup-batch.sh` and `/etc/cron.d/da-backup-batch`, so running it schedules account
 backups at 01:00. That is the intended outcome, but it means DirectAdmin's own schedule
-should be [deleted](#3-delete-directadmins-backup-schedule--this-one-needs-the-panel) in the
-same sitting rather than afterwards.
+should be [deleted](#3-delete-directadmins-backup-schedule) in the same sitting rather than
+afterwards. Both were done together on 2026-09-08.
 
 ## DirectAdmin remediation — what to run, and what needs the panel
 
