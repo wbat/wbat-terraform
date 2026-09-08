@@ -12,9 +12,13 @@ partial setup still yields a working agent.
 
 | Path | Grants | Credential | Revoke by |
 | --- | --- | --- | --- |
-| AWS read-only | Metrics, logs, describes, cost | `cursor-agent` IAM key | Deleting the access key |
-| AWS Session Manager | Root-equivalent shell on both EC2 boxes | same key | `cursor_agent_shell_access = false` |
+| AWS | Whatever `bteller` can do — currently admin | `bteller` IAM key | Rotating that key (see the caveat in §1) |
+| AWS Session Manager | Root-equivalent shell on both EC2 boxes | same key | Removing the secret from the agent environment |
 | HCP Terraform | Read plans, runs, state outputs | API token | Revoking the token |
+
+The AWS row is deliberately blunt. This setup currently reuses a human admin key rather
+than a scoped agent identity, so the honest description of the grant is "everything."
+§1 covers what that costs and how to narrow it later.
 
 ## Why not SSH
 
@@ -30,8 +34,9 @@ strictly less standing credential:
 - **Nothing changes on the servers.** The instance profile already carries
   `AmazonSSMManagedInstanceCore`. No inbound port, no security-group edit, no tailnet
   node per agent VM.
-- **Sessions are attributable.** Every `StartSession` is a CloudTrail event tied to the
-  `cursor-agent` user, and access is revoked by deleting one access key.
+- **Sessions are logged.** Every `StartSession` is a CloudTrail event. Note that while
+  the agent uses `bteller`'s key those events carry the *human's* identity, so the log
+  tells you a session happened but not who opened it — see §1.
 
 Tailscale and the `.pem` key remain the **human** paths, and they are the fallback if the
 SSM agent on a box ever stops reporting — a case `.cursor/start.sh` reports at boot.
@@ -102,45 +107,60 @@ restriction rather than a broken key, and check the scope the secret was created
 
 ## 1. AWS (metrics, logs, data, and shell)
 
-`aws/global/iam/user-CursorAgent.tf` defines a `cursor-agent` IAM user with two
-policies: a read-only telemetry policy, and a Session Manager policy gated behind
-`local.cursor_agent_shell_access`.
+**Current choice: reuse the existing `bteller` admin key.** No new IAM identity is
+created, so there is nothing here for Terraform to apply — `bteller` is a console-managed
+user and does not appear in this repo. Setup is entirely a dashboard operation.
 
-Read the policy before applying. The parts worth understanding:
+That keeps setup to one step, and it is a reasonable call for a single-operator account
+where the agent is already trusted. It is worth being precise about what it gives up,
+because three things in this document would otherwise read as guarantees that no longer
+hold:
 
-- **It cannot change anything.** Read verbs only — no `Create`, `Modify`, `Delete`, or
-  `Put` on any service. Infrastructure changes still require a PR and an HCP Terraform
-  apply.
-- **It cannot read customer data or secrets.** An explicit `Deny` covers `s3:GetObject`,
-  `secretsmanager:GetSecretValue`, and `kms:Decrypt`. That deny survives someone later
-  attaching a broad managed policy, because an explicit deny always wins in IAM
-  evaluation. Without it, "read-only" would include every hosted site's files and
-  databases in the DirectAdmin backup bucket.
-- **The shell is the real grant.** `ssm:StartSession` lands as `ssm-user`, which the SSM
-  agent gives passwordless sudo. On the primary that is root on the box serving ~91
-  WordPress sites. It is scoped by `Name` tag to the two known instances and every
-  session is recorded in CloudTrail, but it is still root. If that is more than you
-  want, set `cursor_agent_shell_access = false` and keep the telemetry half.
+- **The agent is an admin.** There is no read-only boundary and no explicit `Deny` on
+  `s3:GetObject`, `secretsmanager:GetSecretValue`, or `kms:Decrypt`. An agent can read
+  every hosted site's files and databases in the DirectAdmin backup bucket, read secret
+  values, and change or delete infrastructure directly — bypassing the PR-and-HCP-apply
+  path that otherwise gates every change. Treat the constraint as *trust and review*, not
+  as IAM enforcement.
+- **CloudTrail cannot tell the agent from you.** Both act as `bteller`, so an unexpected
+  API call cannot be attributed without correlating timestamps against agent transcripts.
+  This is the loss that is hardest to reconstruct after the fact, and the main reason to
+  revisit the decision if a second person ever touches the account.
+- **Revocation is coarse.** Cutting agent access means rotating `bteller`'s key, which
+  also breaks that key wherever a human uses it — local CLI profiles included. Removing
+  the secret from the agent environment is the cheap partial stop, and is the right first
+  move; treat key rotation as the real revocation.
+
+The shell grant is unchanged in kind but no longer scoped: `ssm:StartSession` lands as
+`ssm-user` with passwordless sudo, on the primary that is root on the box serving ~91
+WordPress sites, and admin credentials can target any instance rather than the two
+tagged ones.
 
 ### Steps
 
-1. Merge and apply the PR that adds `user-CursorAgent.tf`.
-2. Create the key (it is deliberately not Terraform-managed, so the secret never lands
-   in HCP Terraform state):
+1. Nothing to merge or apply. Use the existing `bteller` access key, or mint a fresh one
+   for this purpose so it can be rotated without disturbing the working local profile:
 
    ```bash
-   aws iam create-access-key --user-name cursor-agent --profile wbat
+   aws iam create-access-key --user-name bteller --profile wbat
    ```
 
-3. Paste into Cursor secrets, then discard the local output:
+   A separate key on the same user does not fix attribution — CloudTrail still records
+   `bteller` — but it does make revocation cheap, which is the more common need.
+
+2. Paste into Cursor secrets, then discard the local output:
    - `AWS_ACCESS_KEY_ID`
    - `AWS_SECRET_ACCESS_KEY`
 
    Region is not a secret; `.cursor/install.sh` writes `us-east-1` into `~/.aws/config`.
 
+Because this repo is public, confirm secret injection is permitted for public
+repositories in the dashboard — it can be disabled by default, and the symptom is an
+agent whose environment ran but whose credentials are simply absent.
+
 ### Verify
 
-A new agent's start log should show `OK aws credentials valid: arn:aws:iam::…:user/cursor-agent`.
+A new agent's start log should show `OK aws credentials valid: arn:aws:iam::…:user/bteller`.
 Then, from an agent:
 
 ```bash
@@ -148,15 +168,31 @@ Then, from an agent:
 aws ssm describe-instance-information \
   --query 'InstanceInformationList[].[InstanceId,PingStatus,IPAddress]' --output table
 
-# Shell (requires cursor_agent_shell_access = true)
+# Shell
 aws ssm start-session --target "$(aws ec2 describe-instances \
   --filters 'Name=tag:Name,Values=WBAT Primary Server' \
             'Name=instance-state-name,Values=running' \
   --query 'Reservations[0].Instances[0].InstanceId' --output text)"
-
-# Proof the deny works — this must fail with AccessDenied
-aws secretsmanager get-secret-value --secret-id tellerstech/ses-gmail-forward/runtime-config
 ```
+
+Note what is *not* here: the previous version of this runbook ended with a command
+asserting that reading a secret fails with `AccessDenied`. Under an admin key it
+succeeds, so the check was removed rather than left to pass misleadingly.
+
+### Narrowing this later
+
+A scoped, read-only `cursor-agent` IAM user was written and reviewed for this purpose,
+then set aside in favour of the simpler path above. It grants telemetry plus a
+tag-scoped Session Manager shell, denies data and secret reads, and cannot apply
+changes. Restoring it is a file copy, not a rewrite:
+
+```bash
+git show cf36e75:aws/global/iam/user-CursorAgent.tf > aws/global/iam/user-CursorAgent.tf
+```
+
+That blob lives on the branch behind PR #115; fetch `refs/pull/115/head` first if the
+branch is gone. Then apply, mint a key for `cursor-agent`, and swap the two secrets.
+The rest of this document needs no changes — only the three caveats above stop applying.
 
 ## 2. HCP Terraform (reading plans)
 
@@ -207,11 +243,13 @@ or egress to the `ssm`, `ssmmessages`, and `ec2messages` endpoints being blocked
 
 ## Choosing how much to grant
 
-`cursor_agent_shell_access = true` (the default in the PR that added this) gives full
-visibility plus shell. `false` gives read-only telemetry — enough to investigate almost
-everything documented under `aws/docs/` — while keeping interactive access to the
-production web server a human-in-the-loop action.
+With an admin key there is no dial: the agent has everything, and the only lever is
+whether the AWS secret is present in the environment at all. Removing it leaves the HCP
+Terraform token, which still supports reading plans and state outputs — a genuinely
+useful read-only mode for reviewing changes, just not for diagnosing the running system.
 
-Worth knowing when deciding: the shell is root-equivalent, and it is the only part of
-this setup that can change the running system. Everything else is constrained by IAM to
-reads.
+The finer-grained choice — telemetry with or without a shell, and no ability to change
+anything — comes back with the scoped user described under **Narrowing this later**.
+That is the version to reach for if a second person gets account access, if an agent
+ever needs to run unattended, or if you want CloudTrail to distinguish agent activity
+from your own.

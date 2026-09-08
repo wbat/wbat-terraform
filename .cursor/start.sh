@@ -37,8 +37,10 @@ if [ -n "${AWS_ACCESS_KEY_ID:-}" ]; then
         log "WARN no instance reports an Online SSM agent -- telemetry works, shell does not"
       fi
     else
-      # Expected and fine when cursor_agent_shell_access is false; the deny is the point.
-      log "NOTE ssm describe not permitted -- read-only telemetry only (shell access is off)"
+      # Reachable if the credential is ever narrowed to telemetry without SSM; not
+      # expected under the current admin key, so it is worth surfacing rather than
+      # swallowing.
+      log "NOTE ssm describe not permitted -- telemetry only, no shell path"
     fi
   else
     # Collapsed to one line: the CLI's multi-line error would otherwise break up the
