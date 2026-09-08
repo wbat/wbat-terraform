@@ -400,41 +400,67 @@ private key. `accounts/authorized-keys` in the audit reports this as counts.
 Twelve accounts with keys is not twelve incidents. The question is how many
 *distinct* keys there are, because that separates one event from twelve:
 
+`ssh-keygen -l` prints `bits fingerprint comment (TYPE)`, so the comment is the
+middle of the line, not the last field — and the comment is usually the only
+thing that says whose key it is:
+
 ```bash
 for h in /home/*; do
   f="$h/.ssh/authorized_keys"
   [ -s "$f" ] || continue
-  ssh-keygen -l -f "$f" 2>/dev/null \
-    | awk -v u="${h##*/}" '{printf "%-40s %-16s %s\n", $2, u, $NF}'
+  ssh-keygen -l -f "$f" 2>/dev/null | awk -v u="${h##*/}" '
+    { c = ""; for (i = 3; i < NF; i++) c = c (c ? " " : "") $i
+      printf "%-47s %-14s %-9s %s\n", $2, u, $NF, c }'
 done | sort
 ```
 
 - **One fingerprint repeated across every account** means something templated
-  them at once, and there are two likely culprits on this host. Check
-  `/etc/skel/.ssh/authorized_keys` — if a key sits there, every DirectAdmin
-  account creation has been copying it — and consider the volume-shrink
-  migration, which rsynced `/home` wholesale. Neither is a compromise, but a
-  single key that opens twelve accounts is still worth removing from the eleven
-  that do not need it.
+  them at once. Check `/etc/skel/.ssh/authorized_keys` — if a key sits there,
+  every DirectAdmin account creation is still copying it, and the problem
+  regrows — and consider a migration that rsynced `/home` wholesale.
 - **A fingerprint you do not recognise** is the finding. Treat it as a possible
   compromise rather than untidiness: note the file's mtime against your
   DirectAdmin and web logs for that account, and do not delete it before you
   have looked.
 
-`ssh-keygen -l` also prints the comment field, which usually names the key's
-origin, and mtimes tell you whether these arrived together or one at a time:
+Mtimes say whether the files arrived together or one at a time:
 
 ```bash
 stat -c '%y  %n' /home/*/.ssh/authorized_keys 2>/dev/null | sort
 ls -la /etc/skel/.ssh/ 2>/dev/null
 ```
 
-Identical mtimes point at a bulk copy; a lone recent one on a site account, on
-a host where you have not provisioned SSH access, points somewhere worse.
+#### What this host turned out to be
 
-Whichever it turns out to be, the allowlist below is the control. It makes both
-a planted key and an over-distributed one inert, without needing to work out
-which accounts' keys are safe to delete first.
+Not a compromise. Six distinct keys across 14 accounts, and nine of the files
+were written inside the same 250 ms on 2024-01-29 — a script, not an intrusion.
+`/etc/skel/.ssh` does not exist, so nothing is seeding new accounts and the
+pattern will not regrow. The remaining mtimes are spread over two years and
+match ordinary operator activity.
+
+The finding is a different one, and the file count hides it: **two of those six
+keys are installed on 13 and 14 accounts respectively.** Either private key is
+the entire box. One of them is on `ec2-user`, which makes it almost certainly
+the EC2 key pair, copied to every DirectAdmin account. That is what needs
+managing — not the number of files, but the blast radius of two keys. The audit
+reports it as "the most widely installed of which is on N of them" for exactly
+this reason.
+
+Two details worth knowing:
+
+- **`admin` holds two keys and has no login shell**, which is why it is absent
+  from the shell-account listing above. `nologin` blocks the interactive session
+  and nothing else: `ssh -N -L` port forwarding still works, and so does `sftp`
+  where the subsystem is enabled. Do not read a nologin shell as "this key is
+  harmless".
+- The DSA key on one account is inert — OpenSSH disabled DSA by default in 7.0
+  and removed it in 9.8 — so it is dead weight rather than a risk.
+
+The allowlist below is the control either way. It makes a planted key and an
+over-shared key inert in one directive, without first having to work out which
+of the six are safe to delete. Deleting keys is per-account, needs a decision
+each time, and is easy to get wrong; `AllowGroups` is one line with a known
+rollback and a confirmed SSM path behind it. Do it in that order.
 
 ### Applying it without locking yourself out
 
