@@ -384,3 +384,37 @@ backlog, so a sweep that silently fails to reclaim anything is the worst place t
 | `backup local cleanup FAILED` / `ERROR could not remove N verified file(s)` | The upload was verified but the delete failed: read-only filesystem, `chattr +i`, or an I/O error | The copies named in the mail are already in S3 and safe to `rm` by hand; then find what blocked the delete (`mount | grep ' / '`, `lsattr`, `dmesg`) |
 | `ERROR another run held /var/log/... lock` | Admin and system backups overlapped and one waited out `DA_BACKUP_LOCK_WAIT` | `pgrep -a rclone`; clear the stuck upload, then re-run the hook |
 | Disk fills with no backups in `/home` | Not the backup hook | `da-disk-guard.sh --report` for the actual consumers |
+
+## Host access posture (SSH, fail2ban, 2222)
+
+The DirectAdmin account names on this host are permanently public: this repo's git
+history holds a verbatim `nginx -T` capture. Names cannot be un-published, so the
+control is making them useless — key-only SSH, a fail2ban that demonstrably bans, and
+a 2222 that is not open to the internet.
+
+| Repo file | Install path |
+|-----------|--------------|
+| `host_access_audit.sh` | `/usr/local/sbin/host-access-audit.sh` |
+
+```bash
+sudo /usr/local/sbin/host-access-audit.sh          # read-only posture report
+sudo /usr/local/sbin/host-access-audit.sh --json   # same, for automation
+```
+
+Read-only by design: no config edits, no service restarts, no firewall changes.
+Exit 0 means no findings, 1 means at least one. Root is needed for the interesting
+checks (`sshd -T`, `fail2ban-client`, `directadmin.conf`); unprivileged runs report
+`SKIP` for those rather than passing them, so "could not look" never reads as "fine".
+
+Remediation, with the ordering and rollback that keeps an SSM session as the way back
+in, is in [aws/docs/host-access-hardening.md](../../aws/docs/host-access-hardening.md).
+
+### Offline proof
+
+```bash
+./scripts/directadmin/prove_host_access_audit.sh
+```
+
+Covers the case the audit exists for: `PasswordAuthentication no` with PAM
+keyboard-interactive still enabled. That is what most hardening checklists stop
+short of, and it leaves the box brute-forceable while the config reads as hardened.
