@@ -145,8 +145,40 @@ takeover rather than a shell on one site.
 
 Restrict at the **security group**, not the host firewall — it is out of band
 from the box, it cannot be undone by a DA update, and getting it wrong cannot
-strand you because SSM is unaffected either way. Note the security groups are
-not currently managed in this repo, so this is a console or CLI change:
+strand you because SSM is unaffected either way.
+
+That security group is managed in this repository, so the change belongs in a
+PR and an HCP Terraform apply rather than in the console. Both instances take
+their group from `data.aws_security_group.default`, which resolves to
+`aws_security_group.default` in `aws/us-east-1/sg/default.tf` (wired in as
+`module "sg"`).
+
+**Read this before editing that file.** The resource declares the group but no
+rules, so `ingress` and `egress` are computed: Terraform currently adopts
+whatever rules exist and leaves them alone. Adding an inline `ingress` block
+changes that — the provider would then treat the declared set as the complete
+set and revoke every rule you did not write down, including 80, 443 and 22.
+That is an immediate outage for all sites on the box.
+
+So express the restriction as its own resource, which does not take over the
+rest of the group:
+
+```hcl
+# aws/us-east-1/sg/default.tf
+resource "aws_vpc_security_group_ingress_rule" "da_panel" {
+  security_group_id = aws_security_group.default.id
+  description       = "DirectAdmin panel, restricted to known operator addresses"
+  ip_protocol       = "tcp"
+  from_port         = 2222
+  to_port           = 2222
+  cidr_ipv4         = var.operator_cidr
+}
+```
+
+Removing the existing world-open 2222 rule is a separate step: that rule is not
+in state, so `terraform` will not delete it. Either import it and delete it in a
+follow-up apply, or revoke it once and let the managed rule above be the only
+one. Check what is there first, and confirm the plan touches nothing else:
 
 ```bash
 # Inspect what is currently allowed to 2222
@@ -154,7 +186,7 @@ aws ec2 describe-security-groups --profile wbat --region us-east-1 \
   --query "SecurityGroups[].IpPermissions[?FromPort==\`2222\`].[IpRanges[].CidrIp]" --output text
 ```
 
-Replace `0.0.0.0/0` with your fixed addresses. If your address is dynamic,
+Use your fixed addresses for `operator_cidr`. If your address is dynamic,
 prefer reaching the panel through an SSM port-forward, which needs no ingress
 at all:
 
