@@ -121,14 +121,21 @@ stays `active` forever and bans nothing:
 ```bash
 sudo fail2ban-client status                    # jails present?
 sudo fail2ban-client status sshd               # "Total banned" climbing?
+sudo fail2ban-client get directadmin logpath   # does that path exist?
 sudo journalctl -u fail2ban | grep -i "already exists\|no such file"
 ```
 
-On an internet-facing host, sshd bans appear within hours. If `Total banned`
-is still 0 after a day, the jail is misconfigured — check `logpath` against
-where this distro actually writes auth failures (`/var/log/secure` on EL, not
-`/var/log/auth.log`). The audit's `fail2ban/effective` check exists precisely
-to surface this.
+Check every jail, not the total. On an internet-facing host the sshd jail
+accumulates bans within hours, and that is enough to make a summed figure look
+healthy while the DirectAdmin or mail jail — watching a path this distro does
+not use — has banned nobody since it was installed. Those are the endpoints the
+disclosed account names actually expose.
+
+If a jail's `Total banned` is still 0 after a day, check its `logpath` against
+where this distro really writes auth failures (`/var/log/secure` on EL, not
+`/var/log/auth.log`). The audit reports this per jail: `fail2ban/logpath` fails
+outright when a watched path is absent, and `fail2ban/effective` names each
+permanently quiet jail rather than summing them.
 
 ## 3. Restrict 2222
 
@@ -167,9 +174,25 @@ only to an authenticated AWS principal.
 sudo /usr/local/sbin/host-access-audit.sh
 ```
 
-Target state is no `FAIL`, and `WARN` only where you have made a deliberate
-choice. Re-run after any DirectAdmin update — `update_post` hooks are the usual
-way an `sshd_config` or jail change gets quietly reverted.
+Run it with `sudo`. Unprivileged it cannot read `sshd -T`, the fail2ban socket
+or `directadmin.conf`, and it will say so: skipped checks are counted, the run
+is reported `INCOMPLETE`, and it exits 3. Exit 0 means the audit was both
+complete and clean — nothing else does.
+
+Target state is no `FAIL`, no `SKIP`, and `WARN` only where you have made a
+deliberate choice. Two skips are expected to need attention rather than
+privilege:
+
+- `ssm/reachable` — the audit asks Systems Manager for `PingStatus`, which the
+  instance profile normally cannot do. Run the command it prints from your
+  workstation before you touch `sshd`. A running agent is not a recovery path;
+  an `Online` ping is. This is the check that decides whether step 1 is safe.
+- `ssh/match` — resolvable only with root, and only for `Match User`/`Match
+  Group` contexts. Address-keyed blocks cannot be enumerated by probing, so if
+  the audit warns `ssh/match-coverage`, read those blocks by hand.
+
+Re-run after any DirectAdmin update — `update_post` hooks are the usual way an
+`sshd_config` or jail change gets quietly reverted.
 
 ## What this does not fix
 
