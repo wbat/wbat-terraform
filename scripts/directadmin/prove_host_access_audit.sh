@@ -23,6 +23,12 @@ AUDIT="${ROOT}/scripts/directadmin/host_access_audit.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+# Default the machine-sniffing fallbacks to "nothing here" so no case can
+# accidentally assert against the box running the proof. Cases that are about
+# the fallback itself override this per-run. Case 16 was failing on a CI runner
+# that ships /etc/apache2 while passing everywhere else.
+export HOST_AUDIT_APACHE_EVIDENCE=0
+
 # Minimal `sshd -T` dumps. Real output has ~90 keys; only the ones the audit
 # reads matter, and extra keys are ignored by the awk lookups.
 cat >"$TMP/hardened" <<'EOF'
@@ -299,9 +305,15 @@ echo "== Case 16: an irrelevant disabled DA key must not mask the scanner =="
 # First real run: brute_force_scan_apache_logs=0 became the finding, and whether
 # the scanner itself was enabled went unreported. On an nginx host there are no
 # Apache logs to scan, so it is not a finding at all.
+#
+# webserver= is pinned rather than left to the audit's fallback. Without it the
+# fallback looks for Apache on whatever machine is running the proof, and this
+# case passed on a developer box and failed on a CI runner that happens to ship
+# /etc/apache2 -- a proof that reads the host is not offline.
 printf 'brute_force_log_scanner=1\nbrute_force_scan_apache_logs=0\nnginx=1\n' >"$TMP/da.nginx"
+printf 'webserver=nginx\n' >"$TMP/cb.nginx"
 out="$(HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_DA_CONF="$TMP/da.nginx" \
-  bash "$AUDIT" --json 2>/dev/null || true)"
+  HOST_AUDIT_CB_OPTIONS="$TMP/cb.nginx" bash "$AUDIT" --json 2>/dev/null || true)"
 [ "$(printf '%s' "$out" | verdict_for da/brute-force)" = "OK" ] \
   || { echo "FAIL: enabled scanner masked by an irrelevant disabled key" >&2; exit 1; }
 [ "$(printf '%s' "$out" | verdict_for da/brute-force-disabled)" = "MISSING" ] \
