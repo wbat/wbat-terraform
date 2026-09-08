@@ -31,10 +31,11 @@ readable backup** — though every one of those runs was started by hand, and
 [the schedule itself has still never fired](#the-schedule-is-still-unproven).
 `tellerstec` was the twelfth: its exclusion file is
 written and its archive has been [read back out of S3 in
-full](#tellerstec-backed-up-and-verified-2026-09-08), closing a 68-day gap. `teller` is the
-one account left; it is no longer a hardware purchase —
-[its static media is being taken out of the account backup](#teller-site-media-archive)
-so the rest fits the disk that already exists.
+full](#tellerstec-backed-up-and-verified-2026-09-08), closing a 68-day gap. `teller` is no
+longer the exception:
+[its static media is archived separately](#teller-site-media-archive), the account backup
+fits again, and as of 2026-09-08
+[all thirteen accounts have a current, readable backup](#teller-backed-up-and-verified-2026-09-08).
 
 ## Do it in this order
 
@@ -71,7 +72,7 @@ step 6 exists to stop DirectAdmin's own schedule racing it.
 | 7 | [Let the per-account batch run take over](#per-account-backups-da_backup_batchsh) | largest single account, not the sum | installed; **the schedule has never fired** — first automatic run is 2026-09-09 01:00 EDT | Installed by step 3, but after that day's 01:00 trigger had passed. Every backup so far has been started by hand. See [the schedule is still unproven](#the-schedule-is-still-unproven). |
 | 8 | [Prune `tellerstec`'s Installatron backups](#why-tellerstec-stopped-fitting-and-why-that-is-the-cheapest-thing-here) | **frees ~31 GB, and stops ~2.5 GB/day of growth** | **not done** | The largest single reclaim left, and still the only item here with a deadline: measured over the last seven days the growth is 2.54 GB/day against 57.7 GB free, so the volume fills in about 22 days regardless of backups. Needs the account owner. Step 9 did not change this by a byte. |
 | 9 | [Write `tellerstec`'s exclusion file](#what-the-estimator-does-about-it-now) | none | done 2026-09-08 | Written, and the account was backed up and the archive read back the same afternoon — [the result](#tellerstec-backed-up-and-verified-2026-09-08). |
-| 10 | [Archive `teller`'s static media, then exclude it](#teller-site-media-archive) | ~$31/mo S3, no new volume | **in progress** | Decision made: split, not buy a disk. About 34 GB of the account is galleries and videos that barely change; copying them nightly is what made it unbackuppable. Ordered steps below — sync and verify **before** writing the exclusion. |
+| 10 | [Archive `teller`'s static media, then exclude it](#teller-site-media-archive) | ~$31/mo S3, no new volume | **done 2026-09-08** | 40.2 GB / 43,883 files copied and checksum-verified; exclusions written; account archived to 8.18 GiB and [read back](#teller-backed-up-and-verified-2026-09-08) — 0 members under the five excluded paths. Closed a 68-day gap. |
 
 ### State of the host, read 2026-09-07 05:02 UTC
 
@@ -2105,6 +2106,50 @@ cp scripts/directadmin/site-media.conf.example /etc/da-vhost-listen/site-media.c
 `--write-exclusions` will not write anything without a verified receipt. That is the whole
 point of the script: the ordering cannot be got wrong by hand.
 
+#### Done 2026-09-08
+
+The ordered steps above were completed the same afternoon they were written:
+
+1. Bucket `wbat-tellerstech-site-media-archive-708113892725` created (versioning on,
+   never-expire lifecycle, append-only IAM on `WBAT_Main_Server`). Import into HCP
+   Terraform state is still required after #135 merges — see that PR.
+2. Tooling installed; `SITE_MEDIA_BUCKET` set; manifest at
+   `/etc/da-vhost-listen/site-media.conf`.
+3. `--sync` copied and checksum-verified **43,883 files / 40,246,559,567 bytes** across
+   the five paths. Receipt at `/var/lib/da-ops/site-media/teller.receipt`.
+4. `--write-exclusions` wrote the five paths into `/home/teller/.backup_exclude_paths`.
+5. `--list` then read `teller … EXCLUDED 37.6G … PEAK 32.9G … FITS NOW yes`.
+
+### `teller` backed up and verified (2026-09-08)
+
+| | |
+|---|---|
+| Duration | 10m22s |
+| Archive | `server/2026-09-08/user.wbatnet.teller.tar.zst` |
+| Size | 8,781,190,694 bytes (8.18 GiB) |
+| Members read to end | **110,055**, `zstd -dc \| tar -t` exit 0 |
+| Free space after | 57.7 GB (staging empty) |
+
+The exclusions took effect in tar, not merely in the estimate:
+
+| Path | Members in archive |
+|---|---|
+| `domains/comsatlegacy.com/public_html/gallery/` | **0** |
+| `domains/comsatlegacy.com/public_html/videos/` | **0** |
+| `domains/comsatlegacy.com/public_html/FromJHU/` | **0** |
+| `domains/steveteller.com/public_html/gallery/` | **0** |
+| `domains/iotsystems.com/public_html/videos/` | **0** |
+
+**9 `.sql` members**, including `backup/teller_biz.sql`, `backup/teller_iots.sql` and the
+other account databases. Mail is in it (about 66k members under `imap/` / `Maildir`).
+
+**The gap this closes is 68 days** — same span as `tellerstec`. The last readable `teller`
+archive before today was the 43.4 GiB object from 2026-07-02. Today's is 8.18 GiB because
+the media is no longer inside it; that media lives in the archive bucket and is the only
+off-host copy of those paths.
+
+With this run, **all thirteen accounts have a current, readable backup**.
+
 #### Restoring an account that uses this
 
 Restore is **two steps**, and the second is easy to forget because the first succeeds on
@@ -2143,28 +2188,23 @@ than being inferred at 2am.
   four and a half hours during this outage with no notification. That is a metric EC2
   emits for free, needs no agent, and would have caught this — the cheapest available
   improvement, and it belongs in Terraform.
-- **`teller` is being fixed by splitting, not by buying a disk — the remaining work is the
-  ordered deploy.** Decision recorded under
-  [`teller` site media archive](#teller-site-media-archive): exclude ~34 GB of static
-  galleries and videos, copy them once to a never-expiring archive bucket, then let the
-  remaining ~20 GB fit the staging disk that already exists. Cost is roughly $31/month of
-  S3 rather than ~$120 for a volume plus nightly copies of identical media. What is still
-  open is the sequence itself — Terraform apply for the new bucket, first `--deep-verify`
-  sync, then `--write-exclusions`, then the first `--user=teller` backup — and it must not
-  be reordered. Until step 3 of that sequence has a verified receipt, writing the
-  exclusion would leave primary site content backed up nowhere.
+- **`teller` is fixed — all thirteen accounts now have a current backup.** The media split
+  recorded under [`teller` site media archive](#teller-site-media-archive) completed on
+  2026-09-08: 40.2 GB archived and verified, exclusions written, account backup
+  [read back at 8.18 GiB](#teller-backed-up-and-verified-2026-09-08) with zero members under
+  the excluded paths. What remains for this item is only the HCP Terraform import of the
+  pre-created bucket and IAM policy after #135 merges, so the next apply does not try to
+  recreate them.
 
-  The storage cost figures below still hold for everything else; the all-thirteen nightly
-  row is the one this change retires:
+  Steady-state storage cost with the split:
 
   | Nightly set | Per night | Steady state | Cost |
   |---|---|---|---|
-  | The twelve running now (`tellerstec` excluded, measured 3.05 GiB) | **~18.0 GiB** | ~6.0 TB | **~$46/mo** |
-  | The twelve, plus `teller` after media exclusion (~20 GiB estimated) | ~38 GiB | ~12.6 TB | ~$97/mo |
-  | Plus the media archive itself (one copy, never expires, IA/Glacier) | ~34 GiB once | ~34 GiB | ~$31/mo at Glacier IR |
+  | All thirteen account backups (`teller` excluded-media, measured 8.18 GiB) | ~26 GiB | ~8.7 TB | ~$66/mo |
+  | Plus the media archive itself (one copy, never expires, IA/Glacier) | ~40 GiB once | ~40 GiB | ~$5–31/mo depending on tier mix |
 
   The previous "all thirteen nightly at ~$161" assumed re-uploading 43 GB of mostly-static
-  media every night. That is the row this change exists to stop paying.
+  media every night. That row is retired.
 - **Restore has never been rehearsed** — though the archives have now been read.
   [The 2026-09-08 sweep](#is-what-is-already-in-s3-readable-a-read-back-of-every-archive-2026-09-08)
   read every compressed object in the bucket and settled the readability half of this:
