@@ -105,16 +105,17 @@ decompressor_for() {
 # whole object was consumed: `tar -t` reads its input to the end of the stream, so a short
 # count means the pipeline stopped early rather than the archive being read and accepted.
 read_stream() {
-  local decomp="$1" expect="$2" ddf errf rc members read_bytes
+  local decomp="$1" expect="$2" ddf errf members read_bytes
+  local -a stages
   ddf="$(mktemp)"
   errf="$(mktemp)"
   dd bs=4M 2>"$ddf" | $decomp 2>"$errf" | tar -tf - 2>>"$errf" | grep -c . >/tmp/.vsa_members
-  rc=("${PIPESTATUS[@]}")
+  stages=("${PIPESTATUS[@]}")
   members="$(cat /tmp/.vsa_members 2>/dev/null || echo 0)"
   read_bytes="$(sed -n 's/^\([0-9]*\) bytes.*/\1/p' "$ddf" | tail -1)"
   read_bytes="${read_bytes:-0}"
 
-  if [[ "${rc[0]}" != 0 || "${rc[1]}" != 0 || "${rc[2]}" != 0 ]] \
+  if [[ "${stages[0]}" != 0 || "${stages[1]}" != 0 || "${stages[2]}" != 0 ]] \
     || [[ -n "$expect" && "$read_bytes" != "$expect" ]]; then
     printf 'UNREADABLE\t%s\t%s\n' "${members:-0}" \
       "$(tr '\n' ' ' <"$errf" | tr -s ' ' | cut -c1-200)"
@@ -171,7 +172,7 @@ PY
 # ---------------------------------------------------------------------------
 
 self_test() {
-  local d rc=0 v
+  local d rc=0
   d="$(mktemp -d)"
   mkdir -p "$d/src/example.com/email"
   head -c 3000000 /dev/urandom >"$d/src/example.com/blob"
