@@ -926,6 +926,21 @@ the `directadmin-backup` IAM user is deliberately not granted; its policy allows
 passes `--s3-no-check-bucket`. The 403 reads like broken credentials at one in the morning;
 list the bucket path instead of the remote root to see the real state.
 
+**A caveat on the gate below, added 2026-09-08.** `rclone check --checksum --one-way` is
+what these commands use to decide a local copy is safe to delete, and it is not sufficient
+on its own — it proves S3 holds the same bytes, not that those bytes are a whole archive.
+That is the [`tellerstec` failure](#the-first-real-run-2026-09-07-2215-edt) in miniature.
+For an upload of files that have been sitting at rest for weeks the risk is much lower than
+for one taken straight from a live producer, and
+[the read-back sweep](#is-what-is-already-in-s3-readable-a-read-back-of-every-archive-2026-09-08)
+has since confirmed all ten weeks uploaded this way are readable. But if you are following
+these commands again, read the archives back before deleting anything:
+
+```bash
+./aws/docs/verify-s3-archives.sh --quick --prefix "server/${iso}/"     # cents
+./aws/docs/verify-s3-archives.sh --full  --prefix "server/${iso}/"     # whole-object egress
+```
+
 Each week that verifies records its own path. The deletion step then reads that file rather
 than re-globbing, so a directory whose upload or checksum failed cannot be removed by the
 next command even if you paste both blocks in one go.
@@ -1187,6 +1202,13 @@ its content is intact and `tellerstec` has nothing newer, so it is worth keeping
 resort, but not under a name anyone could mistake for a backup. The bucket's 365-day
 expiry removes it on its own.
 
+It is less of a last resort than it looked. The 2026-07-02 archive for `tellerstec` has
+since been read end to end and is a whole archive over 57,245 members — see
+[the read-back sweep](#is-what-is-already-in-s3-readable-a-read-back-of-every-archive-2026-09-08),
+which also found that the 2026-06-29 copy of the same account is itself truncated. So the
+fallback for `tellerstec` is nine weeks stale rather than absent, and the fragment above is
+a third choice rather than a second.
+
 #### Where the 51.8 GiB went
 
 Measured directly, by sampling `df` and `du` every five seconds through a fresh `wbatnet`
@@ -1355,6 +1377,199 @@ Both are worth having. This one is already done — see
 [step 4 in the host state below](#state-of-the-host-as-of-2026-09-07-2130-edt) — and it is
 the only one of the two that currently covers `tellerstec` and `teller` at all.
 
+## Is what is already in S3 readable? A read-back of every archive, 2026-09-08
+
+**Short answer: the backups anyone would actually restore from are intact, and 22 archives
+in the bucket are not.** None of the 22 is the newest copy of anything. The current estate
+— the eleven account backups written on 2026-09-07, the thirteen from the last full run on
+2026-07-02, and all ten weekly system backups from 2026-07-04 to 2026-09-05 — read clean
+from first byte to end-of-archive marker.
+
+This had to be checked rather than assumed. The truncated `tellerstec` archive was admitted
+by a `rclone check --checksum` that was working correctly: it proved S3 held the bytes it
+was handed, which is a different claim from the archive being complete. Every object in the
+bucket was admitted under that same rule, and **none had ever been read back.** The hook
+fix reads each archive before uploading it, but that only governs objects written from now
+on.
+
+Reproducible with [`verify-s3-archives.sh`](verify-s3-archives.sh), which also has an
+offline `--self-test` that asserts its own tests fail on a truncated archive.
+
+### What was run, and what it cost
+
+The failure mode is truncation, and truncation is only visible by reading an archive to its
+end. There is no shortcut for `.tar.zst`: zstd's per-frame content checksum sits at the end
+of a stream you cannot seek into, so proving a zstd archive whole means decompressing all
+of it. Reading the entire bucket that way is **775.3 GB of egress, about $77** including
+`STANDARD_IA` retrieval, and roughly two hours at the 100–170 MB/s measured against this
+bucket. Doing it on the primary instead would avoid the egress and spend the CPU and the
+network of a `t3a.medium` that has 2 vCPU and just came back from an outage; streaming
+needs no disk, but it needs hours of the box.
+
+So the sweep was split by what each format allows, and run from outside the host:
+
+| | Objects | Bytes read | What it establishes |
+| --- | --- | --- | --- |
+| Full end-to-end read (`aws s3 cp` → decompress → `tar -t`) | 681 | 264.01 GiB | The object is a complete, well-formed archive and its member list parses to the end |
+| gzip trailer, ranged GET of the last 8 bytes | 3,483 | 27 KiB | Necessary condition for an intact `.tar.gz` — see below |
+
+**$27.33** in total ($25.51 egress, $1.82 `STANDARD_IA` retrieval, requests immaterial),
+against about $77 to read everything, and about half an hour of wall clock. Nothing was
+staged on disk anywhere: `dd` sits in each pipeline on the compressed side purely so the
+byte count is an independent assertion that the whole object was pulled, since `tar -t`
+consuming its input to end-of-stream is what makes a short count mean "gave up early"
+rather than "read and accepted".
+
+**The cheap test, and what it does not rule out.** A gzip member ends with CRC32 then
+ISIZE, the uncompressed length modulo 2^32. A tar is always a whole number of 512-byte
+blocks, and 2^32 is itself a multiple of 512, so an intact `.tar.gz` has an ISIZE congruent
+to 0 mod 512 whatever its real size; truncate the file and those four bytes become deflate
+payload, which lands on a multiple of 512 with probability 1/512. That catches truncation
+about 99.8% of the time per object for eight bytes instead of gigabytes. It does **not**
+verify the CRC, does not see corruption in the middle of a stream, and says nothing about
+whether the tar holds a plausible account. Two things bound how much that matters here: the
+612 objects of the ten live weekly trees were given *both* tests and the two agreed on
+**627 of 627** objects, and every one of the 15 `.tar.gz` objects the trailer test rejected
+was then read in full and confirmed unreadable. Nothing passed the cheap test and failed
+the expensive one.
+
+**The positive control failed, which is the point.**
+`server/2026-09-07/reseller.admin.tellerstec.tar.zst.TRUNCATED-DO-NOT-RESTORE` was read end
+to end: `zstd` reports `premature end` and `tar` reports `Unexpected EOF in archive` after
+459 members. A test that passed that object would be measuring nothing.
+
+**Coverage.** 3,537 of the bucket's 8,067 objects were tested — every object that is a
+compressed container. The remaining 4,530 are 3,467 `.md5` sidecars, 1,056 loose
+uncompressed files in an extracted copy of `teller`'s backup tree under
+`server/2026-06-30/teller/backup/`, five connectivity-test text files, and two migration
+scripts: 0.18 GiB in total. Those loose files are the one real gap — a plain file can be
+truncated as undetectably as an archive, and there is no container to parse — but they are
+a duplicate of a tree that also exists as an archive.
+
+### What reads clean
+
+| Prefix | Objects | Result |
+| --- | --- | --- |
+| `server/2026-09-07/` — the eleven new account backups | 11 | **all readable**, all with plausible account structure |
+| `server/2026-07-02/` — the last full run | 13 | **all readable** |
+| `server/2026-07-04` … `server/2026-09-05` — ten weekly system backups | 612 | **none unreadable**: 540 readable, 72 valid-but-empty |
+| `server/2026-06-30/` — top-level account archives | 11 | all readable |
+| `server/2026-06-29/` — first migration upload | 14 | 9 readable, **5 unreadable** |
+
+Readability is not the only question for an account backup — a tar can parse and still be
+the wrong thing — so each listing was also checked for structure rather than just member
+count. All 24 archives across the two current generations hold a `backup/` root, at least
+one domain directory, `public_html`, and `user.conf` or `user.db`:
+
+| Account | 2026-07-02 members / domains / SQL dumps | 2026-09-07 members / domains / SQL dumps |
+| --- | --- | --- |
+| `reseller.admin.wbatnet` | 127,674 / 21 / 12 | 127,702 / 21 / 12 |
+| `user.wbatnet.alumnibhs` | 52,580 / 1 / 0 | 52,591 / 1 / 0 |
+| `user.wbatnet.littelman1` | 31,665 / 1 / 1 | 31,678 / 1 / 1 |
+| `user.wbatnet.feed2js` | 1,758 / 2 / 0 | 1,773 / 2 / 0 |
+| `admin.root.admin` | 677 / 1 / 0 | 690 / 1 / 0 |
+| `user.wbatnet.test2`, `aubrey`, `brian2`, `signera`, `fcsar`, `admin.wbat` | 199–649 each | 210–670 each |
+| `reseller.admin.tellerstec` | 57,245 / 8 / 3 | *(truncated, 459 members)* |
+| `user.wbatnet.teller` | **151,865 / 49 / 9** | *(never attempted)* |
+
+**`tellerstec` and `teller` do have a restorable backup, and it is the July one.** The
+document has been treating that as an assumption since 2026-09-07 — "the one account whose
+last good backup is from July" — and it is now measured.
+`server/2026-07-02/reseller.admin.tellerstec.tar.zst` reads clean over 57,245 members
+across eight domains with three SQL dumps, and `user.wbatnet.teller.tar.zst`, all 43.4 GiB
+of it, reads clean over 151,865 members across 49 domains with nine SQL dumps. They are
+nine weeks stale, which is the real problem with them, but they are not empty and they are
+not fragments.
+
+The 72 valid-but-empty objects are not a defect in the sweep or in the upload. `sysbk`
+archives a fixed list of paths, several of which do not exist on this host, and archiving a
+missing path produces a well-formed 45-byte `.tar.gz` containing nothing but tar's
+end-of-archive marker. It is the same ten names every week — `custom/etc/master.passwd`,
+`custom/etc/proftpd.conf`, `custom/usr/local/frontpage`, `custom/usr/share/ssl` and so on,
+379 objects bucket-wide. Worth knowing when reading a manifest; not worth fixing.
+
+One incidental finding, recorded because the name is misleading rather than because it
+matters: `server2/2026-07-02/admin.root.admin.tar.zst` is five bytes long and contains the
+text `test`. It is a connectivity artefact wearing the name of an account archive. It has
+been left alone — it is not a truncated backup, and labelling it as one would be wrong.
+
+### The 22 archives that cannot be read, and what they have in common
+
+| Prefix | Object | Size | Members before it stops |
+| --- | --- | --- | --- |
+| `server/2026-09-07/` | `reseller.admin.tellerstec.tar.zst` *(known; the control)* | 20.02 GiB | 459 |
+| `server/2026-06-30/teller/` | `user.wbatnet.teller.tar.zst` | 43.18 GiB | 141,978 |
+| `server/2026-06-29/` | `admin.root.admin.tar.zst` | 1.95 GiB | 230 |
+| `server/2026-06-29/` | `reseller.admin.tellerstec.tar.zst` | 1.95 GiB | 22,061 |
+| `server/2026-06-29/` | `reseller.admin.wbatnet.tar.zst` | 0.30 GiB | 702 |
+| `server/2026-06-29/` | `user.wbatnet.alumnibhs.tar.zst` | 3.30 GiB | 46,765 |
+| `server/2026-06-29/` | `user.wbatnet.teller.tar.zst` | 1.81 GiB | 5,222 |
+| `server/2026-06-28/` | `custom/home/admin.tar.gz`, `custom/usr/local.tar.gz`, `mysql/full-mysql.tar.gz` | 1.92 / 4.05 / 0.59 GiB | 1,624 / 2,088 / 2,190 |
+| `server/2026-03-22` … `2026-06-21` (7 weeks) | `custom/usr/local.tar.gz` | 1.68–4.23 GiB each | 1,866–45,183 |
+| `server/2024-09-22` | `custom/usr/local.tar.gz` | 1.36 GiB | 33,802 |
+| `server/2024-10-06`, `2024-10-13` | `custom/home/admin.tar.gz` | 1.60 GiB each | 1,025 / 1,046 |
+| `server/2024-08-18`, `2024-09-29` | `mysql/full-mysql.tar.gz` | 0.12 GiB each | 562 / 875 |
+
+Every one of them fails the same way — the decompressor reaches the end of the object
+before the archive ends — and every one of them shares a property worth recording:
+
+**Their sizes are exact multiples of 4,096 bytes.** Of the 435 tested archives of 1 MiB or
+more, 22 have a size that is an exact multiple of the filesystem block size, and all 22 are
+in the table above. The other 413 are not block-aligned and not one of them failed a test.
+That separation is complete in both directions, which is more than a coincidence would give
+— a random size hits a 4 KiB boundary about once in 4,096, so 22 of 435 is four orders of
+magnitude off chance.
+
+The reading is that these files were truncated **while being written to the local disk**,
+at the last block the filesystem could give out, and then uploaded intact. That makes them
+the same failure as `tellerstec` with a different trigger: `tellerstec` was a compressor
+killed by the watchdog, and these are writes that hit a full volume. The three
+`server/2026-06-28/` objects are the strongest case, because this document already dates an
+ENOSPC episode to 2026-06-28 — "a separate episode when DirectAdmin still staged backups in
+`/tmp`" — and the `server/2026-06-29/` account archives are the migration uploading what
+that episode had left on disk. That a killed write lands on a block boundary is **inferred**
+from the arithmetic; that the objects are unreadable is observed, twice, by two independent
+tests for the `.tar.gz` half.
+
+The seven consecutive weeks of `custom/usr/local.tar.gz` are the part that is not explained
+by a single bad night. From 2026-03-22 to 2026-06-28 that one member failed every week
+while everything beside it in the same tree succeeded, and the 2024 instances are the same
+handful of large members. `/usr/local` is the largest thing `sysbk` archives after the home
+directories. Whether that is one recurring cause or a coincidence of the largest file
+meeting a tight volume each week is **not established** here.
+
+`--max-bytes` and `--prefix` on the script exist so this can be re-run cheaply: a
+`--quick` pass over the whole `.tar.gz` half of the bucket costs cents and, on this
+evidence, finds what a full read finds.
+
+### What was done about them
+
+Each of the 21 newly found objects has been renamed with a `.TRUNCATED-DO-NOT-RESTORE`
+suffix, the same treatment `tellerstec` got on 2026-09-07, and **nothing was deleted**. A
+fragment that lists 141,978 members before it stops is worth more than nothing for an
+account with no other copy of that date, and it should not sit under a name someone could
+mistake for a backup. The bucket's 365-day expiry removes them on its own.
+
+S3 has no rename, so each was a server-side copy followed by a delete of the old key, with
+the storage class carried across and both keys checked before and after. The bucket held
+8,067 objects and 775,343,444,543 bytes before and after: 21 keys added, 21 removed, no
+change in total. Two consequences worth stating. Renaming resets each object's lifecycle
+clock, so the 365-day expiry now runs from 2026-09-08 rather than from the original upload
+— a few months later than it would have been for the 2024 objects. And the `.md5` sidecars
+`sysbk` wrote alongside the affected members now name a file that no longer exists under
+that name, which is cosmetic but will look odd to anyone reading a manifest.
+
+### What this changes, and what it does not
+
+Readability is not the whole of restorability, and the distinction is worth keeping. What
+is now established is that these objects are complete, well-formed archives holding
+plausible account trees. What is **not** established is that DirectAdmin will ingest one
+and produce a working account, or that the SQL dumps inside them load. That is still
+unrehearsed, and it is the part a person has to do — see
+[Still open](#still-open). The useful change is that a rehearsal can now start from an
+archive known to be whole, so a failure would be attributable to the restore path rather
+than to the backup.
+
 ## State of the host as of 2026-09-07 21:30 EDT
 
 Merging the fixes in this repository does not change the host — there is no deploy
@@ -1429,7 +1644,11 @@ should be deleted rather than repaired.
 **`/backup` is empty again, and 7.4 GB came back.** `09-05-26` and `08-29-26` were the
 last two directories left there. Both were verified against S3 with
 `rclone check --checksum --one-way` — 2 and 136 files respectively, zero differences —
-and only then deleted. The volume went from 74% to **71% used, 60 GB free**. Note that the
+and only then deleted. That was a weaker justification than it read at the time, for the
+reason the `tellerstec` archive went on to demonstrate: a checksum match is a statement
+about bytes, not about completeness. Both weeks have since been read back out of S3 and are
+whole, so the decision stands on evidence rather than on the checksum alone. The volume
+went from 74% to **71% used, 60 GB free**. Note that the
 weekly `sysbk` run restored in step 4 writes roughly 7.4 GB every Saturday, and nothing
 currently sweeps it: see the last point under "Still open".
 
@@ -1485,6 +1704,19 @@ Two things it does **not** cover, both of which were answered by hand and are wo
 folding in: the `sar` memory series, and whether the DirectAdmin backup task is producing
 files at all.
 
+Archive integrity is a separate script, because it talks to S3 rather than to a host and
+because its expensive mode costs real egress:
+
+```bash
+./aws/docs/verify-s3-archives.sh --self-test                       # offline, no credentials
+./aws/docs/verify-s3-archives.sh --quick --prefix server/2026-     # cents, .tar.gz only
+./aws/docs/verify-s3-archives.sh --full  --prefix server/2026-09-07/
+```
+
+It needs `s3:ListBucket` and `s3:GetObject` and exits non-zero if anything in the sweep
+could not be read, so it can gate a restore decision. Results of the first run are
+[above](#is-what-is-already-in-s3-readable-a-read-back-of-every-archive-2026-09-08).
+
 ## Still open
 
 - **The kernel-side cause of the process kills** is unconfirmed. `dmesg` was never
@@ -1511,12 +1743,18 @@ files at all.
   dedicated volume for `/home/admin_backups`, a bigger root volume (200 GB, 71% used), or
   a different mechanism for those two accounts. Measurements are under
   [the first real run](#the-first-real-run-2026-09-07-2215-edt).
-- **Restore has never been rehearsed.** Eleven accounts now have a 2026-09-07 backup, but
-  nothing has been restored from any of them, and `tellerstec` and `teller` are still on
-  2026-07-02. The one thing the first real run did establish about restorability is
-  negative: `rclone check --checksum` passing does not mean an archive is readable, which
-  is why the hook now reads each one to the end before uploading it. A rehearsal would
-  answer the rest.
+- **Restore has never been rehearsed** — though the archives have now been read.
+  [The 2026-09-08 sweep](#is-what-is-already-in-s3-readable-a-read-back-of-every-archive-2026-09-08)
+  read every compressed object in the bucket and settled the readability half of this:
+  the eleven 2026-09-07 account backups, the thirteen from 2026-07-02 and all ten weekly
+  system backups are complete, well-formed archives holding plausible account trees, and
+  22 older archives are not and have been renamed. What is still untested is whether
+  DirectAdmin will ingest one of them and produce a working account, and whether the SQL
+  dumps inside load. A rehearsal needs somewhere to restore *to*, which on this host means
+  the same disk problem as everything else; the smallest useful version is one of the
+  sub-megabyte accounts (`test2`, `brian2`, `aubrey`) into a scratch account. The change
+  from before is that a rehearsal now starts from an archive known to be whole, so a
+  failure would be attributable to the restore path rather than to the backup.
 - **The sweep has no trigger.** `sweep_old_system_dirs` in `all_backups_post.sh` is what
   is supposed to keep `/backup` from accumulating, but the hook only runs when
   DirectAdmin fires a backup event — which, per the point above, has not happened since
