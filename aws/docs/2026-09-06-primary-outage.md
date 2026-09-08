@@ -61,7 +61,7 @@ step 6 exists to stop DirectAdmin's own schedule racing it.
 | 4 | [Smoke-test DirectAdmin with one small account](#1-prove-the-backup-engine-works-without-filling-the-disk-cli) | kilobytes | done 2026-09-07 | Proves engine → hook → S3 → cleanup end to end for almost no space. |
 | 5 | [Diagnose `Not implemented`](#2-find-out-what-not-implemented-refers-to-cli) | none | not done, and optional | Read-only, and no longer on the critical path — step 7 does not go through the task queue. |
 | 6 | [Delete DirectAdmin's schedule](#3-delete-directadmins-backup-schedule) | — | done 2026-09-08 | Removed from the stored job list, not the panel — see the section for why that turned out to be possible. Repairing it would have restored a full all-users run, which no longer fits. |
-| 7 | [Let the per-account batch run take over](#per-account-backups-da_backup_batchsh) | largest single account, not the sum | **not scheduled** | Installed by step 3. Eleven of the thirteen accounts fit; the other two need a disk decision, not a schedule. |
+| 7 | [Let the per-account batch run take over](#per-account-backups-da_backup_batchsh) | largest single account, not the sum | scheduled 2026-09-08, first automatic run 2026-09-09 01:00 EDT | Installed by step 3. Eleven of the thirteen accounts fit and now run nightly. `tellerstec` does not fit for a reason that turned out to be fixable and free — see step 8 — and `teller` needs a disk decision. |
 | 8 | [Prune `tellerstec`'s Installatron backups](#why-tellerstec-stopped-fitting-and-why-that-is-the-cheapest-thing-here) | **frees ~29 GB, and stops ~2.6 GB/day of growth** | **not done** | The largest single reclaim left, and the only item here with a deadline: at the observed rate the volume fills in roughly three weeks on its own, regardless of backups. Doing it also makes `tellerstec` fit again. |
 
 ### State of the host, read 2026-09-07 05:02 UTC
@@ -1913,16 +1913,15 @@ could not be read, so it can gate a restore decision. Results of the first run a
   sub-megabyte accounts (`test2`, `brian2`, `aubrey`) into a scratch account. The change
   from before is that a rehearsal now starts from an archive known to be whole, so a
   failure would be attributable to the restore path rather than to the backup.
-- **The sweep has no trigger yet, and gets one with #122.**
+- **The sweep now has a trigger, and it has not yet been exercised.**
   `sweep_old_system_dirs` in `all_backups_post.sh` is what keeps `/backup` from
   accumulating, and the hook only runs when DirectAdmin fires a backup event. That is why
-  the two directories left there on 2026-09-07 had to be verified and removed by hand. It
-  is no longer true that no such event happens — the supervised batch run fired the hook
-  twelve times — but nothing is *scheduled*, so nothing sweeps on its own today, while the
-  weekly `sysbk` run restored in step 4 adds about 7.4 GB every Saturday. Installing
-  `/etc/cron.d/da-backup-batch` fixes this as a side effect: each nightly run fires the
-  hook, which uploads the week and then sweeps what it can confirm. Worth checking after
-  the first Saturday that follows the deploy, because it is the first time that path runs
-  against a directory it did not create.
+  the two directories left there on 2026-09-07 had to be verified and removed by hand.
+  `/etc/cron.d/da-backup-batch` was installed on 2026-09-08 and fixes this as a side
+  effect: each nightly run fires the hook, which uploads the week and then sweeps what it
+  can confirm. What is still unverified is the sweep itself. The weekly `sysbk` run
+  restored in step 4 adds about 7.4 GB every Saturday, and **the first Saturday after the
+  deploy is 2026-09-12** — worth watching, because it is the first time that path runs
+  against a directory the hook did not create.
 - **`/usr/local/sbin/migrate-backups-to-s3.sh` and `verify-backups-s3.sh`** exist on the
   host, are not in this repository, and were not examined.
