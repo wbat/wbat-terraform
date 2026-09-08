@@ -263,6 +263,24 @@ wait_for_lock() {
 LOCK_RACES="${SANDBOX}/lock-races"
 : >"$LOCK_RACES"
 
+# The mirror image: wait for a stand-in holder started in the background to actually own
+# the lock, for the cases where a held lock is the thing being tested.
+#
+# Same fixed-budget mistake as wait_for_lock had, in the other direction. Two seconds is
+# plenty for a backgrounded flock on an idle machine and not always enough on one busy
+# writing the suite's fixtures, so proof 10 failed roughly one run in three here: the
+# holder had not acquired yet, so the script under test took the lock itself, and all six
+# assertions about what happens behind a holder failed at once.
+lock_taken_by_holder() {
+  local waited=0
+  while ((waited < 200)); do
+    flock -n "${CASE}/batch.lock" -c true 2>/dev/null || return 0
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  return 1
+}
+
 lock_is_free_or_report() {
   [[ -n "${EXPECT_LOCK_HELD:-}" ]] && return 0
   wait_for_lock && return 0
@@ -778,13 +796,7 @@ flock -n "${CASE}/batch.lock" -c 'sleep 60' &
 holder=$!
 # Wait for the holder to actually own it rather than guessing at a sleep.
 held=0
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  if ! flock -n "${CASE}/batch.lock" -c true 2>/dev/null; then
-    held=1
-    break
-  fi
-  sleep 0.2
-done
+lock_taken_by_holder && held=1
 assert "the proof's own stand-in holder took the lock" "(( held == 1 ))"
 
 # The one case that means to run against a held lock, so it opts out of the harness wait
@@ -1102,10 +1114,8 @@ add_account a 1
 : >"${CASE}/batch.lock"
 flock -n "${CASE}/batch.lock" -c 'sleep 60' &
 holder=$!
-for _ in 1 2 3 4 5 6 7 8 9 10; do
-  flock -n "${CASE}/batch.lock" -c true 2>/dev/null || break
-  sleep 0.2
-done
+lock_taken_by_holder ||
+  printf '  harness: the stand-in holder never took %s\n' "${CASE}/batch.lock" >&2
 printf '%s\n' "$(($(date +%s) - 200000))" >"${CASE}/batch.lock.started"
 # Deliberately held, exactly as in proof 10.
 EXPECT_LOCK_HELD=1
