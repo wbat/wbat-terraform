@@ -81,6 +81,12 @@ MANAGED=(
   "da_backup_batch.sh|${SBIN_DIR}/da-backup-batch.sh|755"
   "cron.d-da-backup-batch|${CRON_DIR}/da-backup-batch|644"
   "logrotate.d-da-ops|${LOGROTATE_DIR}/da-ops|644"
+  # Read-only auditor, no cron entry: it is run on demand and reports, so a
+  # schedule would only produce output nobody reads. Managed here because a
+  # security audit whose installed copy predates the checks it is trusted to
+  # make is worse than no audit, and because hunting for a repo path under
+  # pressure is how it ends up not being run at all.
+  "host_access_audit.sh|${SBIN_DIR}/host-access-audit.sh|755"
 )
 
 hash_of() { sha256sum "$1" 2>/dev/null | awk '{print $1}'; }
