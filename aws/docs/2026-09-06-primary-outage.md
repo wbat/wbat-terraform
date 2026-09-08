@@ -1484,6 +1484,55 @@ So the first genuine test of the scheduled path is **2026-09-09 01:00 EDT**, and
 the first run to include `tellerstec` without anyone asking it to. Until it has been
 checked, "deployed" and "running nightly" are different claims and only the first is true.
 
+#### What has been proven, without waiting for 01:00
+
+The claim above is about the payload, not the plumbing, and the plumbing can be tested at
+any hour. On 2026-09-08 a second cron file was written scheduling the same script two
+minutes out, differing only in that it passed `--list`, which reads and archives nothing:
+
+```
+50 15 * * * root /usr/local/sbin/da-backup-batch.sh --list >/tmp/cron-selftest.out 2>&1
+```
+
+Cron ran it:
+
+```
+Sep  8 15:50:01 server CROND[1681164]: (root) CMD (/usr/local/sbin/da-backup-batch.sh --list …)
+Sep  8 15:50:08 server CROND[1681156]: (root) CMDEND (…)
+```
+
+Seven seconds, exit clean, and the expected thirteen-row table in the output file. The test
+file was then removed. That rules out the failure modes that would otherwise only surface
+at 01:00 — a cron file cron declines to parse, a name it skips, a script that is not
+executable, a `PATH` that is wrong under cron's minimal environment, or a script that needs
+a terminal. What remains untested is the run itself, which is a matter of the payload
+taking twenty-odd minutes rather than seven seconds.
+
+The same output is the current statement of what fits:
+
+```
+ACCOUNT                HOME   EXCLUDED       PEAK FITS NOW
+tellerstec            35.5G      30.5G       9.9G yes
+wbatnet               10.5G          -      21.0G yes
+teller                54.0G          -     108.1G NO
+```
+
+`tellerstec` at 9.9 GB of peak instead of 66.8 GB is the exclusion working, read back out
+of the scheduled path rather than an interactive one. Twelve accounts fit; `teller` does
+not, which is [the decision that is left](#still-open).
+
+#### One thing cleaned up along the way
+
+Reading `/var/log/cron` closely enough to prove a negative made an unrelated nuisance
+obvious. Two files in `/var/spool/cron` were not crontabs of any user —
+`root.bak-da-vhost` and `tellerstec.bak-20260701`, both saved there by earlier maintenance
+— and cron treats every file in that directory as a user's crontab, so it logged
+`ORPHAN (no passwd entry)` for each, once a minute, about 2,900 lines a day. Harmless in
+itself, but the noise was in the one log this document now depends on to show whether the
+backup schedule fired. Both were moved to `/root/crontab-backups/`, leaving fifteen files
+in the spool that each map to a real user. No live crontab was touched: root still carries
+the corrected `0 5 * * 6 /usr/local/sysbk/sysbk -q`.
+
 ### `tellerstec` backed up and verified (2026-09-08)
 
 Done, on the afternoon of 2026-09-08, after #128 was merged and installed. The file was
