@@ -94,10 +94,17 @@ when you are already locked out.
 Confirm you can authenticate with a key **before** removing the password path,
 and confirm the account you rely on actually has a key installed:
 
+`sudo` has to be on the file test, not only on the `awk`. A pipeline runs the
+loop in the *calling* shell, and a `.ssh` directory is mode 700, so an
+unprivileged reader gets `NO-KEY` for every account whether or not a key is
+there — including in the `ssm-user` session this runbook sends you to:
+
 ```bash
 sudo awk -F: '$3>=500 && $7 !~ /(nologin|false)$/ {print $1, $6}' /etc/passwd \
-  | while read -r u h; do printf '%-16s %s\n' "$u" \
-      "$( [ -s "$h/.ssh/authorized_keys" ] && echo has-key || echo NO-KEY )"; done
+  | while read -r u h; do
+      if sudo test -s "$h/.ssh/authorized_keys"; then k=has-key; else k=NO-KEY; fi
+      printf '%-16s %s\n' "$u" "$k"
+    done
 ```
 
 Then set all three options. Setting only the first is the most common mistake
@@ -382,18 +389,27 @@ This host has 14 accounts with a login shell and no allowlist, so every one of
 them is that path today. An allowlist closes it by refusing the account at
 authentication time whether or not a key was planted.
 
-See which accounts could be used this way:
+See which accounts could be used this way. Note the `sudo` on the file test and
+the absence of a shell filter — both matter, for reasons the next paragraph
+gives:
 
 ```bash
-sudo awk -F: '$3>=500 && $7 !~ /(nologin|false)$/ {print $1, $6}' /etc/passwd \
-  | while read -r u h; do printf '%-16s %-10s %s\n' "$u" \
-      "$( [ -s "$h/.ssh/authorized_keys" ] && echo has-key || echo no-key )" \
-      "$h"; done
+sudo awk -F: '$3>=500 {print $1, $6, $7}' /etc/passwd \
+  | while read -r u h s; do
+      if sudo test -s "$h/.ssh/authorized_keys"; then k=has-key; else k=no-key; fi
+      printf '%-16s %-10s %-18s %s\n' "$u" "$k" "$s" "$h"
+    done
 ```
 
-On the primary, **12 of the 14 accounts already have one.** The escalation is
-not hypothetical there; it is a path that is already built and only needs a
-private key. `accounts/authorized-keys` in the audit reports this as counts.
+On the primary, **13 accounts already have one.** The escalation is not
+hypothetical there; it is a path that is already built and only needs a private
+key. `accounts/authorized-keys` in the audit reports this as counts.
+
+Filtering by login shell would have said 12 and been wrong. DirectAdmin's
+`admin` holds two keys and has no login shell, so it is invisible to a
+shell-filtered scan — and `nologin` blocks only the interactive session, not
+`ssh -N -L` port forwarding or `sftp` where the subsystem is enabled. That is
+why the shell is *printed* here rather than used to exclude anything.
 
 ### Triage before you conclude anything
 
@@ -407,8 +423,8 @@ thing that says whose key it is:
 ```bash
 for h in /home/*; do
   f="$h/.ssh/authorized_keys"
-  [ -s "$f" ] || continue
-  ssh-keygen -l -f "$f" 2>/dev/null | awk -v u="${h##*/}" '
+  sudo test -s "$f" || continue
+  sudo ssh-keygen -l -f "$f" 2>/dev/null | awk -v u="${h##*/}" '
     { c = ""; for (i = 3; i < NF; i++) c = c (c ? " " : "") $i
       printf "%-47s %-14s %-9s %s\n", $2, u, $NF, c }'
 done | sort
@@ -425,9 +441,13 @@ done | sort
 
 Mtimes say whether the files arrived together or one at a time:
 
+The glob has to expand inside the privileged shell too. `sudo stat /home/*/...`
+expands in the caller's shell, which cannot see through a mode-700 `.ssh` and so
+matches nothing:
+
 ```bash
-stat -c '%y  %n' /home/*/.ssh/authorized_keys 2>/dev/null | sort
-ls -la /etc/skel/.ssh/ 2>/dev/null
+sudo sh -c "stat -c '%y  %n' /home/*/.ssh/authorized_keys 2>/dev/null" | sort
+sudo ls -la /etc/skel/.ssh/ 2>/dev/null
 ```
 
 #### What this host turned out to be
@@ -488,10 +508,19 @@ sudo systemctl reload sshd      # reload keeps existing sessions alive
 sudo sshd -T | grep -i allowgroups
 ```
 
-**Then open a new SSH session from a second terminal.** If it fails, the session
-you kept open can `rm /etc/ssh/sshd_config.d/20-allowgroups.conf && sshd -t &&
-systemctl reload sshd`. If you lost both, the SSM session from step 1 is the way
-back — this is exactly the failure it exists for.
+**Then open a new SSH session from a second terminal.** If it fails, roll back
+from the session you kept open. The drop-in is root-owned and reloading `sshd`
+is privileged, so every step needs `sudo` — the operator account this procedure
+leaves you in cannot do any of it unprivileged, and discovering that mid-lockout
+is how a recoverable mistake turns into an SSM-only one:
+
+```bash
+sudo rm /etc/ssh/sshd_config.d/20-allowgroups.conf
+sudo sshd -t && sudo systemctl reload sshd
+```
+
+If you lost both sessions, the SSM session from step 1 is the way back — this is
+exactly the failure it exists for.
 
 One DirectAdmin interaction to know about: if you ever grant an account SSH
 access through the panel, it must also be in `sshusers`, or the panel will

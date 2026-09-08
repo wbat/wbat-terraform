@@ -549,7 +549,9 @@ Where a clean verdict would be easy but wrong, it does the harder thing:
   filtered by login shell: DirectAdmin's `admin` holds keys and has none, and
   `nologin` blocks the interactive session but not `ssh -N -L` or sftp. Names are
   never printed, since they are public already and reprinting them adds exposure
-  without information.
+  without information. Run unprivileged, the scan skips rather than reporting a
+  clean sweep: a mode-700 `.ssh` makes an unreadable key indistinguishable from an
+  absent one, and "no account has a key" is the wrong way to be wrong here.
 - A running `amazon-ssm-agent` is reported as a running process, not as a recovery
   path. Only `PingStatus: Online` from the control plane means a session can
   actually be opened, and that is a separate check.
