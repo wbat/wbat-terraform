@@ -51,15 +51,14 @@ LOCK="${SITE_MEDIA_LOCK:-/var/lock/da-site-media.lock}"
 STATE_DIR="${SITE_MEDIA_STATE:-/var/lib/da-ops/site-media}"
 EXCLUDE_NAME=".backup_exclude_paths"
 
-# The archive bucket, from aws/global/s3-site-media-archive.tf. Set in the config file.
-BUCKET="${SITE_MEDIA_BUCKET:-}"
-REGION="${SITE_MEDIA_REGION:-us-east-1}"
+# Overridable; the live values usually come from CONFIG below. Read after sourcing.
+REGION_DEFAULT="us-east-1"
 
 # An rclone connection string rather than a named remote, so this needs no rclone.conf
 # entry and cannot pick up the wrong credentials. env_auth makes it use the instance
 # role, which is what carries the archive-bucket grant -- the `s3backup` remote used by
 # the backup hook is an IAM user scoped to the backup bucket and cannot write here.
-RCLONE_REMOTE_OPTS="${SITE_MEDIA_REMOTE_OPTS:-:s3,provider=AWS,env_auth=true,region=REGION_PLACEHOLDER:}"
+RCLONE_REMOTE_OPTS_DEFAULT=":s3,provider=AWS,env_auth=true,region=REGION_PLACEHOLDER:"
 
 # How stale a receipt may be before --write-exclusions refuses it. A receipt proves the
 # copy was good when it was written; a month-old one proves very little about now.
@@ -87,6 +86,11 @@ if [[ -f "$CONFIG" ]]; then
   source "$CONFIG"
 fi
 
+# Resolved after sourcing so /etc/da-vhost-listen/vhost-listen.conf can set them.
+# Environment variables still win over the file, matching the sibling scripts.
+BUCKET="${SITE_MEDIA_BUCKET:-${BUCKET:-}}"
+REGION="${SITE_MEDIA_REGION:-${REGION:-$REGION_DEFAULT}}"
+RCLONE_REMOTE_OPTS="${SITE_MEDIA_REMOTE_OPTS:-${RCLONE_REMOTE_OPTS:-$RCLONE_REMOTE_OPTS_DEFAULT}}"
 # Same guards as the sibling scripts: an address that can never receive mail is reported
 # as broken alerting rather than logged as a successful send.
 alert() {

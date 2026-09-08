@@ -232,6 +232,22 @@ head -c 70000 /dev/zero | tr '\0' '#' >"$MANIFEST"
 rc=$(run --list)
 assert "oversized refused" "[[ $rc -ne 0 ]]"
 
+echo "== 14. SITE_MEDIA_BUCKET from the config file is honoured =="
+# Regression: BUCKET used to be captured before the config was sourced, so a value set
+# only in vhost-listen.conf was invisible and every run said the bucket was unset.
+reset_world
+cat >"$CONF" <<EOF
+HEALTH_ALERT_TO="ops@wbat.test.invalid"
+SITE_MEDIA_BUCKET="from-config-bucket"
+EOF
+# Deliberately do not export SITE_MEDIA_BUCKET — the file is the only source.
+rc=$(SITE_MEDIA_HOME="$HOMES" SITE_MEDIA_MANIFEST="$MANIFEST" SITE_MEDIA_CONF="$CONF" \
+  SITE_MEDIA_LOG="${SANDBOX}/run.log" SITE_MEDIA_LOCK="${SANDBOX}/run.lock" \
+  SITE_MEDIA_STATE="$STATE" SITE_MEDIA_RCLONE="rclone" \
+  env -u SITE_MEDIA_BUCKET "$SCRIPT" --list >"${SANDBOX}/out" 2>&1; echo $?)
+assert "list exits zero" "[[ $rc -eq 0 ]]"
+assert "prints the bucket from the config file" "grep -q 'Bucket: from-config-bucket' '${SANDBOX}/out'"
+
 # Non-vacuity. Each check removes one guard and confirms the corresponding proof then
 # stops holding. A proof that passes against a script with its guard deleted is proving
 # nothing, and the way that happens in practice is a fixture that would have satisfied
