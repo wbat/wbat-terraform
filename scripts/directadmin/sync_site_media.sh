@@ -50,6 +50,11 @@ LOG="${SITE_MEDIA_LOG:-/var/log/da-site-media.log}"
 LOCK="${SITE_MEDIA_LOCK:-/var/lock/da-site-media.lock}"
 STATE_DIR="${SITE_MEDIA_STATE:-/var/lib/da-ops/site-media}"
 EXCLUDE_NAME=".backup_exclude_paths"
+# Markers around the paths this script owns inside .backup_exclude_paths. Everything
+# outside them is left alone, so an account that already excludes something else does not
+# lose that exclusion when site-media archiving is added.
+MANAGED_BEGIN="# BEGIN da-site-media"
+MANAGED_END="# END da-site-media"
 
 # Overridable; the live values usually come from CONFIG below. Read after sourcing.
 REGION_DEFAULT="us-east-1"
@@ -212,8 +217,33 @@ paths_for_user() {
 
 receipt_path() { printf '%s/%s.receipt' "$STATE_DIR" "$1"; }
 
+# Fingerprint of the on-disk trees a receipt claims to cover: every regular file's
+# relative path, size and mtime. Path names alone are not enough -- a file added or
+# edited after a successful sync would still match a path-only receipt, and
+# --write-exclusions would then exclude bytes that were never copied.
+tree_fingerprint() {
+  local user="$1" p src
+  {
+    while IFS= read -r p; do
+      src="${HOME_ROOT}/${user}/${p}"
+      if [[ ! -e "$src" ]]; then
+        printf 'MISSING\t%s\n' "$p"
+        continue
+      fi
+      # %T@ is epoch seconds with a fractional part; enough to notice an overwrite.
+      find "$src" -type f -printf '%P\t%s\t%T@\n' 2>/dev/null \
+        | LC_ALL=C sort \
+        | sed "s|^|${p}/|"
+    done < <(paths_for_user "$user")
+  } | sha256sum | awk '{print $1}'
+}
+
+invalidate_receipt() {
+  rm -f "$(receipt_path "$1")" 2>/dev/null || true
+}
+
 # A receipt is only meaningful if it describes the same work we are about to rely on, so
-# it records the path set it covers and is compared against the manifest, not just dated.
+# it records the path set, the tree fingerprint, and is compared against both -- not just dated.
 write_receipt() {
   local user="$1" files="$2" bytes="$3" mode="$4"
   mkdir -p "$STATE_DIR" 2>/dev/null || true
@@ -225,23 +255,25 @@ write_receipt() {
     printf 'files=%s\n' "$files"
     printf 'bytes=%s\n' "$bytes"
     printf 'paths_sha256=%s\n' "$(paths_for_user "$user" | sort | sha256sum | awk '{print $1}')"
+    printf 'tree_sha256=%s\n' "$(tree_fingerprint "$user")"
     paths_for_user "$user" | sort | sed 's/^/path=/'
   } >"$(receipt_path "$user")"
   chmod 600 "$(receipt_path "$user")" 2>/dev/null || true
 }
 
-# Returns 0 only if the receipt is present, recent, from this bucket, and covers exactly
-# the paths the manifest currently asks for. Any drift between the two means the receipt
-# is evidence about a different question.
+# Returns 0 only if the receipt is present, recent, from this bucket, covers exactly
+# the paths the manifest currently asks for, AND the on-disk trees still match what was
+# verified. Any drift means the receipt is evidence about a different question.
 receipt_is_current() {
-  local user="$1" r age now want have
+  local user="$1" r age now want have tree_want tree_have
   r="$(receipt_path "$user")"
   [[ -f "$r" ]] || { echo "no receipt at ${r}"; return 1; }
 
-  local verified_epoch bucket paths_sha
+  local verified_epoch bucket paths_sha tree_sha
   verified_epoch="$(sed -n 's/^verified_epoch=//p' "$r" | head -1)"
   bucket="$(sed -n 's/^bucket=//p' "$r" | head -1)"
   paths_sha="$(sed -n 's/^paths_sha256=//p' "$r" | head -1)"
+  tree_sha="$(sed -n 's/^tree_sha256=//p' "$r" | head -1)"
 
   now="$(date +%s)"
   age=$((now - ${verified_epoch:-0}))
@@ -259,13 +291,57 @@ receipt_is_current() {
     echo "receipt covers a different set of paths than the manifest asks for"
     return 1
   fi
+  if [[ -z "$tree_sha" ]]; then
+    echo "receipt has no tree fingerprint (pre-dates content binding); re-run --sync"
+    return 1
+  fi
+  tree_want="$(tree_fingerprint "$user")"
+  tree_have="$tree_sha"
+  if [[ "$tree_want" != "$tree_have" ]]; then
+    echo "on-disk tree has changed since the receipt was written; re-run --sync"
+    return 1
+  fi
   return 0
 }
 
+# True if this account's exclude file contains our managed section, or (for older
+# installs) any of the manifest paths. Used to decide whether a failed sync leaves
+# content unprotected.
 exclusions_in_place() {
-  local user="$1" f
+  local user="$1" f p
   f="${HOME_ROOT}/${user}/${EXCLUDE_NAME}"
-  [[ -s "$f" ]]
+  [[ -s "$f" ]] || return 1
+  if grep -qxF "$MANAGED_BEGIN" "$f" 2>/dev/null; then
+    return 0
+  fi
+  while IFS= read -r p; do
+    grep -qxF "$p" "$f" 2>/dev/null && return 0
+  done < <(paths_for_user "$user")
+  return 1
+}
+
+# Alert when a failure would leave excluded media with no off-host copy. Used from
+# preflight paths that never reach do_sync, because cron discards stdout/stderr.
+alert_if_unprotected() {
+  local subject="$1" body="$2" any=0 u
+  if ((${#MANIFEST_USERS[@]} > 0)); then
+    while IFS= read -r u; do
+      if exclusions_in_place "$u"; then
+        any=1
+        break
+      fi
+    done < <(manifest_users_unique)
+  else
+    # Manifest unreadable: be conservative and look for any exclude file.
+    local f
+    for f in "${HOME_ROOT}"/*/"${EXCLUDE_NAME}"; do
+      [[ -s "$f" ]] || continue
+      any=1
+      break
+    done
+  fi
+  ((any)) || return 0
+  alert "$subject" "$body"
 }
 
 # Copy one account's paths. rclone copy never deletes at the destination; that is the
@@ -342,7 +418,7 @@ do_list() {
 }
 
 do_write_exclusions() {
-  local user rc=0 reason f tmp
+  local user rc=0 reason f tmp line in_managed keep managed
   while IFS= read -r user; do
     if ! reason="$(receipt_is_current "$user")"; then
       log "REFUSING to write exclusions for ${user}: ${reason}"
@@ -351,16 +427,50 @@ do_write_exclusions() {
       continue
     fi
     f="${HOME_ROOT}/${user}/${EXCLUDE_NAME}"
-    tmp="${f}.tmp.$$"
-    if ! paths_for_user "$user" | sort >"$tmp" 2>/dev/null; then
-      log "ERROR ${user}: could not write ${tmp}"
+    if [[ -L "$f" ]]; then
+      log "REFUSING to write exclusions for ${user}: ${f} is a symlink"
       rc=1
       continue
     fi
+    tmp="${f}.tmp.$$"
+    keep="$(mktemp)"
+    managed="$(mktemp)"
+    paths_for_user "$user" | sort >"$managed"
+
+    # Preserve every existing line that is not inside our managed section and is not one
+    # of the paths we are about to write (avoid duplicates). A file with no markers is
+    # treated as entirely foreign content -- its lines stay, and our section is appended.
+    in_managed=0
+    if [[ -f "$f" ]]; then
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" == "$MANAGED_BEGIN" ]]; then
+          in_managed=1
+          continue
+        fi
+        if [[ "$line" == "$MANAGED_END" ]]; then
+          in_managed=0
+          continue
+        fi
+        ((in_managed)) && continue
+        # Drop blank lines and exact duplicates of paths we manage.
+        [[ -z "$line" ]] && continue
+        grep -qxF "$line" "$managed" 2>/dev/null && continue
+        printf '%s\n' "$line" >>"$keep"
+      done <"$f"
+    fi
+
+    {
+      [[ -s "$keep" ]] && cat "$keep"
+      printf '%s\n' "$MANAGED_BEGIN"
+      cat "$managed"
+      printf '%s\n' "$MANAGED_END"
+    } >"$tmp"
+    rm -f "$keep" "$managed"
+
     chmod 600 "$tmp" 2>/dev/null || true
     chown "${user}:${user}" "$tmp" 2>/dev/null || true
     if mv "$tmp" "$f"; then
-      log "OK wrote $(wc -l <"$f") exclusion path(s) to ${f}"
+      log "OK wrote $(grep -cvE '^(#|$)' "$f") exclusion path(s) to ${f} (managed section refreshed)"
     else
       log "ERROR ${user}: could not install ${f}"
       rm -f "$tmp" 2>/dev/null || true
@@ -375,6 +485,9 @@ do_sync() {
   local failed=() ok=()
 
   while IFS= read -r user; do
+    # Drop any prior receipt before we start. A failed run must not leave a receipt that
+    # still looks valid for --write-exclusions; a successful run writes a fresh one.
+    invalidate_receipt "$user"
     copied=0
     verified=0
     copy_user "$user" || copied=1
@@ -455,7 +568,19 @@ main() {
     shift
   done
 
-  read_manifest || return 1
+  read_manifest || {
+    alert_if_unprotected \
+      "Site media archive cannot start on ${HOST} -- content may be unprotected" \
+      "$(printf '%s\n' \
+        "Preflight failed before any copy ran: the manifest at ${MANIFEST} is missing," \
+        "unreadable, or yielded no usable entries. Cron discards this script's output," \
+        "so without this alert a broken manifest would silently stop the only backup of" \
+        "excluded media." \
+        "" \
+        "Recent log:" \
+        "$(tail -20 "$LOG" 2>/dev/null | sed 's/^/  /')")"
+    return 1
+  }
 
   if [[ "$mode" == "list" ]]; then
     do_list
@@ -464,10 +589,20 @@ main() {
 
   if [[ -z "$BUCKET" ]]; then
     log "ERROR SITE_MEDIA_BUCKET is not set (expected in ${CONFIG})"
+    alert_if_unprotected \
+      "Site media archive cannot start on ${HOST} -- SITE_MEDIA_BUCKET unset" \
+      "$(printf '%s\n' \
+        "SITE_MEDIA_BUCKET is not set in ${CONFIG}. Excluded media has no destination," \
+        "so the nightly account backup is omitting content that is not being copied anywhere." \
+        "" \
+        "Set SITE_MEDIA_BUCKET to the site_media_archive_bucket_id Terraform output.")"
     return 1
   fi
   if ! command -v "$RCLONE" >/dev/null 2>&1; then
     log "ERROR rclone not found (${RCLONE})"
+    alert_if_unprotected \
+      "Site media archive cannot start on ${HOST} -- rclone missing" \
+      "rclone (${RCLONE}) is not on PATH. Excluded media cannot be copied or verified."
     return 1
   fi
 

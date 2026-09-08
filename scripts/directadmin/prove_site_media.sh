@@ -150,9 +150,11 @@ echo "== 4. after a verified sync, exclusions are written =="
 rc=$(run --write-exclusions)
 assert "exits zero" "[[ $rc -eq 0 ]]"
 assert "exclusion file exists" "[[ -s '$exclude_file' ]]"
-assert "lists both paths" "[[ \$(grep -c . '$exclude_file') -eq 2 ]]"
-assert "paths are relative, no leading slash" "! grep -q '^/' '$exclude_file'"
-assert "no trailing slash on any entry" "! grep -q '/$' '$exclude_file'"
+assert "contains managed section markers" "grep -qxF '# BEGIN da-site-media' '$exclude_file' && grep -qxF '# END da-site-media' '$exclude_file'"
+assert "lists both paths" "grep -qxF 'domains/site.com/public_html/gallery' '$exclude_file' && grep -qxF 'domains/site.com/public_html/videos' '$exclude_file'"
+assert "no absolute managed paths" "! grep -vE '^(#|$)' '$exclude_file' | grep -q '^/'"
+assert "no trailing slash on any managed path" "! grep -vE '^(#|$)' '$exclude_file' | grep -q '/$'"
+assert "receipt has a tree fingerprint" "grep -q '^tree_sha256=' '${STATE}/teller.receipt'"
 
 echo "== 5. a failed verification blocks the receipt, so exclusions stay refused =="
 reset_world
@@ -262,6 +264,54 @@ rc=$(SITE_MEDIA_HOME="$HOMES" SITE_MEDIA_MANIFEST="$MANIFEST" SITE_MEDIA_CONF="$
   SITE_MEDIA_BUCKET="from-env-bucket" "$SCRIPT" --list >"${SANDBOX}/out" 2>&1; echo $?)
 assert "env wins over the config file" "grep -q 'Bucket: from-env-bucket' '${SANDBOX}/out'"
 
+echo "== 15. a receipt is refused when the on-disk tree changes after sync =="
+# Codex P1: path-only receipts would still accept a tree that grew or was edited after
+# the verified copy, and --write-exclusions would then exclude bytes never uploaded.
+reset_world
+run --sync >/dev/null
+assert "receipt exists" "[[ -s '${STATE}/teller.receipt' ]]"
+echo "new-photo" >"${HOMES}/teller/domains/site.com/public_html/gallery/b.jpg"
+rc=$(run --write-exclusions)
+assert "exclusions refused" "[[ $rc -ne 0 ]]"
+assert "says the tree changed" "grep -q 'on-disk tree has changed' '${SANDBOX}/out'"
+assert "no exclusion file" "[[ ! -e '$exclude_file' ]]"
+
+echo "== 16. foreign exclusions are preserved when the managed section is written =="
+reset_world
+run --sync >/dev/null
+printf '%s\n' 'application_backups' 'tmp/scratch' >"$exclude_file"
+rc=$(run --write-exclusions)
+assert "exits zero" "[[ $rc -eq 0 ]]"
+assert "keeps the foreign entries" "grep -qxF 'application_backups' '$exclude_file' && grep -qxF 'tmp/scratch' '$exclude_file'"
+assert "still has the managed paths" "grep -qxF 'domains/site.com/public_html/gallery' '$exclude_file'"
+assert "wraps managed paths in markers" "grep -qxF '# BEGIN da-site-media' '$exclude_file'"
+
+echo "== 17. preflight failure alerts when exclusions are already in place =="
+# Codex P1: cron discards stdout/stderr, so a missing bucket after exclusions are written
+# would silently stop the only backup of that media. The alert must fire from main(), not
+# only from do_sync.
+reset_world
+run --sync >/dev/null
+USE_CONF="$CONF_REAL" run --write-exclusions >/dev/null
+assert "exclusions are in place" "[[ -s '$exclude_file' ]]"
+: >"$STUB_MAIL"
+USE_CONF="$CONF_REAL" SITE_MEDIA_HOME="$HOMES" SITE_MEDIA_MANIFEST="$MANIFEST" \
+  SITE_MEDIA_LOG="${SANDBOX}/run.log" SITE_MEDIA_LOCK="${SANDBOX}/run.lock" \
+  SITE_MEDIA_STATE="$STATE" SITE_MEDIA_RCLONE="rclone" \
+  env -u SITE_MEDIA_BUCKET "$SCRIPT" --sync >"${SANDBOX}/out" 2>&1 || true
+# CONF_REAL has SITE_MEDIA_BUCKET=test-bucket; clear it for this run.
+cat >"${SANDBOX}/conf-nobucket.conf" <<EOF
+HEALTH_ALERT_TO="ops@wbat.net"
+EOF
+: >"$STUB_MAIL"
+SITE_MEDIA_HOME="$HOMES" SITE_MEDIA_MANIFEST="$MANIFEST" \
+  SITE_MEDIA_CONF="${SANDBOX}/conf-nobucket.conf" \
+  SITE_MEDIA_LOG="${SANDBOX}/run.log" SITE_MEDIA_LOCK="${SANDBOX}/run.lock" \
+  SITE_MEDIA_STATE="$STATE" SITE_MEDIA_RCLONE="rclone" \
+  env -u SITE_MEDIA_BUCKET "$SCRIPT" --sync >"${SANDBOX}/out" 2>&1 || true
+assert "preflight alert mailed" "[[ -s '$STUB_MAIL' ]]"
+assert "names the unset bucket" "grep -q 'SITE_MEDIA_BUCKET unset' '$STUB_MAIL'"
+
 # Non-vacuity. Each check removes one guard and confirms the corresponding proof then
 # stops holding. A proof that passes against a script with its guard deleted is proving
 # nothing, and the way that happens in practice is a fixture that would have satisfied
@@ -294,20 +344,23 @@ assert "NV1: without the receipt gate the same fixture is excluded unverified" "
 assert "NV1: and the mutant really wrote the file" "[[ -s '$exclude_file' ]]"
 
 # NV2: a valid receipt that covers fewer paths than the manifest now asks for, which is
-# proof 7's fixture. Without the path-set comparison the stale receipt is accepted and a
-# never-copied path is excluded.
+# proof 7's fixture. Without the path-set AND tree comparisons the stale receipt is
+# accepted and a never-copied path is excluded. Both must go: the tree fingerprint also
+# changes when a path is added (it records MISSING for it), so disabling only paths_sha
+# would leave the tree check holding and the mutant would still refuse -- a vacuous NV.
 reset_world
 run --sync >/dev/null
 echo "teller domains/site.com/public_html/nonexistent" >>"$MANIFEST"
 control=$(run --write-exclusions)
 cp "$SCRIPT" "$MUT"
 sed -i 's/if \[\[ "\$want" != "\$have" \]\]; then/if false; then/' "$MUT"
+sed -i 's/if \[\[ "\$tree_want" != "\$tree_have" \]\]; then/if false; then/' "$MUT"
 chmod +x "$MUT"
 assert "NV2 mutant differs from the original" "! cmp -s '$SCRIPT' '$MUT'"
 rm -f "$exclude_file"
 mutant=$(run_mutant --write-exclusions)
 assert "NV2: unmutated script refuses a receipt covering a different path set" "[[ $control -ne 0 ]]"
-assert "NV2: without the path-set check the grown manifest is excluded unverified" "[[ $mutant -eq 0 ]]"
+assert "NV2: without path+tree checks the grown manifest is excluded unverified" "[[ $mutant -eq 0 ]]"
 
 # NV3: exclusions in place and verification failing, which is proof 10's fixture. The
 # alert exists to make that state loud; without the check it goes out silently.
