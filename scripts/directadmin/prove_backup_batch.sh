@@ -672,7 +672,12 @@ new_case nv-hang
 add_account stuck 1
 SCRIPT_SAVE="$SCRIPT"
 SCRIPT="$NV"
-export STUB_DA_SLEEP=13139 STUB_DRAIN=0
+# The sleep length doubles as this run's handle on the orphan it leaves, so it carries the
+# suite's pid. A fixed number would make two suites running at once reap each other's
+# stubs, which is a failure in whichever one had not finished with it yet.
+NV_HANG_SLEEP=$((20000 + $$))
+export STUB_DA_SLEEP="$NV_HANG_SLEEP"
+export STUB_DRAIN=0
 ACCOUNT_TIMEOUT=2
 KILL_GRACE=5
 WATCH_INTERVAL=1
@@ -682,9 +687,9 @@ unset STUB_DA_SLEEP STUB_DRAIN
 unset ACCOUNT_TIMEOUT KILL_GRACE WATCH_INTERVAL RUN_TIMEOUT
 SCRIPT="$SCRIPT_SAVE"
 nv_check "the hung backup runs on unbounded and nothing is ever reported" "[[ '$nv_rc' == 124 ]]"
-# `timeout` signals the script, not the stub it orphaned. Reap it so the sandbox teardown
-# does not leave a stray sleep behind for the rest of the CI job.
-pkill -f 'sleep 13139' 2>/dev/null || true
+# `timeout` signals the script, not the stub it setsid'd into its own session. Reap it so
+# the sandbox teardown does not leave a stray sleep behind for the rest of the CI job.
+pkill -f "sleep ${NV_HANG_SLEEP}" 2>/dev/null || true
 
 # NV5: drop the stale-holder check, so every run that finds the lock taken exits 0 quietly
 # however long it has been taken -- the branch that turns one wedged run into weeks of
