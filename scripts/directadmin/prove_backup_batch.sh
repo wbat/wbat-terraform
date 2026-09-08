@@ -60,13 +60,36 @@ for a in "$@"; do
 done
 echo "$user" >>"${STUB_DA_CALLS}"
 if [[ -n "${STUB_DA_RC:-}" && "${STUB_DA_RC}" != "0" ]]; then exit "${STUB_DA_RC}"; fi
+
+# Stands in for the upload hook, which the real DirectAdmin invokes itself -- including
+# when the archive step failed. That ordering is the whole point: the hook runs from
+# inside this process, so it touches the staging directory before the batch script that
+# killed this process gets control back. Only exercised when a proof sets STUB_FAKE_S3.
+fake_hook() {
+  [[ -n "${STUB_FAKE_S3:-}" ]] || return 0
+  if [[ -n "${STUB_ABORT_SENTINEL:-}" && -f "${STUB_ABORT_SENTINEL}" ]]; then
+    cat "${STUB_ABORT_SENTINEL}" >>"${STUB_FAKE_S3}/refused"
+    return 0
+  fi
+  local f
+  for f in "${dest}"/*.tar.zst; do
+    [[ -f "$f" ]] || continue
+    cp -f "$f" "${STUB_FAKE_S3}/" && rm -f "$f"
+  done
+}
+trap 'fake_hook; exit 143' TERM
+
 : >"${dest}/user.stub.${user}.tar.zst"
 # Simulate the volume filling while this account is being archived.
 if [[ -n "${STUB_DA_CONSUME_TO_KB:-}" ]]; then
   echo "${STUB_DA_CONSUME_TO_KB}" >"${STUB_DF_KB_FILE}"
 fi
 sleep "${STUB_DA_SLEEP:-0}"
-if [[ "${STUB_DRAIN:-1}" == "1" ]]; then rm -f "${dest}/user.stub.${user}.tar.zst"; fi
+if [[ -n "${STUB_FAKE_S3:-}" ]]; then
+  fake_hook
+elif [[ "${STUB_DRAIN:-1}" == "1" ]]; then
+  rm -f "${dest}/user.stub.${user}.tar.zst"
+fi
 exit 0
 STUB
 
@@ -125,24 +148,35 @@ add_account() {
 # RUN_TIMEOUT wraps the script in `timeout`. Only the non-vacuity check for the
 # per-account limit needs it: with that guard removed the script is supposed to hang
 # forever, and a proof that hangs forever is not a proof.
+#
+# PEAK_COPIES_PCT is passed through only when a proof sets it. Defaulting it here the way
+# the others are defaulted would mean the harness, not the script, decides how many copies
+# of an archive DirectAdmin is assumed to need on disk at once -- and that assumption is
+# the one the 2026-09-07 run got wrong, so every proof except the one that is explicitly
+# about it runs against whatever the script itself believes.
 run_batch() {
-  local bound=()
+  local bound=() envs=()
   [[ -n "${RUN_TIMEOUT:-}" ]] && bound=(timeout "$RUN_TIMEOUT")
-  PATH="${SANDBOX}/bin:$PATH" \
-    DA_BATCH_DA_BIN="${SANDBOX}/bin/directadmin" \
-    DA_BATCH_USERS_DIR="${CASE}/users" \
-    DA_BATCH_HOME="${CASE}/home" \
-    DA_BACKUP_ADMIN_DIR="${CASE}/staging" \
-    DA_BATCH_LOG="${CASE}/batch.log" \
-    DA_BATCH_LOCK="${CASE}/batch.lock" \
-    DA_BATCH_CONF="${CASE}/etc/conf" \
-    DA_BATCH_WATCH_INTERVAL="${WATCH_INTERVAL:-1}" \
-    DA_BATCH_DRAIN_TIMEOUT="${DRAIN_TIMEOUT:-3}" \
-    DA_BATCH_ACCOUNT_TIMEOUT="${ACCOUNT_TIMEOUT:-0}" \
-    DA_BATCH_KILL_GRACE="${KILL_GRACE:-5}" \
-    DA_BATCH_RESERVE_GB="${RESERVE_GB:-10}" \
-    DA_BATCH_FLOOR_GB="${FLOOR_GB:-0}" \
-    DA_BATCH_RATIO_PCT="${RATIO_PCT:-100}" \
+  envs=(
+    "PATH=${SANDBOX}/bin:$PATH"
+    "DA_BATCH_DA_BIN=${SANDBOX}/bin/directadmin"
+    "DA_BATCH_USERS_DIR=${CASE}/users"
+    "DA_BATCH_HOME=${CASE}/home"
+    "DA_BACKUP_ADMIN_DIR=${CASE}/staging"
+    "DA_BATCH_LOG=${CASE}/batch.log"
+    "DA_BATCH_LOCK=${CASE}/batch.lock"
+    "DA_BATCH_CONF=${CASE}/etc/conf"
+    "DA_BATCH_WATCH_INTERVAL=${WATCH_INTERVAL:-1}"
+    "DA_BATCH_DRAIN_TIMEOUT=${DRAIN_TIMEOUT:-3}"
+    "DA_BATCH_ACCOUNT_TIMEOUT=${ACCOUNT_TIMEOUT:-0}"
+    "DA_BATCH_KILL_GRACE=${KILL_GRACE:-5}"
+    "DA_BATCH_RESERVE_GB=${RESERVE_GB:-10}"
+    "DA_BATCH_FLOOR_GB=${FLOOR_GB:-0}"
+    "DA_BATCH_RATIO_PCT=${RATIO_PCT:-100}"
+    "DA_BATCH_ABORT_SENTINEL=${CASE}/abort-sentinel"
+  )
+  [[ -n "${PEAK_COPIES_PCT:-}" ]] && envs+=("DA_BATCH_PEAK_COPIES_PCT=${PEAK_COPIES_PCT}")
+  env "${envs[@]}" \
     ${bound[@]+"${bound[@]}"} \
     "$SCRIPT" "$@" >"${CASE}/stdout" 2>"${CASE}/stderr"
   echo $?
@@ -229,6 +263,30 @@ assert "no partial archive was created and removed" "! grep -q 'partial archive'
 
 # ---------------------------------------------------------------------------
 echo
+echo "3d. The gate reserves room for the copies DirectAdmin keeps, not for one archive"
+# The 2026-09-07 regression. DirectAdmin assembles backup/home.tar.zst and the .sql dumps
+# inside the destination and only then tars them into the final archive, in the same
+# directory -- so the parts and the archive built from them are both on disk at once.
+# Measured on the primary: wbatnet, 10.50 GiB home, 6.72 GiB archive, 12.69 GiB peak, which
+# is 189% of the archive. A gate that compares one archive against free space passes
+# accounts the volume cannot hold, which is what it did to tellerstec: 33.4 GiB home waved
+# through against 59.8 GiB free, then killed at the floor with 51.8 GiB consumed.
+#
+# Scaled down here: 40 MB of home against 60 MB free. One archive fits. Two do not.
+new_case peak-copies
+add_account doubled 40
+echo $((60 * 1024)) >"$STUB_DF_KB_FILE"
+RESERVE_GB=0
+rc="$(run_batch)"
+unset RESERVE_GB
+assert "exit 1" "[[ '$rc' == 1 ]]"
+assert "the account is skipped even though a single archive would fit" "! grep -qx doubled '$STUB_DA_CALLS'"
+assert "the log calls it a peak need rather than an archive size" "grep -q 'peak need is about' '${CASE}/batch.log'"
+assert "the log says why one archive is not the number that matters" "grep -q 'assembled parts and the archive' '${CASE}/batch.log'"
+assert "the mail reports the home size next to the peak" "grep -q 'peak need' '$STUB_MAIL'"
+
+# ---------------------------------------------------------------------------
+echo
 echo "4. A staging directory that is not empty stops the run before it starts"
 # Leftovers mean an earlier upload failed. Archiving on top of them is the all-at-once
 # behaviour arriving by the back door.
@@ -302,6 +360,85 @@ assert "it is not misreported as a floor breach" "! grep -q 'below the .* GB flo
 assert "the archive the killed run left behind was removed" "[[ -z \"\$(find '${CASE}/staging' -type f)\" ]]"
 assert "the incomplete run is mailed, naming the account" "grep -q 'stuck' '$STUB_MAIL'"
 assert "the mail says why, not just that it failed" "grep -q 'per-account limit' '$STUB_MAIL'"
+
+# ---------------------------------------------------------------------------
+echo
+echo "6c. A killed backup reaches the upload hook already marked as unusable"
+# What actually happened on the first real run, 2026-09-07, on tellerstec. The floor fired
+# and the watchdog killed the compressor -- and DirectAdmin responded to being killed by
+# running the upload hook, from inside the invocation the batch script was still waiting
+# on. The hook uploaded the 20 GiB truncated archive, rclone confirmed S3 held the same
+# bytes, the hook deleted the local copy, and only then did `wait` return here. The
+# cleanup below found an empty directory and reported a clean kill, while S3 had gained a
+# corrupt archive under the name a good one would have had.
+#
+# Deleting the partial after the child exits cannot fix that; the hook gets there first.
+# So the watchdog writes a sentinel before it signals anything, and the hook refuses. The
+# stub models the ordering faithfully: its TERM handler is the hook.
+new_case abort-sentinel
+add_account victim 1
+mkdir -p "${CASE}/fake-s3"
+export STUB_FAKE_S3="${CASE}/fake-s3" STUB_ABORT_SENTINEL="${CASE}/abort-sentinel"
+export STUB_DA_SLEEP=4 STUB_DA_CONSUME_TO_KB=$((2 * 1048576))
+FLOOR_GB=8
+WATCH_INTERVAL=1
+rc="$(run_batch)"
+unset STUB_FAKE_S3 STUB_ABORT_SENTINEL STUB_DA_SLEEP STUB_DA_CONSUME_TO_KB
+unset FLOOR_GB WATCH_INTERVAL
+assert "exit 1" "[[ '$rc' == 1 ]]"
+assert "the hook ran, and refused" "[[ -s '${CASE}/fake-s3/refused' ]]"
+assert "the sentinel named the account and the reason" "grep -q 'victim killed' '${CASE}/fake-s3/refused'"
+assert "no partial archive reached S3" "[[ -z \"\$(find '${CASE}/fake-s3' -name '*.tar.zst')\" ]]"
+assert "the partial was removed from staging" "[[ -z \"\$(find '${CASE}/staging' -type f)\" ]]"
+assert "the sentinel is cleared, so it cannot block the next run" "[[ ! -f '${CASE}/abort-sentinel' ]]"
+
+# ---------------------------------------------------------------------------
+echo
+echo "6d. A sentinel left behind by an earlier run does not block a good backup"
+# The other half of the same mechanism. A run killed before it reached its own cleanup --
+# or the machine losing power mid-backup -- leaves the sentinel set. If nothing clears it,
+# the hook refuses every upload from then on, the staging directory never drains, and
+# account backups stop as completely as they did for the two months before this script
+# existed. Same silent failure, arrived at through the fix.
+new_case stale-sentinel
+add_account fine 1
+mkdir -p "${CASE}/fake-s3"
+echo "someone-else killed 2026-09-06T01:00:00-04:00: floor 8388608" >"${CASE}/abort-sentinel"
+export STUB_FAKE_S3="${CASE}/fake-s3" STUB_ABORT_SENTINEL="${CASE}/abort-sentinel"
+DRAIN_TIMEOUT=4
+WATCH_INTERVAL=1
+rc="$(run_batch)"
+unset STUB_FAKE_S3 STUB_ABORT_SENTINEL
+unset DRAIN_TIMEOUT WATCH_INTERVAL
+assert "exit 0" "[[ '$rc' == 0 ]]"
+assert "the account was archived" "grep -qx fine '$STUB_DA_CALLS'"
+assert "the hook uploaded rather than refusing" "[[ ! -e '${CASE}/fake-s3/refused' ]]"
+assert "the archive reached S3" "[[ -n \"\$(find '${CASE}/fake-s3' -name '*.tar.zst')\" ]]"
+assert "staging drained" "[[ -z \"\$(find '${CASE}/staging' -type f)\" ]]"
+
+# ---------------------------------------------------------------------------
+echo
+echo "6e. A sentinel that cannot be written stops the run before it starts"
+# A guard that is silently absent is worse than no guard, because the run looks identical
+# to a working one right up to the first floor breach -- and that is the run that uploads
+# a truncated archive to S3 and reports success.
+new_case unwritable-sentinel
+add_account any 1
+rc="$(env "PATH=${SANDBOX}/bin:$PATH" \
+  "DA_BATCH_DA_BIN=${SANDBOX}/bin/directadmin" \
+  "DA_BATCH_USERS_DIR=${CASE}/users" \
+  "DA_BATCH_HOME=${CASE}/home" \
+  "DA_BACKUP_ADMIN_DIR=${CASE}/staging" \
+  "DA_BATCH_LOG=${CASE}/batch.log" \
+  "DA_BATCH_LOCK=${CASE}/batch.lock" \
+  "DA_BATCH_CONF=${CASE}/etc/conf" \
+  "DA_BATCH_FLOOR_GB=0" \
+  "DA_BATCH_ABORT_SENTINEL=${CASE}/no-such-directory/abort" \
+  "$SCRIPT" >/dev/null 2>&1
+echo $?)"
+assert "exit 1" "[[ '$rc' == 1 ]]"
+assert "nothing was archived" "[[ ! -s '$STUB_DA_CALLS' ]]"
+assert "the log says the sentinel is why, not that a backup failed" "grep -q 'cannot write the abort sentinel' '${CASE}/batch.log'"
 
 # ---------------------------------------------------------------------------
 echo
@@ -477,6 +614,54 @@ run_batch >/dev/null
 unset STUB_DA_SLEEP STUB_DA_CONSUME_TO_KB STUB_DRAIN FLOOR_GB WATCH_INTERVAL
 SCRIPT="$SCRIPT_SAVE"
 nv_check "the partial archive is left for the hook to upload" "[[ -n \"\$(find '${CASE}/staging' -type f)\" ]]"
+
+# NV3b: keep the whole kill path but stop writing the abort sentinel, so the hook is not
+# told anything. This is the 2026-09-07 failure reproduced: the partial reaches S3.
+sed 's|>"$ABORT_SENTINEL" 2>/dev/null|>/dev/null 2>\&1|' "$SCRIPT" >"$NV"
+chmod +x "$NV"
+new_case nv-sentinel
+add_account victim 1
+mkdir -p "${CASE}/fake-s3"
+SCRIPT_SAVE="$SCRIPT"
+SCRIPT="$NV"
+export STUB_FAKE_S3="${CASE}/fake-s3" STUB_ABORT_SENTINEL="${CASE}/abort-sentinel"
+export STUB_DA_SLEEP=4 STUB_DA_CONSUME_TO_KB=$((2 * 1048576))
+FLOOR_GB=8
+WATCH_INTERVAL=1
+run_batch >/dev/null
+unset STUB_FAKE_S3 STUB_ABORT_SENTINEL STUB_DA_SLEEP STUB_DA_CONSUME_TO_KB
+unset FLOOR_GB WATCH_INTERVAL
+SCRIPT="$SCRIPT_SAVE"
+nv_check "the truncated archive is uploaded to S3 by the hook" "[[ -n \"\$(find '${CASE}/fake-s3' -name '*.tar.zst')\" ]]"
+
+# NV3c: keep the sentinel but stop clearing the stale one before each account, so a
+# sentinel left by any earlier run blocks every upload from then on.
+sed 's|^  rm -f "$ABORT_SENTINEL" 2>/dev/null .. true$|  :|' "$SCRIPT" >"$NV"
+chmod +x "$NV"
+new_case nv-stale-sentinel
+add_account fine 1
+mkdir -p "${CASE}/fake-s3"
+echo "someone-else killed 2026-09-06T01:00:00-04:00: floor 8388608" >"${CASE}/abort-sentinel"
+SCRIPT_SAVE="$SCRIPT"
+SCRIPT="$NV"
+export STUB_FAKE_S3="${CASE}/fake-s3" STUB_ABORT_SENTINEL="${CASE}/abort-sentinel"
+DRAIN_TIMEOUT=4
+WATCH_INTERVAL=1
+run_batch >/dev/null
+unset STUB_FAKE_S3 STUB_ABORT_SENTINEL DRAIN_TIMEOUT WATCH_INTERVAL
+SCRIPT="$SCRIPT_SAVE"
+nv_check "a stale sentinel makes the hook refuse a good archive" "[[ -s '${CASE}/fake-s3/refused' ]]"
+
+# NV3d: drop the doubling from the peak estimate, leaving the archive-only arithmetic the
+# 2026-09-07 run used, and the account the volume cannot hold is attempted again.
+new_case nv-peak-copies
+add_account doubled 40
+echo $((60 * 1024)) >"$STUB_DF_KB_FILE"
+RESERVE_GB=0
+PEAK_COPIES_PCT=100
+run_batch >/dev/null
+unset RESERVE_GB PEAK_COPIES_PCT
+nv_check "the account that needs two archives' worth of room is attempted" "grep -qx doubled '$STUB_DA_CALLS'"
 
 # NV4: drop the per-account time limit and let the same hang run unbounded. The outer
 # `timeout` is what stands in for the guard: rc 124 means the script never gave up on its

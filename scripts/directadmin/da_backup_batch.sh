@@ -41,6 +41,23 @@ ADMIN_DIR="${DA_BACKUP_ADMIN_DIR:-/home/admin_backups}"
 HOOK="${DA_BATCH_HOOK:-/usr/local/directadmin/scripts/custom/all_backups_post.sh}"
 LOG="${DA_BATCH_LOG:-/var/log/da-backup-batch.log}"
 LOCK="${DA_BATCH_LOCK:-/var/lock/da-backup-batch.lock}"
+
+# How this script tells the upload hook that the archive it is about to find is rubbish.
+#
+# DirectAdmin runs all_backups_post.sh itself, from inside the admin-backup invocation,
+# and it runs it even when the archive step failed. So on the first real batch run
+# (2026-09-07, tellerstec) the sequence was: watchdog kills the compressor at the floor,
+# DirectAdmin's own error handling runs the hook, the hook uploads the 20 GiB truncated
+# archive, rclone confirms S3 holds the same bytes, the hook deletes the local copy, and
+# only then does `wait` on the DirectAdmin child return here. The kill path below looked
+# for a partial archive to delete, found an empty directory, and reported a clean kill --
+# while S3 had gained a corrupt archive named exactly like a good one.
+#
+# Deleting the partial after the child exits is therefore too late by construction. The
+# hook is the process that touches it first, so the hook is what has to be told. The
+# watchdog writes this file before it signals anything, which makes the ordering a
+# happens-before rather than a race.
+ABORT_SENTINEL="${DA_BATCH_ABORT_SENTINEL:-/run/da-backup-abort}"
 # When the current lock holder started, recorded beside the lock rather than inside it:
 # opening the lock file truncates it, so a run that loses the race would erase the very
 # record it needs to read.
@@ -64,11 +81,29 @@ RESERVE_GB="${DA_BATCH_RESERVE_GB:-10}"
 # killed. Below this MySQL and Exim start failing writes, which is the outage this whole
 # exercise is about avoiding.
 FLOOR_GB="${DA_BATCH_FLOOR_GB:-8}"
-# Estimated archive size as a percentage of the account's raw home directory size. 100 is
-# deliberately pessimistic -- the 2026-07-02 run compressed 114 GB of homes into 66 GiB,
-# so roughly 58% -- because being wrong in this direction skips an account, and being
-# wrong in the other direction fills the volume.
+# Estimated size of the finished archive, as a percentage of the account's raw home
+# directory size. 100 is deliberately pessimistic -- measured per account on this host on
+# 2026-09-07 the real figures were 28% (feed2js) to 84% (alumnibhs), with wbatnet at 64%
+# -- because being wrong in this direction skips an account, and being wrong in the other
+# direction fills the volume.
 SIZE_RATIO_PCT="${DA_BATCH_RATIO_PCT:-100}"
+# Peak disk an account needs, as a percentage of the size of the archive it produces.
+#
+# This is the term the first version of this script did not have, and its absence is why
+# the 2026-09-07 run passed tellerstec through the pre-flight gate and then hit the floor
+# on it. The gate compared one archive against free space; DirectAdmin needs room for two.
+#
+# What it actually does, watched directly on the primary while wbatnet was archived:
+# everything is built inside the destination, under <destination>/<user>/. First
+# backup/home.tar.zst, then a .sql dump per database, then user.db and the config files.
+# Only once all of that exists does it tar the lot into
+# <destination>/<user>/reseller.admin.<user>.tar.zst -- in the same directory it is
+# reading from, so the assembled parts and the archive built out of them are both on disk
+# at the same moment. The parts are already compressed, so the outer archive is about the
+# same size as their sum, and the peak is therefore about twice one archive.
+#
+# 200 is that doubling with nothing added for luck; the reserve below is the slack.
+PEAK_COPIES_PCT="${DA_BATCH_PEAK_COPIES_PCT:-200}"
 WATCH_INTERVAL_SEC="${DA_BATCH_WATCH_INTERVAL:-5}"
 # How long to wait for the hook to drain the staging directory after an account finishes.
 DRAIN_TIMEOUT_SEC="${DA_BATCH_DRAIN_TIMEOUT:-1800}"
@@ -216,6 +251,15 @@ raw_kb_for() {
   printf '%d' "${kb:-0}"
 }
 
+# Peak free space one account needs, which is not the same thing as the size of the
+# archive it produces. DirectAdmin holds the assembled parts of the backup and the archive
+# it tars out of them in the same directory at the same time, so the number that matters
+# is a multiple of the archive, not the archive. Getting this wrong in the low direction is
+# what let the 2026-09-07 run start an account the volume could not hold.
+peak_kb_for() {
+  printf '%d' "$(($1 * SIZE_RATIO_PCT / 100 * PEAK_COPIES_PCT / 100))"
+}
+
 # Ascending, so a failure on the largest account leaves the other thirteen already safe in
 # S3 rather than never attempted. On this host `teller` alone is roughly half the total.
 ordered_users() {
@@ -288,6 +332,12 @@ backup_one() {
   }
   : >"$abort_flag"
 
+  # A sentinel left by an earlier run would make the hook refuse to upload this account's
+  # perfectly good archive, and the drain wait would then time out. Clear it before the
+  # backup rather than only after, because the run that wrote it may have been killed
+  # before it got to its own cleanup.
+  rm -f "$ABORT_SENTINEL" 2>/dev/null || true
+
   # setsid so the backup gets its own process group. Without it, a non-interactive shell
   # puts the child in this script's group, and the group kill below would either miss or
   # -- worse -- signal this script. DirectAdmin forks tar and zstd, and killing only the
@@ -320,6 +370,10 @@ backup_one() {
     # The loop also ends when the backup finishes on its own, which is the common case and
     # needs no signal at all.
     [[ -s "$abort_flag" ]] || exit 0
+    # Before the signal, not after. DirectAdmin reacts to being killed by running the
+    # upload hook, so the hook can be reading this file within milliseconds; writing it
+    # afterwards would be a race the hook usually wins.
+    echo "${user} killed $(date -Iseconds): $(cat "$abort_flag")" >"$ABORT_SENTINEL" 2>/dev/null || true
     stop_group "$da_pid"
   ) &
   watch_pid=$!
@@ -363,9 +417,22 @@ backup_one() {
     if [[ -n "$partial" ]]; then
       log "removing the partial archive left by the killed run: $(printf '%s' "$partial" | tr '\n' ' ')"
       find "$ADMIN_DIR" -type f -delete 2>/dev/null
+    else
+      # Empty after a kill is not the reassuring outcome it looks like. The archive existed
+      # -- the floor was crossed writing it -- so something removed it, and the only thing
+      # that removes files from here is the upload hook, which removes them by uploading
+      # them first. That is the 2026-09-07 tellerstec failure exactly. It should now be
+      # impossible, because the sentinel is written before the signal, so if it happens the
+      # sentinel is not doing its job and S3 may be holding a truncated archive.
+      log "WARN ${ADMIN_DIR} is already empty after killing ${user}; check /var/log/da-backup-s3.log and today's S3 prefix for a truncated ${user} archive the hook may have uploaded before the ${ABORT_SENTINEL} sentinel stopped it"
     fi
+    rm -f "$ABORT_SENTINEL" 2>/dev/null || true
     return 1
   fi
+
+  # Clean exit: nothing to hold back, and leaving the sentinel would block the next
+  # account's upload.
+  rm -f "$ABORT_SENTINEL" 2>/dev/null || true
 
   if ((rc != 0)); then
     backup_one_reason="admin-backup exited ${rc}"
@@ -440,6 +507,18 @@ if [[ ! -d "$ADMIN_DIR" ]]; then
   exit 1
 fi
 
+# Checked here rather than discovered at the moment the watchdog fires. A sentinel that
+# cannot be written is a guard that is not there, and the run would look identical to one
+# with the guard working right up until the first floor breach -- which is the run that
+# uploads a truncated archive to S3 and reports success.
+if [[ "$MODE" == "run" ]]; then
+  sentinel_dir="$(dirname "$ABORT_SENTINEL")"
+  if ! { [[ -d "$sentinel_dir" && -w "$sentinel_dir" ]] || [[ -w "$ABORT_SENTINEL" ]]; }; then
+    log "ERROR cannot write the abort sentinel ${ABORT_SENTINEL}; refusing to run, because a killed backup could then have its partial archive uploaded to S3 by the hook"
+    exit 1
+  fi
+fi
+
 # Resolve the selection before doing anything with it, because every silent way this
 # script can fail runs through an empty one.
 #
@@ -500,17 +579,19 @@ Runbook: aws/docs/2026-09-06-primary-outage.md"
 fi
 
 if [[ "$MODE" == "list" ]]; then
-  printf '%-16s %10s %10s %s\n' "ACCOUNT" "HOME" "ESTIMATE" "FITS NOW"
+  printf '%-16s %10s %10s %s\n' "ACCOUNT" "HOME" "PEAK" "FITS NOW"
   now_kb="$(avail_kb "$ADMIN_DIR")"
   now_kb="${now_kb:-0}"
   while IFS=$'\t' read -r kb user; do
     [[ -n "$user" ]] || continue
-    est=$((kb * SIZE_RATIO_PCT / 100))
+    est="$(peak_kb_for "$kb")"
     if ((now_kb >= est + reserve_kb)); then fits="yes"; else fits="NO"; fi
     printf '%-16s %9sG %9sG %s\n' "$user" "$(gb "$kb")" "$(gb "$est")" "$fits"
   done < <(ordered_users)
-  printf '\n%s GB free now; each account needs its estimate plus %s GB reserve.\n' \
-    "$(gb "$now_kb")" "$RESERVE_GB"
+  printf '\n%s GB free now. PEAK is the estimated archive (%s%% of home) taken %s%% over,\n' \
+    "$(gb "$now_kb")" "$SIZE_RATIO_PCT" "$PEAK_COPIES_PCT"
+  printf 'because DirectAdmin holds the assembled parts and the archive made from them at the\n'
+  printf 'same time; each account needs that much free plus a %s GB reserve.\n' "$RESERVE_GB"
   exit 0
 fi
 
@@ -540,7 +621,7 @@ while IFS=$'\t' read -r kb user; do
   [[ -n "$user" ]] || continue
   [[ -n "$aborted" ]] && break
 
-  est_kb=$((kb * SIZE_RATIO_PCT / 100))
+  est_kb="$(peak_kb_for "$kb")"
   now_kb="$(avail_kb "$ADMIN_DIR")"
   now_kb="${now_kb:-0}"
 
@@ -555,18 +636,18 @@ while IFS=$'\t' read -r kb user; do
   fi
 
   if ((now_kb < est_kb + reserve_kb)); then
-    log "SKIP ${user}: needs about $(gb "$est_kb") GB plus a ${RESERVE_GB} GB reserve, and only $(gb "$now_kb") GB is free"
-    skipped_users+=("${user} (estimate $(gb "$est_kb") GB, free $(gb "$now_kb") GB)")
+    log "SKIP ${user}: peak need is about $(gb "$est_kb") GB (DirectAdmin holds the assembled parts and the archive built from them at once) plus a ${RESERVE_GB} GB reserve, and only $(gb "$now_kb") GB is free"
+    skipped_users+=("${user} (home $(gb "$kb") GB, peak need $(gb "$est_kb") GB, free $(gb "$now_kb") GB)")
     continue
   fi
 
   if [[ "$MODE" == "dry-run" ]]; then
-    log "would back up ${user} (home $(gb "$kb") GB, estimate $(gb "$est_kb") GB, free $(gb "$now_kb") GB)"
+    log "would back up ${user} (home $(gb "$kb") GB, peak need $(gb "$est_kb") GB, free $(gb "$now_kb") GB)"
     done_users+=("$user")
     continue
   fi
 
-  log "backing up ${user} (home $(gb "$kb") GB, estimate $(gb "$est_kb") GB, free $(gb "$now_kb") GB)"
+  log "backing up ${user} (home $(gb "$kb") GB, peak need $(gb "$est_kb") GB, free $(gb "$now_kb") GB)"
   if ! backup_one "$user"; then
     failed_users+=("${user}${backup_one_reason:+ (${backup_one_reason})}")
     # A kill or a DirectAdmin failure on one account says nothing reliable about the next,
