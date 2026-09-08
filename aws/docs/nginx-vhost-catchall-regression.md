@@ -89,9 +89,13 @@ a name-mismatch warning into hard expiry. Re-check renewal state after the fix.
 # Which address does nginx actually have bound, and which servers are in each group?
 sudo nginx -T | grep -nE '^\s*(listen|server_name)' | less
 
-# The address public traffic lands on (primary private IP of this instance):
+# The address public traffic lands on (primary private IP of this instance).
+# IMDSv2 is enforced on both boxes, so a bare GET returns 401 -- fetch a token first.
 ip -4 addr show scope global
-curl -s http://169.254.169.254/latest/meta-data/local-ipv4; echo
+TOKEN=$(curl -sS -X PUT http://169.254.169.254/latest/api/token \
+  -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
+curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" \
+  http://169.254.169.254/latest/meta-data/local-ipv4; echo
 
 # Confirm a broken domain has no listen on that address:
 sudo nginx -T | grep -A15 'server_name .*iots\.com' | grep listen
