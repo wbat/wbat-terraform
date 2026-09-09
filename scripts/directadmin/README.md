@@ -705,6 +705,12 @@ Where a clean verdict would be easy but wrong, it does the harder thing:
   is not a way in, and warning about it would be a finding on a session that cannot
   happen. The coupling is stated instead: adding root to that group re-opens
   key-based root login with no other change.
+- Legacy mail/FTP ports (21/110/143) are judged by whether cleartext auth is
+  still accepted, not by the port list alone. Dovecot 2.4's
+  `auth_allow_cleartext=no` (and the older `disable_plaintext_auth=yes`) and
+  Pure-FTPd `TLS 2` clear the finding while the ports stay open; `TLS 1` or
+  cleartext allowed keeps it. Closing those ports is optional client-compat
+  cleanup, reported as such rather than as unfinished hardening.
 - A running `amazon-ssm-agent` is reported as a running process, not as a recovery
   path. Only `PingStatus: Online` from the control plane means a session can
   actually be opened, and that is a separate check.
@@ -718,7 +724,7 @@ in, is in [aws/docs/host-access-hardening.md](../../aws/docs/host-access-hardeni
 ./scripts/directadmin/prove_host_access_audit.sh
 ```
 
-Twenty-six cases, every one of them a way this audit can mislead: a password path left
+Twenty-seven cases, every one of them a way this audit can mislead: a password path left
 open while the report reads green, or a false alarm that sends an operator to install
 something harmful. The motivating case is `PasswordAuthentication no` with PAM
 keyboard-interactive still enabled: what most hardening checklists stop short of,
@@ -756,3 +762,10 @@ unquoted `for` over that pattern expands against cwd before the match, so
 accounts as refused. Case 26 is a tie: two fingerprints at the same maximum reach,
 one only on refused accounts and one on an admitted account — keeping only
 `head -1` of that tie can silence the live one.
+
+Case 27 is the same shape of stale finding on the mail/FTP ports. Dovecot 2.4
+renamed `disable_plaintext_auth` to `auth_allow_cleartext` (and inverted it), and
+Pure-FTPd `TLS 2` already refused cleartext FTP — but the audit only counted
+open ports, so it kept asking the operator to confirm a policy that was already
+set. The case asserts both directions: `TLS 1` or `auth_allow_cleartext=yes`
+must keep warning.

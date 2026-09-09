@@ -579,6 +579,120 @@ audit_directadmin() {
     || report WARN "da/brute-force-disabled" "set to 0, so present in the config but doing nothing:${disabled}"
 }
 
+# Whether Dovecot will accept a password over a non-TLS connection.
+# 0 = cleartext auth allowed (bad), 1 = refused (good), 2 = could not tell.
+#
+# Dovecot 2.4 renamed disable_plaintext_auth to auth_allow_cleartext and
+# inverted the polarity. Reading only the old name on 2.4.x looks like the
+# setting is absent and the audit falls back to warning forever.
+dovecot_cleartext_auth() {
+  local v
+  if [ -n "${HOST_AUDIT_DOVECOT_AUTH_ALLOW_CLEARTEXT:-}" ]; then
+    case "${HOST_AUDIT_DOVECOT_AUTH_ALLOW_CLEARTEXT}" in
+      no) return 1 ;;
+      yes) return 0 ;;
+      *) return 2 ;;
+    esac
+  fi
+  if [ -n "${HOST_AUDIT_DOVECOT_DISABLE_PLAINTEXT:-}" ]; then
+    case "${HOST_AUDIT_DOVECOT_DISABLE_PLAINTEXT}" in
+      yes) return 1 ;;
+      no) return 0 ;;
+      *) return 2 ;;
+    esac
+  fi
+  have doveconf || return 2
+  v="$(doveconf -h auth_allow_cleartext 2>/dev/null || true)"
+  if [ -n "$v" ]; then
+    case "$v" in no) return 1 ;; yes) return 0 ;; *) return 2 ;; esac
+  fi
+  v="$(doveconf -h disable_plaintext_auth 2>/dev/null || true)"
+  if [ -n "$v" ]; then
+    case "$v" in yes) return 1 ;; no) return 0 ;; *) return 2 ;; esac
+  fi
+  return 2
+}
+
+# Pure-FTPd TLS level from conf, or empty if unknown.
+# 0 = off, 1 = optional, 2 = required. That is the entire control: TLS 1 still
+# accepts a cleartext USER/PASS, which is the finding; TLS 2 does not.
+pureftpd_tls_level() {
+  local conf="${HOST_AUDIT_PUREFTPD_CONF:-/etc/pure-ftpd.conf}"
+  if [ -n "${HOST_AUDIT_PUREFTPD_TLS:-}" ]; then
+    printf '%s\n' "$HOST_AUDIT_PUREFTPD_TLS"
+    return 0
+  fi
+  [ -r "$conf" ] || return 1
+  awk '/^TLS[[:space:]]+/ {print $2; exit}' "$conf"
+}
+
+# Judge 21/110/143: open without implicit TLS is only a cleartext password path
+# when the daemon will still accept the password before STARTTLS / without TLS.
+audit_plaintext_auth() {
+  local open="$1"
+  local plain="" label port
+  for port in 21:ftp 110:pop3 143:imap; do
+    label="${port#*:}"
+    port="${port%%:*}"
+    case ",$open," in *",$port,"*) plain="$plain ${label}/${port}" ;; esac
+  done
+  if [ -z "$plain" ]; then
+    report OK "exposure/plaintext-auth" "no ftp/pop3/imap listeners without implicit TLS"
+    return
+  fi
+
+  local risk="" safe="" unknown="" mail_st=0 ftp_tls="" why_mail="" why_ftp=""
+  dovecot_cleartext_auth || mail_st=$?
+  case "$mail_st" in
+    1) why_mail="dovecot refuses cleartext auth" ;;
+    0) why_mail="dovecot allows cleartext auth" ;;
+    *) why_mail="dovecot cleartext-auth policy unknown" ;;
+  esac
+  ftp_tls="$(pureftpd_tls_level 2>/dev/null || true)"
+  case "$ftp_tls" in
+    2) why_ftp="pure-ftpd TLS=2 (required)" ;;
+    1) why_ftp="pure-ftpd TLS=1 (optional)" ;;
+    0) why_ftp="pure-ftpd TLS=0 (off)" ;;
+    "") why_ftp="pure-ftpd TLS level unread" ;;
+    *) why_ftp="pure-ftpd TLS=${ftp_tls}" ;;
+  esac
+
+  for port in $plain; do
+    label="${port%%/*}"
+    case "$label" in
+      ftp)
+        case "$ftp_tls" in
+          2) safe="$safe $port" ;;
+          1 | 0) risk="$risk $port" ;;
+          *)
+            # No readable Pure-FTPd conf: do not invent a requirement. ProFTPd
+            # and other daemons also bind 21; unknown is not "safe".
+            unknown="$unknown $port"
+            ;;
+        esac
+        ;;
+      pop3 | imap)
+        case "$mail_st" in
+          1) safe="$safe $port" ;;
+          0) risk="$risk $port" ;;
+          *) unknown="$unknown $port" ;;
+        esac
+        ;;
+    esac
+  done
+
+  if [ -z "$risk$unknown" ]; then
+    report OK "exposure/plaintext-auth" "legacy ports still listen:${plain}, but cleartext passwords are refused (${why_mail}; ${why_ftp}) -- closing 110/143/21 is optional client-compat cleanup"
+    return
+  fi
+
+  local detail="accepts credentials without implicit TLS:${risk:-$plain}"
+  [ -z "$safe" ] || detail="${detail}; cleartext already refused on:${safe}"
+  [ -z "$unknown" ] || detail="${detail}; could not confirm:${unknown}"
+  detail="${detail} -- ${why_mail}; ${why_ftp}; make TLS mandatory, or close in favour of 465/993/995"
+  report WARN "exposure/plaintext-auth" "$detail"
+}
+
 # --- What is actually reachable ----------------------------------------------
 # Ground truth. Config files describe intent; the listening socket and the
 # firewall decide what an attacker can reach.
@@ -637,15 +751,14 @@ audit_exposure() {
   fi
   [ -n "$exposed$firewalled" ] || report OK "exposure/datastore" "no database ports bound to all interfaces"
 
-  # Plaintext credential paths. Their TLS equivalents (465/993/995, or FTP over
-  # TLS) exist on this stack, so these are usually legacy compatibility.
-  local plain=""
-  for port in 21:ftp 110:pop3 143:imap; do
-    label="${port#*:}"
-    port="${port%%:*}"
-    case ",$open," in *",$port,"*) plain="$plain ${label}/${port}" ;; esac
-  done
-  [ -z "$plain" ] || report WARN "exposure/plaintext-auth" "accepts credentials without implicit TLS:${plain} -- confirm STARTTLS is mandatory, or close in favour of 465/993/995"
+  # Plaintext-capable listeners (21/110/143). Their TLS-native equivalents
+  # (465/993/995, or FTP with TLS required) exist on this stack. The port being
+  # open is not the same as a password crossing the wire in clear -- Dovecot
+  # and Pure-FTPd can refuse cleartext auth while still listening on the legacy
+  # port. Ask that question before warning; the primary's audit kept telling
+  # the operator to "confirm STARTTLS is mandatory" after auth_allow_cleartext
+  # was already no and Pure-FTPd TLS was already 2.
+  audit_plaintext_auth "$open"
 
   case ",$open," in
     *,2222,*)
