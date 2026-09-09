@@ -36,6 +36,15 @@ resource "aws_iam_role_policy_attachment" "WBAT_Main_Server-AmazonSSMManagedInst
   policy_arn = data.aws_iam_policy.AmazonSSMManagedInstanceCore.arn
 }
 
+# Lets the CloudWatch agent publish disk_used_percent / mem_used_percent once
+# installed on the hosts. Status-check alarms do not need this; disk/memory
+# alarms in Still open do. Attaching the managed policy here unblocks that
+# follow-up without a second IAM change when the agent lands.
+resource "aws_iam_role_policy_attachment" "WBAT_Main_Server-CloudWatchAgentServerPolicy" {
+  role       = aws_iam_role.WBAT_Main_Server.name
+  policy_arn = data.aws_iam_policy.CloudWatchAgentServerPolicy.arn
+}
+
 # CloudFront invalidation permissions for deploy workflows
 resource "aws_iam_role_policy" "WBAT_Main_Server-CloudFrontInvalidation" {
   name = "CloudFrontInvalidation"
