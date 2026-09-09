@@ -38,6 +38,12 @@ variable "billing_threshold_critical" {
   default     = 100
 }
 
+variable "host_health_alert_email" {
+  description = "Email for EC2 status-check / host-health alarms (leave empty to skip subscription)"
+  type        = string
+  default     = ""
+}
+
 variable "tellerstech_email" {
   description = "Legacy SNS email for the old forwarding-notification topic (TFC sensitive)"
   type        = string

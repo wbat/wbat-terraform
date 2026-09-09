@@ -9,6 +9,8 @@ module "ec2" {
 
   instance_profile-WBAT_Main_Server      = var.instance_profile-WBAT_Main_Server
   instance_profile_name-WBAT_Main_Server = var.instance_profile_name-WBAT_Main_Server
+
+  host_health_alerts_topic_arn = var.host_health_alerts_topic_arn
 }
 
 module "kms" {

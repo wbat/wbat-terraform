@@ -2345,18 +2345,22 @@ than being inferred at 2am.
   captured and journald is volatile here; enabling a persistent journal
   (`mkdir -p /var/log/journal && systemctl restart systemd-journald`) would make the next
   occurrence answerable.
-- **No CloudWatch disk or memory alarm exists.** The only alarms in this account are the
-  two billing alarms in [`billing-alarms.tf`](../global/cloudwatch/billing-alarms.tf).
+- **No CloudWatch disk or memory alarm exists.** The only host-facing CloudWatch alarms
+  today are the EC2 status-check alarms in
+  [`status-check-alarms.tf`](../us-east-1/ec2/status-check-alarms.tf) (added after this
+  outage). Billing alarms remain in
+  [`billing-alarms.tf`](../global/cloudwatch/billing-alarms.tf).
   [`da_disk_guard.sh`](../../scripts/directadmin/da_disk_guard.sh), installed on the host
   on 2026-09-07, covers disk, inodes, and memory, but it is hourly cron on the host —
   exactly what a thrashing box cannot run. It reads `sar` history specifically so it can report a spike it slept
   through, but that is after the fact. An alarm that can page during the event needs the
   CloudWatch agent publishing `disk_used_percent` and `mem_used_percent`, plus
-  `aws_cloudwatch_metric_alarm` resources beside the billing alarms.
-- **`StatusCheckFailed_Instance` is already published and unalarmed.** It went to 1 for
-  four and a half hours during this outage with no notification. That is a metric EC2
-  emits for free, needs no agent, and would have caught this — the cheapest available
-  improvement, and it belongs in Terraform.
+  `aws_cloudwatch_metric_alarm` resources beside the status-check alarms. The instance
+  role already has `CloudWatchAgentServerPolicy` attached so the agent can publish once
+  installed.
+- **~~`StatusCheckFailed_Instance` is already published and unalarmed.~~** Done: both
+  primary and secondary now alarm on `StatusCheckFailed_Instance` and
+  `StatusCheckFailed_System` into the `host-health-alerts` SNS topic.
 - **`teller` is fixed — all thirteen accounts now have a current backup.** The media split
   recorded under [`teller` site media archive](#teller-site-media-archive) completed on
   2026-09-08: 40.2 GB archived and verified, exclusions written, account backup

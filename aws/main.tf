@@ -41,10 +41,11 @@ module "global" {
   enable_legacy_cdn           = false # Set to true to re-enable cdn.aws.tellerstech.com
   enable_waf                  = false # Set to true to enable WAF (~$5-10/month)
 
-  # Billing alerts - uses personal_email from credentials.tf
+  # Billing + host-health alerts - uses personal_email from credentials.tf
   billing_alert_email        = var.personal_email
   billing_threshold_warning  = 75  # Alert at $75
   billing_threshold_critical = 100 # Critical at $100
+  host_health_alert_email    = var.personal_email
 
   # SES bounce/complaint SNS + DA→Gmail pipe secret (see scripts/directadmin/)
   tellerstech_email = var.tellerstech_email
@@ -61,6 +62,8 @@ module "us-east-1" {
 
   instance_profile-WBAT_Main_Server      = module.global.instance_profile-WBAT_Main_Server
   instance_profile_name-WBAT_Main_Server = module.global.instance_profile_name-WBAT_Main_Server
+
+  host_health_alerts_topic_arn = module.global.host_health_alerts_topic_arn
 
   da_panel_allowed_cidrs = var.da_panel_allowed_cidrs
 
