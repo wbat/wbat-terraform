@@ -709,8 +709,11 @@ Where a clean verdict would be easy but wrong, it does the harder thing:
   still accepted, not by the port list alone. Dovecot 2.4's
   `auth_allow_cleartext=no` (and the older `disable_plaintext_auth=yes`) and
   Pure-FTPd `TLS 2` clear the finding while the ports stay open; `TLS 1` or
-  cleartext allowed keeps it. Closing those ports is optional client-compat
-  cleanup, reported as such rather than as unfinished hardening.
+  cleartext allowed keeps it. FTP policy is read from the daemon that owns
+  `:21` (`ss`), not from whichever of Pure-FTPd/ProFTPd still has a conf on
+  disk — DirectAdmin leaves both after a CustomBuild switch. Closing those
+  ports is optional client-compat cleanup, reported as such rather than as
+  unfinished hardening.
 - A running `amazon-ssm-agent` is reported as a running process, not as a recovery
   path. Only `PingStatus: Online` from the control plane means a session can
   actually be opened, and that is a separate check.
@@ -768,4 +771,6 @@ renamed `disable_plaintext_auth` to `auth_allow_cleartext` (and inverted it), an
 Pure-FTPd `TLS 2` already refused cleartext FTP — but the audit only counted
 open ports, so it kept asking the operator to confirm a policy that was already
 set. The case asserts both directions: `TLS 1` or `auth_allow_cleartext=yes`
-must keep warning.
+must keep warning. It also asserts that a leftover Pure-FTPd `TLS 2` must not
+clear ProFTPd (or an unidentified listener) on `:21` — DirectAdmin hosts keep
+both configs after a CustomBuild switch, and the inactive file is not a policy.

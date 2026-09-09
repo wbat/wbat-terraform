@@ -323,6 +323,9 @@ echo "== Case 27: mandatory TLS on legacy ports is not a cleartext password path
 # mandatory" -- a finding whose remedy was already in place. Open without
 # implicit TLS is only a cleartext path when the daemon will still take the
 # password that way.
+#
+# Args: auth_allow_cleartext, disable_plaintext_auth, pureftpd_tls, ftp_daemon,
+#       proftpd_tls_required
 plain_run() {
   env -i PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
     HOST_AUDIT_SSHD_T_FILE="$TMP/hardened" HOST_AUDIT_SSHD_CONFIG="$TMP/sshd_config.plain" \
@@ -331,24 +334,26 @@ plain_run() {
     HOST_AUDIT_DOVECOT_AUTH_ALLOW_CLEARTEXT="${1:-}" \
     HOST_AUDIT_DOVECOT_DISABLE_PLAINTEXT="${2:-}" \
     HOST_AUDIT_PUREFTPD_TLS="${3:-}" \
+    HOST_AUDIT_FTP_DAEMON="${4:-}" \
+    HOST_AUDIT_PROFTPD_TLS_REQUIRED="${5:-}" \
     HOST_AUDIT_INSTANCE_ID="i-000000000000000" \
     bash "$AUDIT" --json 2>/dev/null || true
 }
 
-# Dovecot 2.4 name + Pure-FTPd required: the primary's shape.
-out="$(plain_run no '' 2)"
+# Dovecot 2.4 name + Pure-FTPd required, and Pure-FTPd is what owns :21.
+out="$(plain_run no '' 2 pure-ftpd)"
 [ "$(printf '%s' "$out" | verdict_for exposure/plaintext-auth)" = "OK" ] \
   || { echo "FAIL: auth_allow_cleartext=no with TLS=2 must clear" >&2; exit 1; }
 printf '%s' "$out" | grep -q 'cleartext passwords are refused' \
   || { echo "FAIL: should say why the open ports are not a cleartext path" >&2; exit 1; }
 
 # Legacy Dovecot name, same polarity inverted.
-out="$(plain_run '' yes 2)"
+out="$(plain_run '' yes 2 pure-ftpd)"
 [ "$(printf '%s' "$out" | verdict_for exposure/plaintext-auth)" = "OK" ] \
   || { echo "FAIL: disable_plaintext_auth=yes with TLS=2 must clear" >&2; exit 1; }
 
 # FTP still optional: mail may be fine, FTP is not.
-out="$(plain_run no '' 1)"
+out="$(plain_run no '' 1 pure-ftpd)"
 [ "$(printf '%s' "$out" | verdict_for exposure/plaintext-auth)" = "WARN" ] \
   || { echo "FAIL: Pure-FTPd TLS=1 must keep warning" >&2; exit 1; }
 printf '%s' "$out" | grep -q 'ftp/21' \
@@ -357,12 +362,33 @@ printf '%s' "$out" | grep -q 'cleartext already refused on:.*pop3/110' \
   || { echo "FAIL: mandatory mail should be listed as already refused" >&2; exit 1; }
 
 # Cleartext mail allowed: the unsafe direction the rename makes easy to miss.
-out="$(plain_run yes '' 2)"
+out="$(plain_run yes '' 2 pure-ftpd)"
 [ "$(printf '%s' "$out" | verdict_for exposure/plaintext-auth)" = "WARN" ] \
   || { echo "FAIL: auth_allow_cleartext=yes must warn" >&2; exit 1; }
 printf '%s' "$out" | grep -qE 'pop3/110|imap/143' \
   || { echo "FAIL: cleartext mail ports must be in the risk list" >&2; exit 1; }
-echo "OK mandatory TLS is read from Dovecot 2.4 and Pure-FTPd, not guessed from the port list"
+
+# Codex P1: a stale Pure-FTPd TLS=2 must not clear ProFTPd on :21.
+out="$(plain_run no '' 2 proftpd off)"
+[ "$(printf '%s' "$out" | verdict_for exposure/plaintext-auth)" = "WARN" ] \
+  || { echo "FAIL: ProFTPd with cleartext allowed must warn despite Pure-FTPd TLS=2" >&2; exit 1; }
+printf '%s' "$out" | grep -qi 'proftpd' \
+  || { echo "FAIL: should name ProFTPd as the reason, not Pure-FTPd" >&2; exit 1; }
+printf '%s' "$out" | grep -q 'ftp/21' \
+  || { echo "FAIL: FTP must stay in the risk list when ProFTPd allows cleartext" >&2; exit 1; }
+
+# Same host shape, ProFTPd correctly requiring TLS: clears.
+out="$(plain_run no '' 2 proftpd on)"
+[ "$(printf '%s' "$out" | verdict_for exposure/plaintext-auth)" = "OK" ] \
+  || { echo "FAIL: ProFTPd TLSRequired=on with Dovecot refusing cleartext must clear" >&2; exit 1; }
+
+# Unidentified daemon: never trust a Pure-FTPd conf alone.
+out="$(plain_run no '' 2 unknown)"
+[ "$(printf '%s' "$out" | verdict_for exposure/plaintext-auth)" = "WARN" ] \
+  || { echo "FAIL: unidentified :21 listener must not inherit Pure-FTPd TLS=2" >&2; exit 1; }
+printf '%s' "$out" | grep -q 'not identified\|could not confirm' \
+  || { echo "FAIL: should say the FTP daemon was not identified" >&2; exit 1; }
+echo "OK mandatory TLS is read from the daemon on :21, not from a leftover conf file"
 
 echo "== Case 16: an irrelevant disabled DA key must not mask the scanner =="
 # First real run: brute_force_scan_apache_logs=0 became the finding, and whether

@@ -613,9 +613,27 @@ dovecot_cleartext_auth() {
   return 2
 }
 
+# Who actually owns :21. DirectAdmin hosts often keep both Pure-FTPd and ProFTPd
+# configs on disk after a CustomBuild switch; reading the inactive one's TLS
+# policy is how a stale Pure-FTPd TLS=2 clears ProFTPd that still takes
+# cleartext USER/PASS.
+ftp_listener_daemon() {
+  if [ -n "${HOST_AUDIT_FTP_DAEMON:-}" ]; then
+    printf '%s\n' "$HOST_AUDIT_FTP_DAEMON"
+    return 0
+  fi
+  have ss || { printf '%s\n' unknown; return 0; }
+  local procs
+  procs="$(ss -lntp 2>/dev/null | awk '/:21[[:space:]]/ {print}' | tr '\n' ' ')"
+  case "$procs" in
+    *pure-ftpd*) printf '%s\n' pure-ftpd ;;
+    *proftpd*) printf '%s\n' proftpd ;;
+    *) printf '%s\n' unknown ;;
+  esac
+}
+
 # Pure-FTPd TLS level from conf, or empty if unknown.
-# 0 = off, 1 = optional, 2 = required. That is the entire control: TLS 1 still
-# accepts a cleartext USER/PASS, which is the finding; TLS 2 does not.
+# 0 = off, 1 = optional, 2 = required. TLS 1 still accepts cleartext USER/PASS.
 pureftpd_tls_level() {
   local conf="${HOST_AUDIT_PUREFTPD_CONF:-/etc/pure-ftpd.conf}"
   if [ -n "${HOST_AUDIT_PUREFTPD_TLS:-}" ]; then
@@ -624,6 +642,65 @@ pureftpd_tls_level() {
   fi
   [ -r "$conf" ] || return 1
   awk '/^TLS[[:space:]]+/ {print $2; exit}' "$conf"
+}
+
+# ProFTPd cleartext-auth policy. 0 = allowed (risk), 1 = refused (safe), 2 = unknown.
+# TLSRequired on|auth|ctrl|data refuses cleartext auth; TLSEngine off means TLS
+# is not even offered, so cleartext remains available.
+proftpd_cleartext_auth() {
+  local v eng req conf="${HOST_AUDIT_PROFTPD_CONF:-/etc/proftpd.conf}"
+  if [ -n "${HOST_AUDIT_PROFTPD_TLS_REQUIRED:-}" ]; then
+    v="$(printf '%s' "$HOST_AUDIT_PROFTPD_TLS_REQUIRED" | tr '[:upper:]' '[:lower:]')"
+    case "$v" in
+      on | yes | auth | ctrl | data | ctrl+data | auth+data) return 1 ;;
+      off | no) return 0 ;;
+      *) return 2 ;;
+    esac
+  fi
+  [ -r "$conf" ] || return 2
+  eng="$(awk 'tolower($1)=="tlsengine" {print tolower($2); exit}' "$conf")"
+  req="$(awk 'tolower($1)=="tlsrequired" {print tolower($2); exit}' "$conf")"
+  case "$eng" in
+    off | no) return 0 ;;
+  esac
+  case "$req" in
+    on | yes | auth | ctrl | data | ctrl+data | auth+data) return 1 ;;
+    off | no) return 0 ;;
+    "") return 2 ;;
+    *) return 2 ;;
+  esac
+}
+
+# FTP cleartext status against the daemon that owns :21, not whichever conf
+# file happens to be readable. Prints "safe|why", "risk|why", or "unknown|why".
+ftp_cleartext_status() {
+  local daemon tls st
+  daemon="$(ftp_listener_daemon)"
+  case "$daemon" in
+    pure-ftpd)
+      tls="$(pureftpd_tls_level 2>/dev/null || true)"
+      case "$tls" in
+        2) printf '%s\n' "safe|pure-ftpd TLS=2 (required)" ;;
+        1) printf '%s\n' "risk|pure-ftpd TLS=1 (optional)" ;;
+        0) printf '%s\n' "risk|pure-ftpd TLS=0 (off)" ;;
+        "") printf '%s\n' "unknown|pure-ftpd listening but TLS level unread" ;;
+        *) printf '%s\n' "unknown|pure-ftpd TLS=${tls}" ;;
+      esac
+      ;;
+    proftpd)
+      st=0
+      proftpd_cleartext_auth || st=$?
+      case "$st" in
+        1) printf '%s\n' "safe|proftpd TLSRequired refuses cleartext auth" ;;
+        0) printf '%s\n' "risk|proftpd allows cleartext auth" ;;
+        *) printf '%s\n' "unknown|proftpd TLSRequired unread" ;;
+      esac
+      ;;
+    *)
+      # A readable Pure-FTPd conf must not speak for an unidentified listener.
+      printf '%s\n' "unknown|ftp daemon on :21 not identified (not trusting pure-ftpd/proftpd conf alone)"
+      ;;
+  esac
 }
 
 # Judge 21/110/143: open without implicit TLS is only a cleartext password path
@@ -641,34 +718,26 @@ audit_plaintext_auth() {
     return
   fi
 
-  local risk="" safe="" unknown="" mail_st=0 ftp_tls="" why_mail="" why_ftp=""
+  local risk="" safe="" unknown="" mail_st=0 why_mail="" why_ftp="" ftp_st="" ftp_why=""
   dovecot_cleartext_auth || mail_st=$?
   case "$mail_st" in
     1) why_mail="dovecot refuses cleartext auth" ;;
     0) why_mail="dovecot allows cleartext auth" ;;
     *) why_mail="dovecot cleartext-auth policy unknown" ;;
   esac
-  ftp_tls="$(pureftpd_tls_level 2>/dev/null || true)"
-  case "$ftp_tls" in
-    2) why_ftp="pure-ftpd TLS=2 (required)" ;;
-    1) why_ftp="pure-ftpd TLS=1 (optional)" ;;
-    0) why_ftp="pure-ftpd TLS=0 (off)" ;;
-    "") why_ftp="pure-ftpd TLS level unread" ;;
-    *) why_ftp="pure-ftpd TLS=${ftp_tls}" ;;
-  esac
+  ftp_st="$(ftp_cleartext_status)"
+  ftp_why="${ftp_st#*|}"
+  ftp_st="${ftp_st%%|*}"
+  why_ftp="$ftp_why"
 
   for port in $plain; do
     label="${port%%/*}"
     case "$label" in
       ftp)
-        case "$ftp_tls" in
-          2) safe="$safe $port" ;;
-          1 | 0) risk="$risk $port" ;;
-          *)
-            # No readable Pure-FTPd conf: do not invent a requirement. ProFTPd
-            # and other daemons also bind 21; unknown is not "safe".
-            unknown="$unknown $port"
-            ;;
+        case "$ftp_st" in
+          safe) safe="$safe $port" ;;
+          risk) risk="$risk $port" ;;
+          *) unknown="$unknown $port" ;;
         esac
         ;;
       pop3 | imap)
