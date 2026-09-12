@@ -323,7 +323,7 @@ done
 | Port | `587` + TLS |
 | Auth | SES SMTP username/password |
 | Treat as alias | **No** — see below |
-| Entries needed | one per allowlisted domain, not just the busiest one |
+| Entries needed | one per allowlisted **address**, not per domain — `user1@example.com` and `user2@example.com` need two entries |
 | Default Send mail as | Domain address (e.g. `user1@example.com`) |
 | When replying | Reply from the same address the message was sent to — see below |
 
@@ -348,10 +348,11 @@ happens to be configured rather than on anything in the message:
 | Not listed at all | Reply to the sender, Reply-All to everyone — but your replies go out from your Gmail address, not the domain |
 
 Unchecking it does not affect sending: the address stays in **Send mail as** and still
-authenticates through SES. Two domains funnelling into one inbox should be configured
-the same way, or the same message will behave differently depending on which alias it
-arrived at. Check every alias under Settings → Accounts and Import → Send mail as →
-*edit info*.
+authenticates through SES. Every allowlisted address funnelling into one inbox should be
+configured the same way, or the same message will behave differently depending on which
+alias it arrived at. Gmail keys all of this off the full address, not the domain, so an
+address left out is a third state rather than an inherited setting — check every one of
+them under Settings → Accounts and Import → Send mail as → *edit info*.
 
 ### Which address a reply goes out as
 
@@ -371,6 +372,10 @@ That leaves a choice with no clean answer, and it is worth making deliberately:
 With more than one domain in play the first is the safer default, with the From dropdown
 switched by hand where the domain matters. The second is only right if one domain is the
 only one you ever reply as.
+
+Either way the dropdown only offers addresses that have a **Send mail as** entry, which is
+the practical reason to add all of them rather than only the busy ones: an allowlisted
+address with no entry can never be replied as, even deliberately.
 
 Adding an address here sends a confirmation code to it. That code reaches the **mailbox**
 regardless, because Exim delivers it independently of this pipe — but it may never reach
