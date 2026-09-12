@@ -185,6 +185,52 @@ user2: "|/usr/local/bin/ses-gmail-forward.py"
 Do **not** use bare `user` or `\user@domain` in the alias — those fail on this host
 (`user@serverhostname` or LMTP `501 Invalid character in localpart`).
 
+### Only put the pipe on addresses that are in `recipients`
+
+The alias *replaces* mailbox delivery rather than adding to it, so the pipe is the only
+thing that runs. An address whose alias carries the pipe but which is missing from the
+`recipients` allowlist is therefore black-holed: the pipe declines to forward it, exits 0
+because it always does, and Exim considers the delivery done — no SES copy, no Maildir
+copy, no bounce. That decline is `logger.info`, not a `skip_ses` reason, so the health
+check does not alert on it either. Losing mail silently is the worst failure this pipe
+has, and it is reached by adding a forwarder in the DA UI without touching the secret.
+
+Audit this per **address**, not per domain. `grep -l` prints only the filename, so a
+stale local-part sitting beside two good ones reports the domain as covered and the stale
+address goes on quietly discarding mail. Compare full addresses instead:
+
+```bash
+pipe_addrs() {
+  awk -F: '/ses-gmail-forward/ && $0 !~ /^[[:space:]]*#/ {
+    n = split(FILENAME, p, "/"); a = $1
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", a)
+    print tolower(a "@" p[n-1])
+  }' /etc/virtual/*/aliases | sort -u
+}
+allowlist() {
+  aws secretsmanager get-secret-value \
+    --secret-id tellerstech/ses-gmail-forward/runtime-config \
+    --query SecretString --output text \
+    | python3 -c 'import json,sys
+for a in json.load(sys.stdin)["recipients"]: print(a.strip().lower())' | sort -u
+}
+
+comm -23 <(pipe_addrs) <(allowlist)   # piped, not allowlisted: mail is being discarded
+comm -13 <(pipe_addrs) <(allowlist)   # allowlisted, not piped: no Gmail copy, still in Roundcube
+```
+
+The first list is the dangerous one and should be empty. Anything in it is either a
+missing allowlist entry or an alias that should be deleted — parked domains that exist
+only as a CDN origin or a vhost are the second case, so remove the pipe from them and drop
+their now-dead `via_labels` entry. The second list loses nothing (Exim still delivers to
+the mailbox) but means Gmail never sees that address.
+
+The health check runs the same comparison against `managed-aliases.conf` every 5 minutes
+and reports `unmanaged_pipe_alias:<address>`, so a stale alias is caught without anyone
+remembering to audit. It deliberately reads the local desired-state file rather than the
+secret, to keep an AWS credential out of the cron path — which is why the comparison above
+against the real allowlist is still worth running by hand after editing either one.
+
 ### Persist against Forwarders UI rewrites
 
 Aliases are **not** DA templates — there is no `templates/custom` override for them.
@@ -213,7 +259,8 @@ chmod 777 /var/lib/ses-gmail-forward
 python3 -c 'import boto3; print(boto3.__version__)'
 # Alma/Rocky: dnf install -y python3-boto3
 
-# Health check (self-heal aliases + alert on recent ERROR / silent SES skips)
+# Health check (self-heal aliases + alert on recent ERROR / silent SES skips /
+# pipe aliases with no matching config entry)
 curl -fsSL -o /usr/local/bin/ses-gmail-forward-health.sh \
   https://raw.githubusercontent.com/wbat/wbat-terraform/main/scripts/directadmin/ses_gmail_forward_health.sh
 chmod 755 /usr/local/bin/ses-gmail-forward-health.sh
@@ -247,6 +294,13 @@ Before `SendRawEmail`, the pipe logs `WARNING skip_ses reason=…` and exits 0
 
 `Precedence`, `List-Unsubscribe`, and `X-Auto-Response-Suppress` alone are **not**
 skip reasons — newsletters and list mail commonly set them and should still reach Gmail.
+
+A recipient that is not in the allowlist at all is **not** in this table: it is declined
+earlier, at `INFO`, with no structured reason. That is deliberate for a mailbox Exim also
+delivers normally, but it means the log says nothing useful when the alias made the pipe
+the *only* delivery path — see
+[Only put the pipe on addresses that are in `recipients`](#only-put-the-pipe-on-addresses-that-are-in-recipients),
+which the health check now covers as `unmanaged_pipe_alias:<address>`.
 
 Rate-limit counters increment **only after a successful** `SendRawEmail`, so SES
 failures do not burn quota.

@@ -578,6 +578,20 @@ assert_that(
     " ERROR " in run["log"],
 )
 
+print("\nan address carrying the pipe but missing from the allowlist (mail is lost silently)")
+# The alias replaces mailbox delivery, so declining to forward is the whole delivery. A
+# parked domain that got a forwarder in the DA UI without an allowlist entry lands here.
+parked = "brian@parked.example.com"
+run = run_pipe(raw_message(f"{parked}, {OTHER_TO}"), recipient=parked, recipients=[ALIAS])
+assert_that("it exits 0, so Exim marks the message delivered", run["code"] == 0)
+assert_that("and says nothing, so the sender is never told", run["stderr"] == b"" and run["stdout"] == b"")
+assert_that("no Gmail copy is sent", run["sent"] == b"")
+assert_that("the log names the allowlist as the reason", "allowlist" in run["log"])
+assert_that(
+    "but not as a skip_ses reason, which is why the health check cannot alert on it",
+    "skip_ses" not in run["log"],
+)
+
 print("\na dependency warning is a bounce, because the transport sets return_output")
 run = run_pipe(raw_message(f"{ALIAS}, {OTHER_TO}"), boto3_src=NOISY_BOTO3)
 assert_that("a warning from a dependency does not reach stderr", run["stderr"] == b"")
