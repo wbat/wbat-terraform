@@ -130,6 +130,21 @@ appends the other original `To`/`Cc` addresses to `Reply-To`, which makes a plai
 reach all of them. That is a footgun (there is then no way to reply to the sender only
 without editing the recipient list by hand), so it is off unless you ask for it.
 
+### The destination has to be the mailbox you read in
+
+`gmail_destination` is the whole SES envelope, so it is also the only address Gmail sees
+the message as addressed to. Point it at an account that auto-forwards onward and
+Reply-All disappears in the account you actually read: the copy arrives with
+`Delivered-To` set to the forwarding hop, the reading address is nowhere in `To`, and
+Gmail offers Reply-All only when more than one participant is not you. Every recipient
+is still in the headers — Gmail just stops offering to use them. Set the destination to
+the mailbox you read and drop the auto-forward instead of chaining them.
+
+That address is also the loop guard (`from_gmail_dest`): a message whose
+`From`/`Sender`/`Reply-To` is the destination is skipped rather than forwarded. Mailing
+an alias *from* the destination account therefore looks exactly like a dead pipe, so
+test from some third account.
+
 ## DirectAdmin
 
 1. Keep **Email Accounts** for each allowlisted address (Maildir for Roundcube).
@@ -282,6 +297,11 @@ preserved and only `To` was being overwritten:
 
 5. Send to the allowlisted address **and** a second `To` address you control  
 6. In Gmail, **Reply-All** — the second address must be on the reply  
+
+If Gmail offers no Reply-All at all, read the copy's `Delivered-To`: more than one line
+means the destination is being auto-forwarded, which hides the button no matter how
+correct the headers are (see
+[The destination has to be the mailbox you read in](#the-destination-has-to-be-the-mailbox-you-read-in)).
 
 The header rewrite is covered offline by
 [`prove_ses_gmail_forward.py`](./prove_ses_gmail_forward.py) (no AWS, boto3 stubbed),
