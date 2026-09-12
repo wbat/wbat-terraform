@@ -37,9 +37,51 @@ See outputs `ses_da_gmail_forward_secret_name` / `_arn`.
   ],
   "rate_limit_per_recipient_per_hour": 30,
   "rate_limit_global_per_hour": 100,
-  "max_message_bytes": 10485760
+  "max_message_bytes": 10485760,
+  "reply_to_all": false
 }
 ```
+
+`reply_to_all` is optional and defaults to `false`. See
+[Recipients and replies](#recipients-and-replies).
+
+## Recipients and replies
+
+The forwarded copy has to come **From** the allowlisted address, because that is the
+identity SES has verified — the original `From` moves to `Reply-To` and
+`X-Original-From`. Everything else about who the message was addressed to is left
+intact:
+
+| Header on the Gmail copy | Value |
+|---|---|
+| `From` | `Original Sender via TellersTech <user1@example.com>` |
+| `To` | your Gmail address **in place of** the allowlisted alias, plus every other original `To` |
+| `Cc` | the original `Cc`, unchanged |
+| `Reply-To` | the sender's own `Reply-To` if they set one, else their `From` |
+| `X-Original-To` / `X-Original-Cc` / `X-Original-From` | the untouched originals |
+
+Delivery is the SES **envelope** (`Destinations=[gmail_destination]`), never these
+headers, so naming other recipients in `To`/`Cc` does not send them anything — it only
+gives Gmail what it needs to compose a correct **Reply-All**. This is why the alias is
+swapped for the Gmail address rather than added alongside it: Gmail drops your own
+address from Reply-All, so leaving the alias in would bounce your reply back through
+this pipe to yourself.
+
+If the alias was only on `Cc`, the Gmail address lands on `Cc` too, so "cc me" does not
+read as "to me".
+
+Any **other** address in `recipients` is dropped from the visible headers for the same
+reason: they all forward into the same Gmail inbox, so a message addressed to two of
+your aliases would otherwise turn one Reply-All into another copy arriving back through
+this pipe. `X-Original-To` still records that it was addressed to both.
+
+### When a plain Reply should reach everyone
+
+By default `Reply-To` is the sender alone, so **Reply** goes to the sender and
+**Reply-All** goes to everyone — standard mail behaviour. Setting `"reply_to_all": true`
+appends the other original `To`/`Cc` addresses to `Reply-To`, which makes a plain Reply
+reach all of them. That is a footgun (there is then no way to reply to the sender only
+without editing the recipient list by hand), so it is off unless you ask for it.
 
 ## DirectAdmin
 
@@ -153,3 +195,14 @@ Profile photo for `@example.com` From in Gmail recipients is limited without Goo
 2. Roundcube has the message  
 3. Gmail has the SES copy (`Reply-To` = original sender)  
 4. `tail -30 /var/log/ses-gmail-forward.log` — no Mailer-Daemon bounce  
+
+Then the case that a single-recipient test cannot show, because `Cc` was always
+preserved and only `To` was being overwritten:
+
+5. Send to the allowlisted address **and** a second `To` address you control  
+6. In Gmail, **Reply-All** — the second address must be on the reply  
+
+The header rewrite is covered offline by
+[`prove_ses_gmail_forward.py`](./prove_ses_gmail_forward.py) (no AWS, boto3 stubbed),
+which also asserts SES is still handed `Destinations=[gmail_destination]` and nothing
+else while those third-party addresses sit in the headers.

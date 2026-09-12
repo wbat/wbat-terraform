@@ -240,13 +240,75 @@ def _has_payload(msg: email.message.Message) -> bool:
     return bool(payload and payload.strip())
 
 
-def _build_forward_raw(original: email.message.Message, from_addr: str, gmail_dest: str) -> bytes:
+def _addr_pairs(values: list) -> list[tuple[str, str]]:
+    """(display name, address) pairs across one header's values, in order."""
+    pairs: list[tuple[str, str]] = []
+    for value in values:
+        for name, addr in email.utils.getaddresses([str(value)]):
+            if addr:
+                pairs.append((name, addr.strip()))
+    return pairs
+
+
+def _render_new(pairs: list[tuple[str, str]], seen: set[str]) -> list[str]:
+    """Render pairs whose address is not already in `seen`, adding each to `seen`."""
+    out: list[str] = []
+    for name, addr in pairs:
+        low = addr.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        out.append(formataddr((name, addr)))
+    return out
+
+
+def _build_forward_raw(
+    original: email.message.Message,
+    from_addr: str,
+    gmail_dest: str,
+    reply_to_all: bool = False,
+    local_addrs: set[str] | None = None,
+) -> bytes:
     msg = email.message_from_bytes(original.as_bytes(), policy=email.policy.SMTP)
     original_from = msg.get("From", "unknown")
-    _, original_from_email = parseaddr(original_from)
-    display_name, _ = parseaddr(original_from)
+    display_name, original_from_email = parseaddr(original_from)
     if not display_name:
         display_name = original_from_email or "Forwarded"
+
+    to_pairs = _addr_pairs(msg.get_all("To") or [])
+    cc_pairs = _addr_pairs(msg.get_all("Cc") or [])
+    reply_to_pairs = _addr_pairs(msg.get_all("Reply-To") or [])
+
+    alias = from_addr.lower()
+    dest = gmail_dest.lower()
+    # Every allowlisted address forwards into the same Gmail inbox, so any of them left
+    # in a visible header would make one Reply-All arrive back here as another copy.
+    local = {a.lower() for a in (local_addrs or set())} | {alias, dest}
+
+    # Gmail builds Reply-All out of the headers it receives, so replacing To with the
+    # Gmail address (as this used to) silently narrowed every reply to the sender and
+    # dropped anyone else the message was addressed to. Delivery is the SES envelope
+    # (Destinations= below), never these headers, so carrying the other recipients
+    # through cannot send mail to any of them.
+    seen = set(local)
+    kept_to = _render_new(to_pairs, seen)
+    kept_cc = _render_new(cc_pairs, seen)
+
+    # Substitute the Gmail address for the alias in whichever header carried it, so
+    # "cc me" does not read as "to me" and Gmail still drops it from Reply-All.
+    to_addrs = {addr.lower() for _, addr in to_pairs}
+    if alias not in to_addrs and any(addr.lower() == alias for _, addr in cc_pairs):
+        kept_cc.insert(0, gmail_dest)
+    else:
+        kept_to.insert(0, gmail_dest)
+
+    # An explicit Reply-To is the sender's instruction and outranks their From, which
+    # is the address to fall back to when they set none.
+    reply_seen = {dest}
+    reply_to = _render_new(reply_to_pairs or _addr_pairs([original_from]), reply_seen)
+    if reply_to_all:
+        reply_seen |= local
+        reply_to += _render_new(to_pairs + cc_pairs, reply_seen)
 
     for header in (
         "DKIM-Signature",
@@ -255,6 +317,7 @@ def _build_forward_raw(original: email.message.Message, from_addr: str, gmail_de
         "Sender",
         "Reply-To",
         "To",
+        "Cc",
         "From",
         "Message-ID",
     ):
@@ -262,10 +325,17 @@ def _build_forward_raw(original: email.message.Message, from_addr: str, gmail_de
             del msg[header]
 
     msg["From"] = formataddr((f"{display_name} via TellersTech", from_addr))
-    msg["To"] = gmail_dest
-    if original_from_email:
-        msg["Reply-To"] = original_from
+    if kept_to:
+        msg["To"] = ", ".join(kept_to)
+    if kept_cc:
+        msg["Cc"] = ", ".join(kept_cc)
+    if reply_to:
+        msg["Reply-To"] = ", ".join(reply_to)
     msg["X-Original-From"] = original_from
+    if to_pairs:
+        msg["X-Original-To"] = ", ".join(formataddr(p) for p in to_pairs)
+    if cc_pairs:
+        msg["X-Original-Cc"] = ", ".join(formataddr(p) for p in cc_pairs)
     msg["X-Forwarded-To"] = gmail_dest
     msg["X-Forwarded-For"] = from_addr
     msg[_PIPE_MARKER_HEADER] = _PIPE_MARKER_VALUE
@@ -298,7 +368,15 @@ def _send_ses(
         ses.send_raw_email(
             Source=recipient,
             Destinations=[gmail_dest],
-            RawMessage={"Data": _build_forward_raw(mail_obj, recipient, gmail_dest)},
+            RawMessage={
+                "Data": _build_forward_raw(
+                    mail_obj,
+                    recipient,
+                    gmail_dest,
+                    reply_to_all=bool(cfg.get("reply_to_all")),
+                    local_addrs=_allowlist(cfg),
+                )
+            },
         )
         _rate_increment(f"r-{recipient}")
         _rate_increment("global")
