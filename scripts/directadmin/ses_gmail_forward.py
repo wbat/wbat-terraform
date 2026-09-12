@@ -420,6 +420,14 @@ def _build_forward_raw(
         if header in msg:
             del msg[header]
 
+    # SpamAssassin's verdict describes our inbound hop, not the message Gmail is about to
+    # filter itself. It also names the scanning host and quotes blocklist notices, and it
+    # is only added on domains with scanning switched on -- so forwarding it made two
+    # otherwise identical copies differ by which domain they arrived at. Roundcube's copy
+    # of the original keeps the full report either way.
+    for header in {h for h in msg.keys() if h.lower().startswith("x-spam-")}:
+        del msg[header]
+
     msg["From"] = formataddr((f"{display_name} via {_via_label(from_addr, via_labels)}", from_addr))
     if kept_to:
         msg["To"] = ", ".join(kept_to)
