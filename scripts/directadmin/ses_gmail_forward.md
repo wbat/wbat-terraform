@@ -37,9 +37,98 @@ See outputs `ses_da_gmail_forward_secret_name` / `_arn`.
   ],
   "rate_limit_per_recipient_per_hour": 30,
   "rate_limit_global_per_hour": 100,
-  "max_message_bytes": 10485760
+  "max_message_bytes": 10485760,
+  "reply_to_all": false,
+  "via_labels": {
+    "example.com": "HouseName",
+    "second.example": "SecondName"
+  }
 }
 ```
+
+`reply_to_all` and `via_labels` are both optional. See
+[Recipients and replies](#recipients-and-replies) and
+[Which domain a message came in on](#which-domain-a-message-came-in-on).
+
+## Recipients and replies
+
+The forwarded copy has to come **From** the allowlisted address, because that is the
+identity SES has verified — the original `From` moves to `Reply-To` and
+`X-Original-From`. Everything else about who the message was addressed to is left
+intact:
+
+| Header on the Gmail copy | Value |
+|---|---|
+| `From` | `Original Sender via example.com <user1@example.com>` (see `via_labels`) |
+| `To` | your Gmail address **in place of** the allowlisted alias, plus every other original `To` |
+| `Cc` | the original `Cc`, unchanged |
+| `Reply-To` | the sender's own `Reply-To` if they set one, else their `From` |
+| `X-Original-To` / `X-Original-Cc` / `X-Original-From` | the untouched originals |
+
+Delivery is the SES **envelope** (`Destinations=[gmail_destination]`), never these
+headers, so naming other recipients in `To`/`Cc` does not send them anything — it only
+gives Gmail what it needs to compose a correct **Reply-All**. This is why the alias is
+swapped for the Gmail address rather than added alongside it: Gmail drops your own
+address from Reply-All, so leaving the alias in would bounce your reply back through
+this pipe to yourself.
+
+If the alias was only on `Cc`, the Gmail address lands on `Cc` too, so "cc me" does not
+read as "to me".
+
+Any **other** address in `recipients` is dropped from the visible headers for the same
+reason: they all forward into the same Gmail inbox, so a message addressed to two of
+your aliases would otherwise turn one Reply-All into another copy arriving back through
+this pipe. `X-Original-To` still records that it was addressed to both.
+
+An **SMTPUTF8** recipient (RFC 6531 — non-ASCII in the address itself, not just the
+display name) cannot go in `To`/`Cc` at all: there is no ASCII form of one, and trying
+to render it is what would otherwise raise inside the pipe and bounce a message
+Roundcube already has. Those addresses are left out of `To`/`Cc`, kept in
+`X-Original-To`/`X-Original-Cc` — unstructured headers, so an encoded word is legal
+there — and logged:
+
+```text
+WARNING Omitted 1 non-ASCII (SMTPUTF8) recipient(s) from forwarded To/Cc: bj\xf6rn@…
+```
+
+## Which domain a message came in on
+
+Several domains funnel into one Gmail inbox, and the forwarded `From` is always the
+allowlisted address, so without a hint every message looks alike. Gmail shows the
+display name and hides the address behind a click, so the `via …` suffix is the only
+part of that visible at a glance:
+
+```text
+From: Brian Teller via example.com <user1@example.com>
+From: Brian Teller via second.example <user1@second.example>
+```
+
+The default is the **domain of the address the mail arrived at**, which is never wrong.
+`via_labels` maps a domain to a nicer house name; keys are matched case-insensitively,
+and a domain that is not listed still falls back to itself rather than borrowing another
+domain's label:
+
+```bash
+aws secretsmanager get-secret-value \
+  --secret-id tellerstech/ses-gmail-forward/runtime-config \
+  --query SecretString --output text | jq .          # current value
+# then put back the same JSON with via_labels added:
+aws secretsmanager put-secret-value \
+  --secret-id tellerstech/ses-gmail-forward/runtime-config \
+  --secret-string "$(jq -c '.via_labels = {"example.com":"HouseName"}' /tmp/cfg.json)"
+```
+
+The config is re-read at most every 60 seconds, so a label change takes effect on the
+next message without touching the server. A malformed `via_labels` costs the nicer label
+and nothing else — the forward still goes out with the domain.
+
+### When a plain Reply should reach everyone
+
+By default `Reply-To` is the sender alone, so **Reply** goes to the sender and
+**Reply-All** goes to everyone — standard mail behaviour. Setting `"reply_to_all": true`
+appends the other original `To`/`Cc` addresses to `Reply-To`, which makes a plain Reply
+reach all of them. That is a footgun (there is then no way to reply to the sender only
+without editing the recipient list by hand), so it is off unless you ask for it.
 
 ## DirectAdmin
 
@@ -110,7 +199,8 @@ server (`install -m 755 …`). No service restart is required for the pipe.
 
 Before `SendRawEmail`, the pipe logs `WARNING skip_ses reason=…` and exits 0
 (Roundcube already has the message via Exim). Health alerts on
-`rate_limit`, `ses_error`, `config_error`, and `missing_gmail_dest`.
+`rate_limit`, `ses_error`, `config_error`, `missing_gmail_dest`, and
+`unrenderable_recipient`.
 
 | `reason=` | Meaning |
 |---|---|
@@ -118,6 +208,7 @@ Before `SendRawEmail`, the pipe logs `WARNING skip_ses reason=…` and exits 0
 | `pipe_reentry` | `X-Ses-Gmail-Forward: 1` already set (this pipe; not generic `X-Forwarded-*`) |
 | `from_gmail_dest` | From/Sender/Reply-To is the Gmail destination |
 | `mailer_daemon` | From looks like mailer-daemon / postmaster |
+| `unrenderable_recipient` | The allowlisted address is not ASCII, so SES has no verified identity to send as (alerts) |
 | `rate_limit` | Per-recipient or global hourly cap |
 | `ses_error` | `SendRawEmail` failed |
 | `oversized` / `missing_headers` / `empty_payload` | Message rejected before SES |
@@ -127,6 +218,19 @@ skip reasons — newsletters and list mail commonly set them and should still re
 
 Rate-limit counters increment **only after a successful** `SendRawEmail`, so SES
 failures do not burn quota.
+
+### Why the pipe always exits 0
+
+Exim reads a nonzero pipe exit — or anything on stdout/stderr — as delivery failure, and
+bounces the message **even though Roundcube already accepted it**. So every path here
+exits 0, including the ones nobody anticipated: an unhandled exception is logged at
+`ERROR` and swallowed rather than allowed to become a traceback. That is not silence,
+because `ERROR` is exactly what the health check greps for; it is loud toward us and
+quiet toward Exim. Logging itself is also set not to report handler failures, since
+those go to stderr too.
+
+The cost of that safety is that a bug shows up as a Gmail copy that never arrives, not
+as a bounce, so `/var/log/ses-gmail-forward.log` is the only place it is visible.
 
 ## Gmail (outbound)
 
@@ -153,3 +257,14 @@ Profile photo for `@example.com` From in Gmail recipients is limited without Goo
 2. Roundcube has the message  
 3. Gmail has the SES copy (`Reply-To` = original sender)  
 4. `tail -30 /var/log/ses-gmail-forward.log` — no Mailer-Daemon bounce  
+
+Then the case that a single-recipient test cannot show, because `Cc` was always
+preserved and only `To` was being overwritten:
+
+5. Send to the allowlisted address **and** a second `To` address you control  
+6. In Gmail, **Reply-All** — the second address must be on the reply  
+
+The header rewrite is covered offline by
+[`prove_ses_gmail_forward.py`](./prove_ses_gmail_forward.py) (no AWS, boto3 stubbed),
+which also asserts SES is still handed `Destinations=[gmail_destination]` and nothing
+else while those third-party addresses sit in the headers.

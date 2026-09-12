@@ -23,12 +23,17 @@ resource "aws_secretsmanager_secret" "da_gmail_forward" {
 resource "aws_secretsmanager_secret_version" "da_gmail_forward" {
   secret_id = aws_secretsmanager_secret.da_gmail_forward.id
 
+  # Seeds the shape only; ignore_changes below means the live values are edited in
+  # Secrets Manager. via_labels maps a recipient domain to the "via <label>" shown in
+  # the forwarded From, and defaults to the domain itself when unset.
   secret_string = jsonencode({
     gmail_destination                 = ""
     recipients                        = []
     rate_limit_per_recipient_per_hour = 30
     rate_limit_global_per_hour        = 100
     max_message_bytes                 = 10485760
+    reply_to_all                      = false
+    via_labels                        = {}
   })
 
   lifecycle {

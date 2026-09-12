@@ -14,6 +14,31 @@ Forwarder destination in DA UI:
 |/usr/local/bin/ses-gmail-forward.py
 ```
 
+The Gmail copy must come **From** the allowlisted address (that is the identity SES
+verified), so the `via …` suffix on the display name is the only visible sign of which
+of your domains a message arrived on — it defaults to that domain, and `via_labels` in
+the runtime config maps it to a nicer name. Everything else about who the message was
+addressed to is preserved, so Gmail's Reply-All still reaches the other recipients. Delivery is the SES envelope, not
+those headers, so naming third parties in `To`/`Cc` sends them nothing. Both halves are
+proved offline:
+
+```bash
+./scripts/directadmin/prove_ses_gmail_forward.py   # no AWS; boto3 is stubbed
+```
+
+The last group of cases runs the real script as a subprocess against a fake `boto3` on
+`PYTHONPATH`, because the property Exim cares about is the exit code and the streams:
+nonzero, or a single byte on stderr, bounces a message Roundcube has already accepted.
+That is why an unhandled exception is logged at `ERROR` and swallowed instead of
+crashing — and why three mutants of the real script are part of the proof, since a
+guard that cannot be shown to fire is indistinguishable from no guard.
+
+The bug that proof exists for is worth remembering when reading the rewrite: `Cc` was
+passed through untouched while `To` was replaced wholesale with the Gmail address, so
+Cc'd people appeared to work and every reply quietly excluded the message's other `To`
+recipients. Nothing on the Gmail side looks wrong when that happens — the copy arrives,
+it just no longer says who else it was for.
+
 ### Persist pipe aliases (DA Forwarders UI rewrite)
 
 DA rewrites `/etc/virtual/<domain>/aliases` when Forwarders change. Prefer DA

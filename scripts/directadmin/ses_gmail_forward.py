@@ -59,9 +59,13 @@ _MAILER_DAEMON_RE = re.compile(
 
 
 def _setup_logging() -> logging.Logger:
+    # A handler that cannot encode or write its record reports that on stderr, and Exim
+    # reads anything on stderr as pipe failure. Neither a log line nor a log failure is
+    # worth bouncing a delivered message over.
+    logging.raiseExceptions = False
     handlers: list[logging.Handler] = []
     try:
-        handlers.append(logging.FileHandler(LOG_PATH))
+        handlers.append(logging.FileHandler(LOG_PATH, encoding="utf-8"))
     except OSError:
         pass
     if sys.stderr.isatty():
@@ -98,6 +102,13 @@ def _config() -> dict:
 
 def _allowlist(cfg: dict) -> set[str]:
     return {a.strip().lower() for a in (cfg.get("recipients") or []) if a}
+
+
+def _ascii_safe(value: str) -> str:
+    """Log-safe form of an address. A raw non-ASCII log record can fail the handler's own
+    encode, and logging reports that on stderr -- which Exim reads as pipe failure just
+    like a traceback would."""
+    return value.encode("ascii", "backslashreplace").decode("ascii")
 
 
 def _log_skip(reason: str, recipient: str = "", **extra: str) -> None:
@@ -240,13 +251,137 @@ def _has_payload(msg: email.message.Message) -> bool:
     return bool(payload and payload.strip())
 
 
-def _build_forward_raw(original: email.message.Message, from_addr: str, gmail_dest: str) -> bytes:
+def _addr_pairs(values: list) -> list[tuple[str, str]]:
+    """(display name, address) pairs across one header's values, in order."""
+    pairs: list[tuple[str, str]] = []
+    for value in values:
+        for name, addr in email.utils.getaddresses([str(value)]):
+            if addr:
+                pairs.append((name, addr.strip()))
+    return pairs
+
+
+def _render_addr(name: str, addr: str) -> str | None:
+    """RFC 5322 form of one address, or None when the address itself is not ASCII.
+
+    An SMTPUTF8 address (RFC 6531) such as bjorn-with-an-umlaut@example.net has no
+    representation in an ordinary address header, and formataddr raises rather than
+    invent one. Letting that raise would exit the pipe nonzero, which Exim turns into
+    a bounce of a message Roundcube has already accepted -- the one outcome this
+    script exists to avoid. Callers leave these out of To/Cc and report them instead.
+    """
+    try:
+        return formataddr((name, addr))
+    except UnicodeEncodeError:
+        return None
+
+
+def _render_new(
+    pairs: list[tuple[str, str]],
+    seen: set[str],
+    unencodable: list[str] | None = None,
+) -> list[str]:
+    """Render pairs whose address is not already in `seen`, adding each to `seen`."""
+    out: list[str] = []
+    for name, addr in pairs:
+        low = addr.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        rendered = _render_addr(name, addr)
+        if rendered is None:
+            if unencodable is not None:
+                unencodable.append(addr)
+            continue
+        out.append(rendered)
+    return out
+
+
+def _via_label(addr: str, labels: dict | None = None) -> str:
+    """Display suffix for the forwarded From, keyed on the domain the mail arrived at.
+
+    Gmail shows the display name and hides the address behind a click, so with several
+    domains funnelling into one inbox this is the only thing that says which one a
+    message came in on. The default is the domain itself, which is never wrong; a
+    prettier house name is per-domain runtime config, because that is where the real
+    domains live -- the same reason recipients are not in git.
+    """
+    domain = addr.rpartition("@")[2].strip().lower()
+    if not domain:
+        return "forwarded"
+    if not isinstance(labels, dict):
+        # Hand-edited JSON: a wrong shape here should cost a nicer display name, not
+        # the forward itself.
+        return domain
+    overrides = {str(k).strip().lower(): str(v).strip() for k, v in labels.items()}
+    return overrides.get(domain) or domain
+
+
+def _original_addr_list(pairs: list[tuple[str, str]]) -> str:
+    """Audit-trail form for X-Original-*, which unlike To/Cc can hold an SMTPUTF8
+    address: those are unstructured headers, so a non-ASCII address survives there as
+    an encoded word and the record of who the message went to stays complete."""
+    return ", ".join(_render_addr(name, addr) or addr for name, addr in pairs)
+
+
+def _build_forward_raw(
+    original: email.message.Message,
+    from_addr: str,
+    gmail_dest: str,
+    reply_to_all: bool = False,
+    local_addrs: set[str] | None = None,
+    via_labels: dict | None = None,
+) -> bytes:
     msg = email.message_from_bytes(original.as_bytes(), policy=email.policy.SMTP)
     original_from = msg.get("From", "unknown")
-    _, original_from_email = parseaddr(original_from)
-    display_name, _ = parseaddr(original_from)
+    display_name, original_from_email = parseaddr(original_from)
     if not display_name:
         display_name = original_from_email or "Forwarded"
+
+    to_pairs = _addr_pairs(msg.get_all("To") or [])
+    cc_pairs = _addr_pairs(msg.get_all("Cc") or [])
+    reply_to_pairs = _addr_pairs(msg.get_all("Reply-To") or [])
+
+    alias = from_addr.lower()
+    dest = gmail_dest.lower()
+    # Every allowlisted address forwards into the same Gmail inbox, so any of them left
+    # in a visible header would make one Reply-All arrive back here as another copy.
+    local = {a.lower() for a in (local_addrs or set())} | {alias, dest}
+
+    # Gmail builds Reply-All out of the headers it receives, so replacing To with the
+    # Gmail address (as this used to) silently narrowed every reply to the sender and
+    # dropped anyone else the message was addressed to. Delivery is the SES envelope
+    # (Destinations= below), never these headers, so carrying the other recipients
+    # through cannot send mail to any of them.
+    seen = set(local)
+    unencodable: list[str] = []
+    kept_to = _render_new(to_pairs, seen, unencodable)
+    kept_cc = _render_new(cc_pairs, seen, unencodable)
+    if unencodable:
+        # backslashreplace: a raw non-ASCII address in a log record can fail the
+        # handler's own encode, and logging reports that on stderr -- which Exim reads
+        # as pipe failure just like a traceback would.
+        logger.warning(
+            "Omitted %d non-ASCII (SMTPUTF8) recipient(s) from forwarded To/Cc: %s",
+            len(unencodable),
+            ", ".join(_ascii_safe(a) for a in unencodable),
+        )
+
+    # Substitute the Gmail address for the alias in whichever header carried it, so
+    # "cc me" does not read as "to me" and Gmail still drops it from Reply-All.
+    to_addrs = {addr.lower() for _, addr in to_pairs}
+    if alias not in to_addrs and any(addr.lower() == alias for _, addr in cc_pairs):
+        kept_cc.insert(0, gmail_dest)
+    else:
+        kept_to.insert(0, gmail_dest)
+
+    # An explicit Reply-To is the sender's instruction and outranks their From, which
+    # is the address to fall back to when they set none.
+    reply_seen = {dest}
+    reply_to = _render_new(reply_to_pairs or _addr_pairs([original_from]), reply_seen)
+    if reply_to_all:
+        reply_seen |= local
+        reply_to += _render_new(to_pairs + cc_pairs, reply_seen)
 
     for header in (
         "DKIM-Signature",
@@ -255,17 +390,25 @@ def _build_forward_raw(original: email.message.Message, from_addr: str, gmail_de
         "Sender",
         "Reply-To",
         "To",
+        "Cc",
         "From",
         "Message-ID",
     ):
         if header in msg:
             del msg[header]
 
-    msg["From"] = formataddr((f"{display_name} via TellersTech", from_addr))
-    msg["To"] = gmail_dest
-    if original_from_email:
-        msg["Reply-To"] = original_from
+    msg["From"] = formataddr((f"{display_name} via {_via_label(from_addr, via_labels)}", from_addr))
+    if kept_to:
+        msg["To"] = ", ".join(kept_to)
+    if kept_cc:
+        msg["Cc"] = ", ".join(kept_cc)
+    if reply_to:
+        msg["Reply-To"] = ", ".join(reply_to)
     msg["X-Original-From"] = original_from
+    if to_pairs:
+        msg["X-Original-To"] = _original_addr_list(to_pairs)
+    if cc_pairs:
+        msg["X-Original-Cc"] = _original_addr_list(cc_pairs)
     msg["X-Forwarded-To"] = gmail_dest
     msg["X-Forwarded-For"] = from_addr
     msg[_PIPE_MARKER_HEADER] = _PIPE_MARKER_VALUE
@@ -279,6 +422,14 @@ def _send_ses(
     gmail_dest: str,
     cfg: dict,
 ) -> bool:
+    # The forwarded From and the SES Source are both this address, so an SMTPUTF8
+    # recipient cannot be forwarded at all -- SES has no verified identity for one. The
+    # entry-point guard would keep that from bouncing, but it would log a bare traceback;
+    # a misconfigured allowlist entry deserves to say what is wrong with it.
+    if _render_addr("", recipient) is None:
+        logger.error("Cannot send as a non-ASCII address: %s", _ascii_safe(recipient))
+        _log_skip("unrenderable_recipient", _ascii_safe(recipient))
+        return False
     max_bytes = int(cfg.get("max_message_bytes") or 10 * 1024 * 1024)
     if len(raw) > max_bytes:
         _log_skip("oversized", recipient, bytes=str(len(raw)))
@@ -298,7 +449,16 @@ def _send_ses(
         ses.send_raw_email(
             Source=recipient,
             Destinations=[gmail_dest],
-            RawMessage={"Data": _build_forward_raw(mail_obj, recipient, gmail_dest)},
+            RawMessage={
+                "Data": _build_forward_raw(
+                    mail_obj,
+                    recipient,
+                    gmail_dest,
+                    reply_to_all=bool(cfg.get("reply_to_all")),
+                    local_addrs=_allowlist(cfg),
+                    via_labels=cfg.get("via_labels") or {},
+                )
+            },
         )
         _rate_increment(f"r-{recipient}")
         _rate_increment("global")
@@ -351,4 +511,13 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    try:
+        sys.exit(main(sys.argv))
+    except Exception:  # noqa: BLE001
+        # Same reason main() returns 0 on every handled path, extended to the paths
+        # nobody anticipated: a traceback exits nonzero and prints to stderr, and Exim
+        # turns either into a bounce of a message Roundcube already has. ERROR is what
+        # ses_gmail_forward_health.sh greps for, so this is quiet toward Exim and loud
+        # toward us rather than silent.
+        logger.exception("Unhandled error; exiting 0 so Exim does not bounce")
+        sys.exit(0)
