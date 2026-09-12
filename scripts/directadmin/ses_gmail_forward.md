@@ -140,10 +140,13 @@ Gmail offers Reply-All only when more than one participant is not you. Every rec
 is still in the headers — Gmail just stops offering to use them. Set the destination to
 the mailbox you read and drop the auto-forward instead of chaining them.
 
-That address is also the loop guard (`from_gmail_dest`): a message whose
-`From`/`Sender`/`Reply-To` is the destination is skipped rather than forwarded. Mailing
-an alias *from* the destination account therefore looks exactly like a dead pipe, so
-test from some third account.
+That address is also the loop guard, and it keys on the message rather than the mailbox:
+a copy is skipped as `from_gmail_dest` only when the destination address itself appears
+in `From`, `Sender` or `Reply-To`. Under the [outbound setup](#gmail-outbound) below,
+mail composed in the destination account leaves as your domain address, so it does *not*
+trip the guard; sending as the plain Gmail address is what does. That difference is
+invisible while composing, so test from an unrelated account, and when a copy goes
+missing read the log for `from_gmail_dest` instead of assuming it.
 
 ## DirectAdmin
 
