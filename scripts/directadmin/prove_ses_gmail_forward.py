@@ -378,6 +378,60 @@ assert_that(
     is_ascii(forward(mod, via_labels={"example.com": "Br\u00fccke"}).as_bytes()),
 )
 
+print("\nthe scanning server's spam verdict (present per-domain, so it made copies differ)")
+# Reproduces what DirectAdmin/SpamAssassin prepends on a domain with scanning enabled,
+# folded the way it actually arrives, including the placeholder that never got substituted.
+scanned = email.message_from_bytes(
+    (
+        "X-Spam-Score: 0.9 (/)\n"
+        "X-Spam-Bar: /\n"
+        "X-Spam-Status: No, score=0.9\n"
+        'X-Spam-Report: Spam detection software, running on the system "mail.example.com",\n'
+        "  has NOT identified this incoming email as spam.\n"
+        "  If you have any questions, see @@CONTACT_ADDRESS@@ for details.\n"
+        "  1.0 HTML_IMAGE_ONLY_16   BODY: HTML: images with 1200-1600 bytes of words\n"
+        f"From: Alice Sender <{SENDER}>\n"
+        f"To: {ALIAS}, {OTHER_TO}\n"
+        "Subject: quarterly numbers\n"
+        "Date: Mon, 1 Sep 2025 09:00:00 -0400\n"
+        "\n"
+        "See attached.\n"
+    ).encode(),
+    policy=email.policy.default,
+)
+assert_that(
+    "the fixture really does carry a spam verdict in the first place",
+    len([h for h in scanned.keys() if h.lower().startswith("x-spam-")]) == 4,
+)
+out = forward(mod, scanned)
+assert_that(
+    "no X-Spam-* header reaches Gmail",
+    [h for h in out.keys() if h.lower().startswith("x-spam-")] == [],
+)
+assert_that(
+    "the scanning host is not disclosed to the recipient",
+    "mail.example.com" not in out.as_string(),
+)
+assert_that(
+    "nor is the unsubstituted contact placeholder",
+    "@@CONTACT_ADDRESS@@" not in out.as_string(),
+)
+assert_that(
+    "a scanned message forwards the same recipients as an unscanned one",
+    addrs(out, "To") == addrs(forward(mod), "To"),
+)
+assert_that(
+    "and the same Reply-To, so a scanned domain replies like any other",
+    addrs(out, "Reply-To") == addrs(forward(mod), "Reply-To"),
+)
+scanned_headers = [h for h in out.keys() if h.lower() != "subject"]
+plain_headers = [h for h in forward(mod).keys() if h.lower() != "subject"]
+assert_that(
+    "the two copies carry the same set of headers, which is the consistency being fixed",
+    sorted(scanned_headers) == sorted(plain_headers),
+)
+assert_that("the body still survives the strip", "See attached." in out.as_string())
+
 print("\nrate-limit counter across uids (Exim runs this pipe as more than one user)")
 # A 0644 counter owned by another uid cannot be reopened for writing. Owning it and
 # dropping write permission reproduces that exactly, without needing a second account.
@@ -568,7 +622,27 @@ if rate_path and not privileged:
     broken._rate_increment("r-stuck-mutant")
     assert_that("writing in place is what leaves the counter stuck", stuck.read_text().strip() == "7")
 
-# 4. Remove the exit guard, so an unexpected exception reaches Exim again.
+# 4. Forward the scanning server's spam verdict again, the way the per-domain
+#    inconsistency did. Nothing bounces and nothing is lost, so the only symptom is two
+#    copies that differ by which domain they arrived at -- which is why it needs an
+#    assertion rather than a reader's attention.
+spam_path = mutate(
+    "forwards_spam_verdict",
+    '    for header in {h for h in msg.keys() if h.lower().startswith("x-spam-")}:\n',
+    "    for header in ():\n",
+)
+if spam_path:
+    leaky = forward(load(spam_path, "ses_gmail_forward_spam_mutant"), scanned)
+    assert_that(
+        "leaving the verdict in is what this proof would catch",
+        [h for h in leaky.keys() if h.lower().startswith("x-spam-")] != [],
+    )
+    assert_that(
+        "and it is what leaked the scanning host to the recipient",
+        "mail.example.com" in leaky.as_string(),
+    )
+
+# 5. Remove the exit guard, so an unexpected exception reaches Exim again.
 guard_path = mutate("no_guard", "        sys.exit(0)\n", "        raise\n")
 if guard_path:
     run = run_pipe(raw_message(f"{ALIAS}, {OTHER_TO}"), mode="boom", script=guard_path)

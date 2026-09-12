@@ -91,6 +91,20 @@ there — and logged:
 WARNING Omitted 1 non-ASCII (SMTPUTF8) recipient(s) from forwarded To/Cc: bj\xf6rn@…
 ```
 
+### The spam verdict stays on this server
+
+Every `X-Spam-*` header SpamAssassin added is stripped from the copy. Those describe our
+own scan of the inbound message, which is of no use to Gmail — it filters the copy itself
+— and `X-Spam-Report` additionally names the scanning host and quotes whatever blocklist
+notices the scan hit.
+
+The reason it matters beyond tidiness is that scanning is **per domain**, set in
+`/etc/virtual/<domain>/filter.conf`. A domain with it on produced a visibly different
+copy from a domain with it off, for the same message from the same sender, which is a
+difference no one reading the two copies can explain. Nothing is lost by dropping them:
+the Roundcube copy of the original still carries the full report, which is where you
+would go to ask why something scored what it did.
+
 ## Which domain a message came in on
 
 Several domains funnel into one Gmail inbox, and the forwarded `From` is always the
