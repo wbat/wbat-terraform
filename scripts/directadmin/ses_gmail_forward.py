@@ -34,12 +34,22 @@ import os
 import re
 import sys
 import time
+import warnings
 from datetime import datetime, timezone
 from email.utils import formataddr, parseaddr
 from pathlib import Path
 
-import boto3
-from botocore.exceptions import ClientError
+# Exim's virtual_address_pipe transport is configured with `return_output`, so any byte
+# this process writes to stderr makes Exim deem the delivery failed and bounce it to the
+# sender -- a message Roundcube already has and SES has already forwarded. A library
+# warning is enough to do that. The domain owners this runs as do not all resolve the
+# same boto3 (one has a newer copy under ~/.local that warns about the platform's Python
+# version), so the filter is set here rather than left to whichever environment Exim
+# happens to hand the pipe.
+warnings.simplefilter("ignore")
+
+import boto3  # noqa: E402  -- must not import before the filter above is in place
+from botocore.exceptions import ClientError  # noqa: E402
 
 LOG_PATH = os.environ.get("SES_GMAIL_FORWARD_LOG", "/var/log/ses-gmail-forward.log")
 SECRET_ID = os.environ.get(

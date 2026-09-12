@@ -283,6 +283,38 @@ those go to stderr too.
 The cost of that safety is that a bug shows up as a Gmail copy that never arrives, not
 as a bounce, so `/var/log/ses-gmail-forward.log` is the only place it is visible.
 
+### …and never writes to stderr, not even a warning
+
+The stdout/stderr half of that is not folklore. The transport sets it explicitly:
+
+```text
+virtual_address_pipe:
+  driver = pipe
+  group = nobody
+  return_output
+  user = "${lookup{$domain_data}lsearch* {/etc/virtual/domainowners}{$value}}"
+```
+
+`return_output` means output *is* failure: produce a byte on either stream and Exim
+returns the message to the sender as a bounce **even when the exit status is 0**, after
+the mailbox copy and the SES copy have both already gone out. A library's
+`DeprecationWarning` is enough to trigger it, which is why the script silences warnings
+before importing boto3 rather than trusting the environment.
+
+That `user =` line is also why the pipe has no single uid: it runs as the **domain
+owner** from `/etc/virtual/domainowners`, so `tellerstech.com` runs as one account and
+`wbat.net` as another. They need not resolve the same dependencies — a stale
+`~/.local/lib/python3.9/site-packages/boto3` under one owner shadows the system copy for
+that domain only, which is how one domain can start emitting warnings that the other
+never does. Check with:
+
+```bash
+for u in $(awk -F': *' '{print $2}' /etc/virtual/domainowners | sort -u); do
+  printf '%-12s ' "$u"
+  su -s /bin/bash "$u" -c 'python3 -c "import boto3;print(boto3.__version__, boto3.__file__)"'
+done
+```
+
 ## Gmail (outbound)
 
 | Setting | Value |
