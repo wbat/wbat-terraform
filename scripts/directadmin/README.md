@@ -15,8 +15,10 @@ Forwarder destination in DA UI:
 ```
 
 The Gmail copy must come **From** the allowlisted address (that is the identity SES
-verified), but everything else about who the message was addressed to is preserved, so
-Gmail's Reply-All still reaches the other recipients. Delivery is the SES envelope, not
+verified), so the `via …` suffix on the display name is the only visible sign of which
+of your domains a message arrived on — it defaults to that domain, and `via_labels` in
+the runtime config maps it to a nicer name. Everything else about who the message was
+addressed to is preserved, so Gmail's Reply-All still reaches the other recipients. Delivery is the SES envelope, not
 those headers, so naming third parties in `To`/`Cc` sends them nothing. Both halves are
 proved offline:
 

@@ -97,7 +97,13 @@ def run_pipe(raw: bytes, mode: str = "ok", recipient: str = ALIAS, script: Path 
             "SES_GMAIL_FORWARD_STATE": str(SANDBOX / "pipe-state"),
             "FAKE_SES_OUT": str(sent),
             "FAKE_SES_MODE": mode,
-            "FAKE_SES_CONFIG": json.dumps({"gmail_destination": GMAIL, "recipients": [ALIAS]}),
+            "FAKE_SES_CONFIG": json.dumps(
+                {
+                    "gmail_destination": GMAIL,
+                    "recipients": [ALIAS],
+                    "via_labels": {"example.com": "HouseName"},
+                }
+            ),
         }
     )
     proc = subprocess.run(
@@ -199,13 +205,16 @@ def forward(
     original=None,
     reply_to_all: bool = False,
     local_addrs: set[str] | None = None,
+    via_labels: dict | None = None,
+    alias: str = ALIAS,
 ) -> email.message.Message:
     raw = mod._build_forward_raw(
         original if original is not None else message(),
-        ALIAS,
+        alias,
         GMAIL,
         reply_to_all=reply_to_all,
         local_addrs=local_addrs,
+        via_labels=via_labels,
     )
     return email.message_from_bytes(raw, policy=email.policy.default)
 
@@ -314,7 +323,7 @@ assert_that(
     "From is the SES-verified alias, or SES rejects the send",
     addrs(out, "From") == [ALIAS],
 )
-assert_that("the sender's name is still shown", "Alice Sender via TellersTech" in out["From"])
+assert_that("the sender's name is still shown", "Alice Sender via " in out["From"])
 assert_that("X-Original-From records the real sender", SENDER in out["X-Original-From"])
 assert_that(
     "X-Original-To records the untouched original recipients",
@@ -325,6 +334,43 @@ for header in ("DKIM-Signature", "Return-Path", "Sender"):
     signed = message()
     signed[header] = "v=1; d=sender.example" if header == "DKIM-Signature" else SENDER
     assert_that(f"{header} is stripped so Gmail does not judge us by it", header not in forward(mod, signed))
+
+print("\nvia label (which of your domains a message came in on)")
+second = "brian@second.example"
+assert_that(
+    "the default label is the domain the mail arrived at",
+    "via example.com" in str(forward(mod)["From"]),
+)
+assert_that(
+    "a different alias domain gets a different label, unconfigured",
+    "via second.example" in str(forward(mod, alias=second)["From"]),
+)
+labels = {"example.com": "HouseName", "SECOND.Example": "SecondName"}
+assert_that(
+    "a configured label replaces the domain",
+    "via HouseName" in str(forward(mod, via_labels=labels)["From"]),
+)
+assert_that(
+    "the domain key is matched case-insensitively",
+    "via SecondName" in str(forward(mod, alias=second, via_labels=labels)["From"]),
+)
+assert_that(
+    "an unlisted domain still falls back to itself rather than another domain's name",
+    "via third.example" in str(forward(mod, alias="brian@third.example", via_labels=labels)["From"]),
+)
+assert_that(
+    "the label never changes the address SES has to verify",
+    addrs(forward(mod, alias=second, via_labels=labels), "From") == [second],
+)
+for broken in ("not-a-map", ["a"], None):
+    assert_that(
+        f"config shaped {type(broken).__name__} costs the label, not the forward",
+        "via example.com" in str(forward(mod, via_labels=broken)["From"]),
+    )
+assert_that(
+    "a non-ASCII label still leaves the message 7-bit clean",
+    is_ascii(forward(mod, via_labels={"example.com": "Br\u00fccke"}).as_bytes()),
+)
 
 print("\nloop guard")
 out = forward(mod)
@@ -396,6 +442,10 @@ run = run_pipe(raw_message(f"{ALIAS}, {OTHER_TO}"))
 assert_that("a normal message exits 0", run["code"] == 0)
 assert_that("and writes nothing to stdout or stderr", run["stdout"] == b"" and run["stderr"] == b"")
 assert_that("and the other To recipient reaches Gmail", OTHER_TO.encode() in run["sent"])
+assert_that(
+    "the via label really is read from the runtime config, not just the function arg",
+    b"via HouseName" in run["sent"],
+)
 run = run_pipe(raw_message(f"{ALIAS}, {UTF8_HEADER}, {OTHER_TO}"))
 assert_that("an SMTPUTF8 recipient does not bounce the delivery", run["code"] == 0)
 assert_that("nor leak a traceback to stderr", run["stderr"] == b"")

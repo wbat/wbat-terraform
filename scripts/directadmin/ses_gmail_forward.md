@@ -38,12 +38,17 @@ See outputs `ses_da_gmail_forward_secret_name` / `_arn`.
   "rate_limit_per_recipient_per_hour": 30,
   "rate_limit_global_per_hour": 100,
   "max_message_bytes": 10485760,
-  "reply_to_all": false
+  "reply_to_all": false,
+  "via_labels": {
+    "example.com": "HouseName",
+    "second.example": "SecondName"
+  }
 }
 ```
 
-`reply_to_all` is optional and defaults to `false`. See
-[Recipients and replies](#recipients-and-replies).
+`reply_to_all` and `via_labels` are both optional. See
+[Recipients and replies](#recipients-and-replies) and
+[Which domain a message came in on](#which-domain-a-message-came-in-on).
 
 ## Recipients and replies
 
@@ -54,7 +59,7 @@ intact:
 
 | Header on the Gmail copy | Value |
 |---|---|
-| `From` | `Original Sender via TellersTech <user1@example.com>` |
+| `From` | `Original Sender via example.com <user1@example.com>` (see `via_labels`) |
 | `To` | your Gmail address **in place of** the allowlisted alias, plus every other original `To` |
 | `Cc` | the original `Cc`, unchanged |
 | `Reply-To` | the sender's own `Reply-To` if they set one, else their `From` |
@@ -85,6 +90,37 @@ there — and logged:
 ```text
 WARNING Omitted 1 non-ASCII (SMTPUTF8) recipient(s) from forwarded To/Cc: bj\xf6rn@…
 ```
+
+## Which domain a message came in on
+
+Several domains funnel into one Gmail inbox, and the forwarded `From` is always the
+allowlisted address, so without a hint every message looks alike. Gmail shows the
+display name and hides the address behind a click, so the `via …` suffix is the only
+part of that visible at a glance:
+
+```text
+From: Brian Teller via example.com <user1@example.com>
+From: Brian Teller via second.example <user1@second.example>
+```
+
+The default is the **domain of the address the mail arrived at**, which is never wrong.
+`via_labels` maps a domain to a nicer house name; keys are matched case-insensitively,
+and a domain that is not listed still falls back to itself rather than borrowing another
+domain's label:
+
+```bash
+aws secretsmanager get-secret-value \
+  --secret-id tellerstech/ses-gmail-forward/runtime-config \
+  --query SecretString --output text | jq .          # current value
+# then put back the same JSON with via_labels added:
+aws secretsmanager put-secret-value \
+  --secret-id tellerstech/ses-gmail-forward/runtime-config \
+  --secret-string "$(jq -c '.via_labels = {"example.com":"HouseName"}' /tmp/cfg.json)"
+```
+
+The config is re-read at most every 60 seconds, so a label change takes effect on the
+next message without touching the server. A malformed `via_labels` costs the nicer label
+and nothing else — the forward still goes out with the domain.
 
 ### When a plain Reply should reach everyone
 

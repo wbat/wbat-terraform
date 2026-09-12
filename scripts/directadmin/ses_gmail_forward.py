@@ -290,6 +290,26 @@ def _render_new(
     return out
 
 
+def _via_label(addr: str, labels: dict | None = None) -> str:
+    """Display suffix for the forwarded From, keyed on the domain the mail arrived at.
+
+    Gmail shows the display name and hides the address behind a click, so with several
+    domains funnelling into one inbox this is the only thing that says which one a
+    message came in on. The default is the domain itself, which is never wrong; a
+    prettier house name is per-domain runtime config, because that is where the real
+    domains live -- the same reason recipients are not in git.
+    """
+    domain = addr.rpartition("@")[2].strip().lower()
+    if not domain:
+        return "forwarded"
+    if not isinstance(labels, dict):
+        # Hand-edited JSON: a wrong shape here should cost a nicer display name, not
+        # the forward itself.
+        return domain
+    overrides = {str(k).strip().lower(): str(v).strip() for k, v in labels.items()}
+    return overrides.get(domain) or domain
+
+
 def _original_addr_list(pairs: list[tuple[str, str]]) -> str:
     """Audit-trail form for X-Original-*, which unlike To/Cc can hold an SMTPUTF8
     address: those are unstructured headers, so a non-ASCII address survives there as
@@ -303,6 +323,7 @@ def _build_forward_raw(
     gmail_dest: str,
     reply_to_all: bool = False,
     local_addrs: set[str] | None = None,
+    via_labels: dict | None = None,
 ) -> bytes:
     msg = email.message_from_bytes(original.as_bytes(), policy=email.policy.SMTP)
     original_from = msg.get("From", "unknown")
@@ -369,7 +390,7 @@ def _build_forward_raw(
         if header in msg:
             del msg[header]
 
-    msg["From"] = formataddr((f"{display_name} via TellersTech", from_addr))
+    msg["From"] = formataddr((f"{display_name} via {_via_label(from_addr, via_labels)}", from_addr))
     if kept_to:
         msg["To"] = ", ".join(kept_to)
     if kept_cc:
@@ -420,6 +441,7 @@ def _send_ses(
                     gmail_dest,
                     reply_to_all=bool(cfg.get("reply_to_all")),
                     local_addrs=_allowlist(cfg),
+                    via_labels=cfg.get("via_labels") or {},
                 )
             },
         )
