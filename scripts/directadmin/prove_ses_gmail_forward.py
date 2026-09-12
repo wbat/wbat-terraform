@@ -378,6 +378,37 @@ assert_that(
     is_ascii(forward(mod, via_labels={"example.com": "Br\u00fccke"}).as_bytes()),
 )
 
+print("\nrate-limit counter across uids (Exim runs this pipe as more than one user)")
+# A 0644 counter owned by another uid cannot be reopened for writing. Owning it and
+# dropping write permission reproduces that exactly, without needing a second account.
+rate_dir = Path(mod.STATE_DIR)
+rate_dir.mkdir(parents=True, exist_ok=True)
+counter = mod._rate_path("r-cross-uid")
+counter.write_text("7")
+os.chmod(counter, 0o444)
+privileged = os.geteuid() == 0
+mod._rate_increment("r-cross-uid")
+if privileged:
+    print("  SKIP running as root, which ignores file permissions; CI runs unprivileged")
+else:
+    assert_that("a counter another uid owns still advances", counter.read_text().strip() == "8")
+    assert_that(
+        "and is left writable so the next uid does not have to do this again",
+        counter.stat().st_mode & 0o666 == 0o666,
+    )
+assert_that(
+    "no temp files are left behind in the state dir",
+    not list(rate_dir.glob("*.tmp")),
+)
+fresh = mod._rate_path("r-brand-new")
+fresh.unlink(missing_ok=True)
+mod._rate_increment("r-brand-new")
+assert_that("a first-time counter still starts at 1", fresh.read_text().strip() == "1")
+assert_that(
+    "the limit is still enforced once the counter is at it",
+    mod._rate_check("r-cross-uid", 8) is False and mod._rate_check("r-cross-uid", 99) is True,
+)
+
 print("\nloop guard")
 out = forward(mod)
 assert_that("the marker header is set", out[mod._PIPE_MARKER_HEADER] == mod._PIPE_MARKER_VALUE)
@@ -521,7 +552,23 @@ if utf8_path:
     assert_that("but the Gmail copy is lost outright", run["sent"] == b"")
     assert_that("with only the log to say why", " ERROR " in run["log"])
 
-# 3. Remove the exit guard, so an unexpected exception reaches Exim again.
+# 3. Write the counter in place again, the way the multi-uid bug did.
+rate_path = mutate(
+    "in_place_counter",
+    "        _write_shared(path, str(count + 1))\n",
+    "        path.write_text(str(count + 1))\n",
+)
+if rate_path and not privileged:
+    broken = load(rate_path, "ses_gmail_forward_rate_mutant")
+    stuck = Path(broken.STATE_DIR) / "rate-r-stuck-mutant.count"
+    stuck.parent.mkdir(parents=True, exist_ok=True)
+    stuck.write_text("7")
+    os.chmod(stuck, 0o444)
+    broken._rate_path = lambda key: stuck
+    broken._rate_increment("r-stuck-mutant")
+    assert_that("writing in place is what leaves the counter stuck", stuck.read_text().strip() == "7")
+
+# 4. Remove the exit guard, so an unexpected exception reaches Exim again.
 guard_path = mutate("no_guard", "        sys.exit(0)\n", "        raise\n")
 if guard_path:
     run = run_pipe(raw_message(f"{ALIAS}, {OTHER_TO}"), mode="boom", script=guard_path)

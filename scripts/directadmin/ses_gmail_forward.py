@@ -221,6 +221,29 @@ def _rate_check(key: str, limit: int) -> bool:
         return True
 
 
+def _write_shared(path: Path, text: str) -> None:
+    """Replace a counter file that a different uid may already own.
+
+    Exim runs this pipe as whichever user the delivery resolves to -- root, mail and a
+    DirectAdmin account have all created counters on this host -- and a 0644 file one of
+    them made cannot be reopened for writing by the next, so the counter silently stopped
+    advancing and the hourly caps under-counted. Renaming a temp file into place needs
+    permission on the directory rather than on the file, so it works whoever got there
+    first, and 0666 spares the next uid from needing the same trick.
+    """
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text)
+        os.chmod(tmp, 0o666)
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def _rate_increment(key: str) -> None:
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -231,7 +254,7 @@ def _rate_increment(key: str) -> None:
             count = 0
         except OSError:
             count = 0
-        path.write_text(str(count + 1))
+        _write_shared(path, str(count + 1))
     except OSError:
         logger.warning("Rate-limit state unwritable; could not increment")
 
