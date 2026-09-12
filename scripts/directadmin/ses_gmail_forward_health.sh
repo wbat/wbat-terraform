@@ -65,7 +65,7 @@ if [[ -f "$FORWARD_LOG" ]]; then
       if ($0 ~ /dovecot-lda failed/) next
       if ($0 ~ / ERROR /) { print; next }
       # Structured skips that mean Gmail never got a copy (alert-worthy)
-      if ($0 ~ /skip_ses reason=(rate_limit|ses_error|config_error|missing_gmail_dest)/) { print; next }
+      if ($0 ~ /skip_ses reason=(rate_limit|ses_error|config_error|missing_gmail_dest|unrenderable_recipient)/) { print; next }
       if ($0 ~ /Rate limit exceeded/) { print; next }
       if ($0 ~ /SES SendRawEmail failed/) { print; next }
       if ($0 ~ /gmail_destination missing/) { print; next }

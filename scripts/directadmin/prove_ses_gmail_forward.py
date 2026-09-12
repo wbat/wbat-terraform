@@ -73,7 +73,13 @@ def client(name, **kwargs):
 '''
 
 
-def run_pipe(raw: bytes, mode: str = "ok", recipient: str = ALIAS, script: Path = SCRIPT) -> dict:
+def run_pipe(
+    raw: bytes,
+    mode: str = "ok",
+    recipient: str = ALIAS,
+    script: Path = SCRIPT,
+    recipients: list[str] | None = None,
+) -> dict:
     """Run the real script the way Exim does: argv recipient, message on stdin.
 
     boto3 is a fake module on PYTHONPATH rather than a stub inside this process, so the
@@ -100,7 +106,7 @@ def run_pipe(raw: bytes, mode: str = "ok", recipient: str = ALIAS, script: Path 
             "FAKE_SES_CONFIG": json.dumps(
                 {
                     "gmail_destination": GMAIL,
-                    "recipients": [ALIAS],
+                    "recipients": recipients if recipients is not None else [ALIAS],
                     "via_labels": {"example.com": "HouseName"},
                 }
             ),
@@ -451,6 +457,15 @@ assert_that("an SMTPUTF8 recipient does not bounce the delivery", run["code"] ==
 assert_that("nor leak a traceback to stderr", run["stderr"] == b"")
 assert_that("the Gmail copy is still sent", OTHER_TO.encode() in run["sent"])
 assert_that("and the omission is logged", "SMTPUTF8" in run["log"])
+utf8_alias = "bj\u00f6rn@example.com"
+run = run_pipe(raw_message(utf8_alias), recipient=utf8_alias, recipients=[utf8_alias])
+assert_that("an allowlisted address SES cannot send as does not bounce either", run["code"] == 0)
+assert_that("nothing is sent, because no such SES identity can exist", run["sent"] == b"")
+assert_that(
+    "and it says which address is unusable rather than dumping a traceback",
+    "unrenderable_recipient" in run["log"] and "Traceback" not in run["log"],
+)
+
 run = run_pipe(raw_message(f"{ALIAS}, {OTHER_TO}"), mode="boom")
 assert_that("an unexpected exception anywhere still exits 0", run["code"] == 0)
 assert_that("with nothing on stderr", run["stderr"] == b"")

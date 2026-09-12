@@ -104,6 +104,13 @@ def _allowlist(cfg: dict) -> set[str]:
     return {a.strip().lower() for a in (cfg.get("recipients") or []) if a}
 
 
+def _ascii_safe(value: str) -> str:
+    """Log-safe form of an address. A raw non-ASCII log record can fail the handler's own
+    encode, and logging reports that on stderr -- which Exim reads as pipe failure just
+    like a traceback would."""
+    return value.encode("ascii", "backslashreplace").decode("ascii")
+
+
 def _log_skip(reason: str, recipient: str = "", **extra: str) -> None:
     parts = [f"skip_ses reason={reason}"]
     if recipient:
@@ -357,7 +364,7 @@ def _build_forward_raw(
         logger.warning(
             "Omitted %d non-ASCII (SMTPUTF8) recipient(s) from forwarded To/Cc: %s",
             len(unencodable),
-            ", ".join(a.encode("ascii", "backslashreplace").decode("ascii") for a in unencodable),
+            ", ".join(_ascii_safe(a) for a in unencodable),
         )
 
     # Substitute the Gmail address for the alias in whichever header carried it, so
@@ -415,6 +422,14 @@ def _send_ses(
     gmail_dest: str,
     cfg: dict,
 ) -> bool:
+    # The forwarded From and the SES Source are both this address, so an SMTPUTF8
+    # recipient cannot be forwarded at all -- SES has no verified identity for one. The
+    # entry-point guard would keep that from bouncing, but it would log a bare traceback;
+    # a misconfigured allowlist entry deserves to say what is wrong with it.
+    if _render_addr("", recipient) is None:
+        logger.error("Cannot send as a non-ASCII address: %s", _ascii_safe(recipient))
+        _log_skip("unrenderable_recipient", _ascii_safe(recipient))
+        return False
     max_bytes = int(cfg.get("max_message_bytes") or 10 * 1024 * 1024)
     if len(raw) > max_bytes:
         _log_skip("oversized", recipient, bytes=str(len(raw)))

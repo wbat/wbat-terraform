@@ -199,7 +199,8 @@ server (`install -m 755 …`). No service restart is required for the pipe.
 
 Before `SendRawEmail`, the pipe logs `WARNING skip_ses reason=…` and exits 0
 (Roundcube already has the message via Exim). Health alerts on
-`rate_limit`, `ses_error`, `config_error`, and `missing_gmail_dest`.
+`rate_limit`, `ses_error`, `config_error`, `missing_gmail_dest`, and
+`unrenderable_recipient`.
 
 | `reason=` | Meaning |
 |---|---|
@@ -207,6 +208,7 @@ Before `SendRawEmail`, the pipe logs `WARNING skip_ses reason=…` and exits 0
 | `pipe_reentry` | `X-Ses-Gmail-Forward: 1` already set (this pipe; not generic `X-Forwarded-*`) |
 | `from_gmail_dest` | From/Sender/Reply-To is the Gmail destination |
 | `mailer_daemon` | From looks like mailer-daemon / postmaster |
+| `unrenderable_recipient` | The allowlisted address is not ASCII, so SES has no verified identity to send as (alerts) |
 | `rate_limit` | Per-recipient or global hourly cap |
 | `ses_error` | `SendRawEmail` failed |
 | `oversized` / `missing_headers` / `empty_payload` | Message rejected before SES |
