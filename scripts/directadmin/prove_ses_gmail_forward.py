@@ -72,6 +72,23 @@ def client(name, **kwargs):
     return _Secrets() if name == "secretsmanager" else _Ses()
 '''
 
+# A dependency that greets its import with a warning on stderr, the way the newer boto3
+# under one domain owner's ~/.local warns about the platform's Python version. Exim runs
+# this pipe with return_output, so that byte is a bounce -- of a message already in the
+# mailbox and already forwarded. Subclassing Warning rather than DeprecationWarning is
+# deliberate: that is what boto3 does, and it is shown by default.
+NOISY_BOTO3 = (
+    FAKE_BOTO3
+    + '''
+import warnings
+
+class PythonDeprecationWarning(Warning):
+    pass
+
+warnings.warn("Boto3 will no longer support Python 3.9", PythonDeprecationWarning)
+'''
+)
+
 
 def run_pipe(
     raw: bytes,
@@ -79,6 +96,7 @@ def run_pipe(
     recipient: str = ALIAS,
     script: Path = SCRIPT,
     recipients: list[str] | None = None,
+    boto3_src: str | None = None,
 ) -> dict:
     """Run the real script the way Exim does: argv recipient, message on stdin.
 
@@ -87,7 +105,7 @@ def run_pipe(
     the property Exim actually cares about.
     """
     (PYLIB / "botocore").mkdir(parents=True, exist_ok=True)
-    (PYLIB / "boto3.py").write_text(FAKE_BOTO3)
+    (PYLIB / "boto3.py").write_text(boto3_src if boto3_src is not None else FAKE_BOTO3)
     (PYLIB / "botocore" / "__init__.py").write_text("")
     (PYLIB / "botocore" / "exceptions.py").write_text("class ClientError(Exception):\n    pass\n")
 
@@ -560,6 +578,13 @@ assert_that(
     " ERROR " in run["log"],
 )
 
+print("\na dependency warning is a bounce, because the transport sets return_output")
+run = run_pipe(raw_message(f"{ALIAS}, {OTHER_TO}"), boto3_src=NOISY_BOTO3)
+assert_that("a warning from a dependency does not reach stderr", run["stderr"] == b"")
+assert_that("nor stdout", run["stdout"] == b"")
+assert_that("the forward still happens", OTHER_TO.encode() in run["sent"])
+assert_that("and the pipe still exits 0", run["code"] == 0)
+
 print("\nnegative value: these assertions are load-bearing")
 source = SCRIPT.read_text()
 
@@ -642,7 +667,24 @@ if spam_path:
         "mail.example.com" in leaky.as_string(),
     )
 
-# 5. Remove the exit guard, so an unexpected exception reaches Exim again.
+# 5. Leave the warning filter to the environment again. Nothing fails and nothing is
+#    logged; the message is delivered and forwarded, and Exim bounces it anyway. That is
+#    the failure this assertion exists to catch, since no amount of reading the script
+#    tells you the transport turns a warning into a bounce.
+filter_path = mutate(
+    "no_warning_filter",
+    'warnings.simplefilter("ignore")\n',
+    "pass  # filter removed\n",
+)
+if filter_path:
+    run = run_pipe(raw_message(f"{ALIAS}, {OTHER_TO}"), script=filter_path, boto3_src=NOISY_BOTO3)
+    assert_that("without the filter the warning reaches stderr", run["stderr"] != b"")
+    assert_that(
+        "and it is the bounce-shaped kind: mail sent, exit 0, output anyway",
+        run["code"] == 0 and OTHER_TO.encode() in run["sent"],
+    )
+
+# 6. Remove the exit guard, so an unexpected exception reaches Exim again.
 guard_path = mutate("no_guard", "        sys.exit(0)\n", "        raise\n")
 if guard_path:
     run = run_pipe(raw_message(f"{ALIAS}, {OTHER_TO}"), mode="boom", script=guard_path)
