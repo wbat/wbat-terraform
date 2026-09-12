@@ -185,6 +185,29 @@ user2: "|/usr/local/bin/ses-gmail-forward.py"
 Do **not** use bare `user` or `\user@domain` in the alias — those fail on this host
 (`user@serverhostname` or LMTP `501 Invalid character in localpart`).
 
+### Only put the pipe on addresses that are in `recipients`
+
+The alias *replaces* mailbox delivery rather than adding to it, so the pipe is the only
+thing that runs. An address whose alias carries the pipe but which is missing from the
+`recipients` allowlist is therefore black-holed: the pipe declines to forward it, exits 0
+because it always does, and Exim considers the delivery done — no SES copy, no Maildir
+copy, no bounce. That decline is `logger.info`, not a `skip_ses` reason, so the health
+check does not alert on it either. Losing mail silently is the worst failure this pipe
+has, and it is reached by adding a forwarder in the DA UI without touching the secret.
+
+List every domain that carries the pipe and check each one against the allowlist:
+
+```bash
+grep -l ses-gmail-forward /etc/virtual/*/aliases
+aws secretsmanager get-secret-value --secret-id "$SECRET_ID" \
+  --query SecretString --output text | python3 -c 'import json,sys;print(json.load(sys.stdin)["recipients"])'
+```
+
+A domain in the first list and absent from the second is either a missing allowlist entry
+or an alias that should be deleted. Parked domains that exist only as a CDN origin or a
+vhost fall in the second category — remove the pipe from them, and drop their now-dead
+`via_labels` entry.
+
 ### Persist against Forwarders UI rewrites
 
 Aliases are **not** DA templates — there is no `templates/custom` override for them.
