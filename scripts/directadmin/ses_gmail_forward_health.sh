@@ -67,6 +67,9 @@ if [[ -f "$FORWARD_LOG" ]]; then
       # Structured skips that mean Gmail never got a copy (alert-worthy)
       if ($0 ~ /skip_ses reason=(rate_limit|ses_error|config_error|missing_gmail_dest|unrenderable_recipient)/) { print; next }
       if ($0 ~ /Rate limit exceeded/) { print; next }
+      # A limiter that cannot persist its counter is a control that is not working, and
+      # it fails open, so nothing else would ever say so.
+      if ($0 ~ /Rate-limit state unwritable/) { print; next }
       if ($0 ~ /SES SendRawEmail failed/) { print; next }
       if ($0 ~ /gmail_destination missing/) { print; next }
       if ($0 ~ /Failed to load runtime config/) { print; next }

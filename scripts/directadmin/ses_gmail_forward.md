@@ -219,6 +219,25 @@ skip reasons — newsletters and list mail commonly set them and should still re
 Rate-limit counters increment **only after a successful** `SendRawEmail`, so SES
 failures do not burn quota.
 
+### Rate-limit counters and the pipe's uid
+
+Exim runs this pipe as whichever user the delivery resolves to — `root`, `mail` and a
+DirectAdmin account have all created counters on this host — so the counter files cannot
+assume a single owner. A 0644 file written by one uid cannot be reopened for writing by
+the next, which silently stopped the counter advancing and made the hourly caps
+under-count. Counters are therefore written as a temp file renamed into place (needs
+permission on the **directory**, not the file) and left mode 0666.
+
+This is also why `/var/lib/ses-gmail-forward` is 0777. That is a deliberate trade-off,
+not an oversight: any local account on the host can therefore edit a counter, which at
+worst lets it suppress forwarding for an hour by setting one high. On a box with ~91 site
+accounts that is worth knowing, but the alternative — a fixed uid for the pipe — is a
+DirectAdmin/Exim change, and a local account with code execution has larger levers than
+this. The directory is **not** sticky, which the rename depends on.
+
+`Rate-limit state unwritable` in the log now alerts through the health check: the limiter
+fails open, so nothing else would ever report that the control had stopped working.
+
 ### Why the pipe always exits 0
 
 Exim reads a nonzero pipe exit — or anything on stdout/stderr — as delivery failure, and
