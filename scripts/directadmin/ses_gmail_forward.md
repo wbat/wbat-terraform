@@ -322,11 +322,60 @@ done
 | SMTP server | `email-smtp.us-east-1.amazonaws.com` |
 | Port | `587` + TLS |
 | Auth | SES SMTP username/password |
-| Treat as alias | Yes (for your domain addresses) |
+| Treat as alias | **No** — see below |
+| Entries needed | one per allowlisted domain, not just the busiest one |
 | Default Send mail as | Domain address (e.g. `user1@example.com`) |
-| When replying | Always reply from default address |
+| When replying | Reply from the same address the message was sent to — see below |
 
 Profile photo for `@example.com` From in Gmail recipients is limited without Google Workspace.
+
+### Treat as alias must be off, or Reply-All disappears
+
+This is the one Gmail setting that undoes the header work. With **Treat as an alias**
+checked, Gmail counts that address as *you*, and the forwarded copy comes **From** it —
+so Gmail reads the message as one you sent. For your own messages it collapses Reply and
+Reply-All into a single Reply aimed at the recipients, and the Reply-All button is simply
+not offered. Every recipient is still in the headers; there is just no longer a control
+that uses them.
+
+The symptom is per-domain and easy to misread, because it depends on how each address
+happens to be configured rather than on anything in the message:
+
+| `Send mail as` entry for the alias | What Gmail shows on the forwarded copy |
+|---|---|
+| Treat as an alias: **Yes** | Reply only, which goes to everyone |
+| Treat as an alias: **No** | Reply to the sender, Reply-All to everyone |
+| Not listed at all | Reply to the sender, Reply-All to everyone — but your replies go out from your Gmail address, not the domain |
+
+Unchecking it does not affect sending: the address stays in **Send mail as** and still
+authenticates through SES. Two domains funnelling into one inbox should be configured
+the same way, or the same message will behave differently depending on which alias it
+arrived at. Check every alias under Settings → Accounts and Import → Send mail as →
+*edit info*.
+
+### Which address a reply goes out as
+
+Gmail picks the reply identity from the address the message was sent to, and on a
+forwarded copy that is your Gmail address — the alias was swapped out on purpose, because
+leaving it in `To` is what would send a Reply-All back through this pipe as a second copy
+of itself. So Gmail will not pick the domain address on its own, however the aliases are
+configured.
+
+That leaves a choice with no clean answer, and it is worth making deliberately:
+
+| `When replying` | Result |
+|---|---|
+| Reply from the same address the message was sent to | Consistent across domains, but replies leave as your Gmail address unless you change the From dropdown |
+| Always reply from default address | Deterministic, but brands *every* reply with one domain, including replies to mail that arrived at the other |
+
+With more than one domain in play the first is the safer default, with the From dropdown
+switched by hand where the domain matters. The second is only right if one domain is the
+only one you ever reply as.
+
+Adding an address here sends a confirmation code to it. That code reaches the **mailbox**
+regardless, because Exim delivers it independently of this pipe — but it may never reach
+Gmail, since auto-generated mail is deliberately skipped (see
+[Skip guards](#skip-guards-pipe--ses)). Read it in Roundcube rather than resending.
 
 ## What not to do
 
