@@ -25,8 +25,10 @@ import email
 import email.policy
 import email.utils
 import importlib.util
+import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import types
@@ -45,6 +47,92 @@ GMAIL = "brian.personal@gmail.example"
 SENDER = "alice@sender.example"
 OTHER_TO = "bob@other.example"
 OTHER_CC = "carol@third.example"
+# An SMTPUTF8 address (RFC 6531). formataddr() refuses to render one, so it is the
+# shape of recipient that can turn the header rewrite into a bounce.
+UTF8_TO = "bj\u00f6rn@other.example"
+UTF8_HEADER = f"=?utf-8?q?Bj=C3=B6rn?= <{UTF8_TO}>"
+
+PYLIB = SANDBOX / "pylib"
+FAKE_BOTO3 = '''
+import os
+
+class _Secrets:
+    def get_secret_value(self, SecretId=None):
+        return {"SecretString": os.environ["FAKE_SES_CONFIG"]}
+
+class _Ses:
+    def send_raw_email(self, **kwargs):
+        if os.environ.get("FAKE_SES_MODE") == "boom":
+            raise ValueError("unexpected SDK failure that is not a ClientError")
+        with open(os.environ["FAKE_SES_OUT"], "ab") as handle:
+            handle.write(kwargs["RawMessage"]["Data"])
+        return {"MessageId": "proof"}
+
+def client(name, **kwargs):
+    return _Secrets() if name == "secretsmanager" else _Ses()
+'''
+
+
+def run_pipe(raw: bytes, mode: str = "ok", recipient: str = ALIAS, script: Path = SCRIPT) -> dict:
+    """Run the real script the way Exim does: argv recipient, message on stdin.
+
+    boto3 is a fake module on PYTHONPATH rather than a stub inside this process, so the
+    exit code and the streams are the genuine article -- which is the only way to assert
+    the property Exim actually cares about.
+    """
+    (PYLIB / "botocore").mkdir(parents=True, exist_ok=True)
+    (PYLIB / "boto3.py").write_text(FAKE_BOTO3)
+    (PYLIB / "botocore" / "__init__.py").write_text("")
+    (PYLIB / "botocore" / "exceptions.py").write_text("class ClientError(Exception):\n    pass\n")
+
+    sent = SANDBOX / "pipe-sent.eml"
+    log = SANDBOX / "pipe.log"
+    for path in (sent, log):
+        path.unlink(missing_ok=True)
+    env = dict(os.environ)
+    env.update(
+        {
+            "PYTHONPATH": str(PYLIB),
+            "SES_GMAIL_FORWARD_LOG": str(log),
+            "SES_GMAIL_FORWARD_STATE": str(SANDBOX / "pipe-state"),
+            "FAKE_SES_OUT": str(sent),
+            "FAKE_SES_MODE": mode,
+            "FAKE_SES_CONFIG": json.dumps({"gmail_destination": GMAIL, "recipients": [ALIAS]}),
+        }
+    )
+    proc = subprocess.run(
+        [sys.executable, str(script), recipient],
+        input=raw,
+        env=env,
+        capture_output=True,
+        check=False,
+    )
+    return {
+        "code": proc.returncode,
+        "stdout": proc.stdout,
+        "stderr": proc.stderr,
+        "sent": sent.read_bytes() if sent.exists() else b"",
+        "log": log.read_text() if log.exists() else "",
+    }
+
+
+def raw_message(to: str) -> bytes:
+    return (
+        f"From: Alice Sender <{SENDER}>\n"
+        f"To: {to}\n"
+        "Subject: quarterly numbers\n"
+        "Date: Mon, 1 Sep 2025 09:00:00 -0400\n"
+        "\n"
+        "See attached.\n"
+    ).encode()
+
+
+def is_ascii(raw: bytes) -> bool:
+    try:
+        raw.decode("ascii")
+        return True
+    except UnicodeDecodeError:
+        return False
 
 
 def _stub_aws() -> None:
@@ -183,6 +271,16 @@ assert_that(
 out = forward(mod, message(to=f"{ALIAS}, {sibling}"), reply_to_all=True, local_addrs={ALIAS, sibling})
 assert_that("reply_to_all does not aim a reply at your other alias", sibling not in addrs(out, "Reply-To"))
 
+print("\nSMTPUTF8 recipients (formataddr refuses these, and a raise here is a bounce)")
+out = forward(mod, message(to=f"{ALIAS}, {UTF8_HEADER}, {OTHER_TO}"))
+assert_that("one unrenderable address does not cost the renderable ones", addrs(out, "To") == [GMAIL, OTHER_TO])
+assert_that("it is kept out of To, which has to stay ASCII", UTF8_TO not in addrs(out, "To"))
+assert_that("but X-Original-To still records it", UTF8_TO in addrs(out, "X-Original-To"))
+assert_that("the copy handed to SES is 7-bit clean", is_ascii(out.as_bytes()))
+out = forward(mod, message(to=OTHER_TO, cc=f"{ALIAS}, {UTF8_HEADER}"))
+assert_that("the same holds on Cc", GMAIL in addrs(out, "Cc") and UTF8_TO not in addrs(out, "Cc"))
+assert_that("and Cc's copy is recorded too", UTF8_TO in addrs(out, "X-Original-Cc"))
+
 print("\nquoting (a mangled header is a silently wrong recipient list)")
 out = forward(mod, message(to=f'{ALIAS}, "Other, Bob" <{OTHER_TO}>'))
 assert_that("a comma inside a display name does not split into two recipients", addrs(out, "To") == [GMAIL, OTHER_TO])
@@ -293,23 +391,77 @@ assert_that(
     OTHER_TO in addrs(delivered, "To") and OTHER_CC in addrs(delivered, "Cc"),
 )
 
-print("\nnegative value: the To assertion is load-bearing")
-mutant_path = SANDBOX / "mutant.py"
+print("\nthe pipe itself (a nonzero exit or a byte on stderr is an Exim bounce)")
+run = run_pipe(raw_message(f"{ALIAS}, {OTHER_TO}"))
+assert_that("a normal message exits 0", run["code"] == 0)
+assert_that("and writes nothing to stdout or stderr", run["stdout"] == b"" and run["stderr"] == b"")
+assert_that("and the other To recipient reaches Gmail", OTHER_TO.encode() in run["sent"])
+run = run_pipe(raw_message(f"{ALIAS}, {UTF8_HEADER}, {OTHER_TO}"))
+assert_that("an SMTPUTF8 recipient does not bounce the delivery", run["code"] == 0)
+assert_that("nor leak a traceback to stderr", run["stderr"] == b"")
+assert_that("the Gmail copy is still sent", OTHER_TO.encode() in run["sent"])
+assert_that("and the omission is logged", "SMTPUTF8" in run["log"])
+run = run_pipe(raw_message(f"{ALIAS}, {OTHER_TO}"), mode="boom")
+assert_that("an unexpected exception anywhere still exits 0", run["code"] == 0)
+assert_that("with nothing on stderr", run["stderr"] == b"")
+assert_that("nothing is sent, since the send is what failed", run["sent"] == b"")
+assert_that(
+    "and it is logged at ERROR, which is what the health check greps for",
+    " ERROR " in run["log"],
+)
+
+print("\nnegative value: these assertions are load-bearing")
 source = SCRIPT.read_text()
-needle = "    kept_to = _render_new(to_pairs, seen)\n"
-assert_that("the mutation target still exists in the script", needle in source)
-mutant_path.write_text(source.replace(needle, "    kept_to = []\n"))
-mutant = load(mutant_path, "ses_gmail_forward_mutant")
-assert_that("the mutant differs from the original", mutant_path.read_text() != source)
-mutated = forward(mutant)
-assert_that(
-    "dropping the other To recipients is what this proof would catch",
-    OTHER_TO not in addrs(mutated, "To"),
+
+
+def mutate(name: str, needle: str, replacement: str) -> Path | None:
+    """Write a copy of the real script with one line changed, or fail loudly if that
+    line has moved -- a proof whose mutant no longer mutates passes for free."""
+    assert_that(f"the mutation target for {name} still exists", needle in source)
+    if needle not in source:
+        return None
+    path = SANDBOX / f"mutant_{name}.py"
+    path.write_text(source.replace(needle, replacement))
+    return path
+
+# 1. Restore the old rewrite that dropped the other To recipients.
+mutant_path = mutate(
+    "dropped_to",
+    "    kept_to = _render_new(to_pairs, seen, unencodable)\n",
+    "    kept_to = []\n",
 )
-assert_that(
-    "and the mutant still looks fine to a reader of the Gmail copy",
-    addrs(mutated, "To") == [GMAIL],
+if mutant_path:
+    mutated = forward(load(mutant_path, "ses_gmail_forward_mutant"))
+    assert_that(
+        "dropping the other To recipients is what this proof would catch",
+        OTHER_TO not in addrs(mutated, "To"),
+    )
+    assert_that(
+        "and the mutant still looks fine to a reader of the Gmail copy",
+        addrs(mutated, "To") == [GMAIL],
+    )
+
+# 2. Call formataddr directly again, the way the SMTPUTF8 bug did. The guard now keeps
+#    that from bouncing, which is exactly why it needs its own assertion: the failure
+#    mode degrades from a bounce to a Gmail copy that never arrives and never explains
+#    itself, and only the log says so.
+utf8_path = mutate(
+    "raises_on_utf8",
+    "        rendered = _render_addr(name, addr)\n",
+    "        rendered = formataddr((name, addr))\n",
 )
+if utf8_path:
+    run = run_pipe(raw_message(f"{ALIAS}, {UTF8_HEADER}, {OTHER_TO}"), script=utf8_path)
+    assert_that("the guard still keeps that from bouncing", run["code"] == 0)
+    assert_that("but the Gmail copy is lost outright", run["sent"] == b"")
+    assert_that("with only the log to say why", " ERROR " in run["log"])
+
+# 3. Remove the exit guard, so an unexpected exception reaches Exim again.
+guard_path = mutate("no_guard", "        sys.exit(0)\n", "        raise\n")
+if guard_path:
+    run = run_pipe(raw_message(f"{ALIAS}, {OTHER_TO}"), mode="boom", script=guard_path)
+    assert_that("without the guard the same failure exits nonzero", run["code"] != 0)
+    assert_that("and puts a traceback on stderr, which is the bounce", b"Traceback" in run["stderr"])
 
 shutil.rmtree(SANDBOX, ignore_errors=True)
 print()

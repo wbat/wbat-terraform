@@ -75,6 +75,17 @@ reason: they all forward into the same Gmail inbox, so a message addressed to tw
 your aliases would otherwise turn one Reply-All into another copy arriving back through
 this pipe. `X-Original-To` still records that it was addressed to both.
 
+An **SMTPUTF8** recipient (RFC 6531 — non-ASCII in the address itself, not just the
+display name) cannot go in `To`/`Cc` at all: there is no ASCII form of one, and trying
+to render it is what would otherwise raise inside the pipe and bounce a message
+Roundcube already has. Those addresses are left out of `To`/`Cc`, kept in
+`X-Original-To`/`X-Original-Cc` — unstructured headers, so an encoded word is legal
+there — and logged:
+
+```text
+WARNING Omitted 1 non-ASCII (SMTPUTF8) recipient(s) from forwarded To/Cc: bj\xf6rn@…
+```
+
 ### When a plain Reply should reach everyone
 
 By default `Reply-To` is the sender alone, so **Reply** goes to the sender and
@@ -169,6 +180,19 @@ skip reasons — newsletters and list mail commonly set them and should still re
 
 Rate-limit counters increment **only after a successful** `SendRawEmail`, so SES
 failures do not burn quota.
+
+### Why the pipe always exits 0
+
+Exim reads a nonzero pipe exit — or anything on stdout/stderr — as delivery failure, and
+bounces the message **even though Roundcube already accepted it**. So every path here
+exits 0, including the ones nobody anticipated: an unhandled exception is logged at
+`ERROR` and swallowed rather than allowed to become a traceback. That is not silence,
+because `ERROR` is exactly what the health check greps for; it is loud toward us and
+quiet toward Exim. Logging itself is also set not to report handler failures, since
+those go to stderr too.
+
+The cost of that safety is that a bug shows up as a Gmail copy that never arrives, not
+as a bounce, so `/var/log/ses-gmail-forward.log` is the only place it is visible.
 
 ## Gmail (outbound)
 

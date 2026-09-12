@@ -59,9 +59,13 @@ _MAILER_DAEMON_RE = re.compile(
 
 
 def _setup_logging() -> logging.Logger:
+    # A handler that cannot encode or write its record reports that on stderr, and Exim
+    # reads anything on stderr as pipe failure. Neither a log line nor a log failure is
+    # worth bouncing a delivered message over.
+    logging.raiseExceptions = False
     handlers: list[logging.Handler] = []
     try:
-        handlers.append(logging.FileHandler(LOG_PATH))
+        handlers.append(logging.FileHandler(LOG_PATH, encoding="utf-8"))
     except OSError:
         pass
     if sys.stderr.isatty():
@@ -250,7 +254,26 @@ def _addr_pairs(values: list) -> list[tuple[str, str]]:
     return pairs
 
 
-def _render_new(pairs: list[tuple[str, str]], seen: set[str]) -> list[str]:
+def _render_addr(name: str, addr: str) -> str | None:
+    """RFC 5322 form of one address, or None when the address itself is not ASCII.
+
+    An SMTPUTF8 address (RFC 6531) such as bjorn-with-an-umlaut@example.net has no
+    representation in an ordinary address header, and formataddr raises rather than
+    invent one. Letting that raise would exit the pipe nonzero, which Exim turns into
+    a bounce of a message Roundcube has already accepted -- the one outcome this
+    script exists to avoid. Callers leave these out of To/Cc and report them instead.
+    """
+    try:
+        return formataddr((name, addr))
+    except UnicodeEncodeError:
+        return None
+
+
+def _render_new(
+    pairs: list[tuple[str, str]],
+    seen: set[str],
+    unencodable: list[str] | None = None,
+) -> list[str]:
     """Render pairs whose address is not already in `seen`, adding each to `seen`."""
     out: list[str] = []
     for name, addr in pairs:
@@ -258,8 +281,20 @@ def _render_new(pairs: list[tuple[str, str]], seen: set[str]) -> list[str]:
         if low in seen:
             continue
         seen.add(low)
-        out.append(formataddr((name, addr)))
+        rendered = _render_addr(name, addr)
+        if rendered is None:
+            if unencodable is not None:
+                unencodable.append(addr)
+            continue
+        out.append(rendered)
     return out
+
+
+def _original_addr_list(pairs: list[tuple[str, str]]) -> str:
+    """Audit-trail form for X-Original-*, which unlike To/Cc can hold an SMTPUTF8
+    address: those are unstructured headers, so a non-ASCII address survives there as
+    an encoded word and the record of who the message went to stays complete."""
+    return ", ".join(_render_addr(name, addr) or addr for name, addr in pairs)
 
 
 def _build_forward_raw(
@@ -291,8 +326,18 @@ def _build_forward_raw(
     # (Destinations= below), never these headers, so carrying the other recipients
     # through cannot send mail to any of them.
     seen = set(local)
-    kept_to = _render_new(to_pairs, seen)
-    kept_cc = _render_new(cc_pairs, seen)
+    unencodable: list[str] = []
+    kept_to = _render_new(to_pairs, seen, unencodable)
+    kept_cc = _render_new(cc_pairs, seen, unencodable)
+    if unencodable:
+        # backslashreplace: a raw non-ASCII address in a log record can fail the
+        # handler's own encode, and logging reports that on stderr -- which Exim reads
+        # as pipe failure just like a traceback would.
+        logger.warning(
+            "Omitted %d non-ASCII (SMTPUTF8) recipient(s) from forwarded To/Cc: %s",
+            len(unencodable),
+            ", ".join(a.encode("ascii", "backslashreplace").decode("ascii") for a in unencodable),
+        )
 
     # Substitute the Gmail address for the alias in whichever header carried it, so
     # "cc me" does not read as "to me" and Gmail still drops it from Reply-All.
@@ -333,9 +378,9 @@ def _build_forward_raw(
         msg["Reply-To"] = ", ".join(reply_to)
     msg["X-Original-From"] = original_from
     if to_pairs:
-        msg["X-Original-To"] = ", ".join(formataddr(p) for p in to_pairs)
+        msg["X-Original-To"] = _original_addr_list(to_pairs)
     if cc_pairs:
-        msg["X-Original-Cc"] = ", ".join(formataddr(p) for p in cc_pairs)
+        msg["X-Original-Cc"] = _original_addr_list(cc_pairs)
     msg["X-Forwarded-To"] = gmail_dest
     msg["X-Forwarded-For"] = from_addr
     msg[_PIPE_MARKER_HEADER] = _PIPE_MARKER_VALUE
@@ -429,4 +474,13 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    try:
+        sys.exit(main(sys.argv))
+    except Exception:  # noqa: BLE001
+        # Same reason main() returns 0 on every handled path, extended to the paths
+        # nobody anticipated: a traceback exits nonzero and prints to stderr, and Exim
+        # turns either into a bounce of a message Roundcube already has. ERROR is what
+        # ses_gmail_forward_health.sh greps for, so this is quiet toward Exim and loud
+        # toward us rather than silent.
+        logger.exception("Unhandled error; exiting 0 so Exim does not bounce")
+        sys.exit(0)
