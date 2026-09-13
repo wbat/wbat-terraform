@@ -117,7 +117,7 @@ assert_that "the domain itself is in the config, which is what would hide this" 
   "$(grep -q '^tellerstech.example ' "${SANDBOX}/managed.conf" && echo yes || echo no)"
 
 echo
-echo "a whole unmanaged domain carrying the pipe (the origin.aws case)"
+echo "a whole unmanaged domain carrying the pipe (a real directory, not a pointer)"
 reset_fixtures
 mkdir -p "${SANDBOX}/virtual/origin.cdn.example"
 {
@@ -150,6 +150,30 @@ reset_fixtures
 } >"${SANDBOX}/virtual/wbat.example/aliases"
 result="$(run_health)"
 assert_lacks "a plain forwarder with no pipe is not reported as unmanaged" "$result" "unmanaged_pipe_alias"
+
+echo
+echo "a DirectAdmin domain pointer (one aliases file under two names)"
+# DA points a domain at another by symlinking the whole directory, so /etc/virtual/*/aliases
+# matches the same inode twice and every managed address is also "found" at the pointer's
+# name, where it is not allowlisted. Reporting that is a false positive nobody can act on --
+# and acting on it, by editing the pointer's path, rewrites the target domain's file.
+reset_fixtures
+ln -s tellerstech.example "${SANDBOX}/virtual/origin.cdn.example"
+assert_that "the fixture really is a symlink to the target domain" \
+  "$([[ -L "${SANDBOX}/virtual/origin.cdn.example" ]] && echo yes || echo no)"
+assert_that "and both names reach one inode" \
+  "$([[ "$(stat -c %i "${SANDBOX}/virtual/origin.cdn.example/aliases")" == "$(stat -c %i "${SANDBOX}/virtual/tellerstech.example/aliases")" ]] && echo yes || echo no)"
+result="$(run_health)"
+assert_lacks "the pointer's addresses are not invented as unmanaged aliases" "$result" "origin.cdn.example"
+assert_lacks "nor is anything else reported" "$result" "unmanaged_pipe_alias"
+assert_contains "so a host with a pointer domain still passes" "$result" "exit=0"
+
+# The filter must not become a way to hide a real stale alias: a genuine one on the target
+# domain is still caught while the pointer exists.
+echo "sales: ${PIPE}" >>"${SANDBOX}/virtual/tellerstech.example/aliases"
+result="$(run_health)"
+assert_contains "a real stale alias is still caught with a pointer present" "$result" "unmanaged_pipe_alias:sales@tellerstech.example"
+assert_lacks "and is reported under the real domain, not the pointer" "$result" "sales@origin.cdn.example"
 
 echo
 echo "check 5 still works (the reverse direction, after rerooting it)"
@@ -207,6 +231,29 @@ then
   assert_contains "and would call the host healthy while it discards mail" "$result" "exit=0"
 else
   assert_that "the mutation target still exists" no
+fi
+
+# The symlink filter is the other half: without it, a pointer domain alerts forever.
+mutant2="${SANDBOX}/mutant-follows-pointers.sh"
+if python3 - "$SCRIPT" "$mutant2" <<'PY'
+import sys
+
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+old = '    [[ -L "$(dirname "$candidate")" ]] && continue\n'
+if old not in text:
+    sys.exit(1)
+open(dst, "w").write(text.replace(old, "", 1))
+PY
+then
+  assert_that "the symlink filter is still there to remove" yes
+  reset_fixtures
+  ln -s tellerstech.example "${SANDBOX}/virtual/origin.cdn.example"
+  result="$(run_health "$mutant2")"
+  assert_contains "without it a pointer domain is reported as a black-holed address" "$result" "unmanaged_pipe_alias:brian@origin.cdn.example"
+  assert_contains "which would fail the check on a healthy host, every five minutes" "$result" "exit=1"
+else
+  assert_that "the symlink filter is still there to remove" no
 fi
 
 echo

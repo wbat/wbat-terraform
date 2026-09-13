@@ -201,11 +201,17 @@ address goes on quietly discarding mail. Compare full addresses instead:
 
 ```bash
 pipe_addrs() {
-  awk -F: '/ses-gmail-forward/ && $0 !~ /^[[:space:]]*#/ {
-    n = split(FILENAME, p, "/"); a = $1
-    gsub(/^[[:space:]]+|[[:space:]]+$/, "", a)
-    print tolower(a "@" p[n-1])
-  }' /etc/virtual/*/aliases | sort -u
+  for f in /etc/virtual/*/aliases; do
+    [[ -f "$f" ]] || continue
+    # Skip DirectAdmin domain pointers; see below. Their aliases file is the target
+    # domain's, so counting it again under the pointer's name invents addresses.
+    [[ -L "$(dirname "$f")" ]] && continue
+    awk -F: -v dom="$(basename "$(dirname "$f")")" '
+      /ses-gmail-forward/ && $0 !~ /^[[:space:]]*#/ {
+        a = $1; gsub(/^[[:space:]]+|[[:space:]]+$/, "", a)
+        print tolower(a "@" dom)
+      }' "$f"
+  done | sort -u
 }
 allowlist() {
   aws secretsmanager get-secret-value \
@@ -220,16 +226,68 @@ comm -13 <(pipe_addrs) <(allowlist)   # allowlisted, not piped: no Gmail copy, s
 ```
 
 The first list is the dangerous one and should be empty. Anything in it is either a
-missing allowlist entry or an alias that should be deleted — parked domains that exist
-only as a CDN origin or a vhost are the second case, so remove the pipe from them and drop
-their now-dead `via_labels` entry. The second list loses nothing (Exim still delivers to
-the mailbox) but means Gmail never sees that address.
+missing allowlist entry or a genuinely stale alias — but read the next section before
+deleting anything, because one shape of entry must **not** be fixed that way. The second
+list loses nothing (Exim still delivers to the mailbox) but means Gmail never sees that
+address.
 
 The health check runs the same comparison against `managed-aliases.conf` every 5 minutes
 and reports `unmanaged_pipe_alias:<address>`, so a stale alias is caught without anyone
 remembering to audit. It deliberately reads the local desired-state file rather than the
 secret, to keep an AWS credential out of the cron path — which is why the comparison above
 against the real allowlist is still worth running by hand after editing either one.
+
+### Domain pointers share one aliases file — never edit the pointer's path
+
+A DirectAdmin **domain pointer** is a symlink, not a copy:
+
+```console
+$ ls -ld /etc/virtual/origin.aws.tellerstech.com
+lrwxrwxrwx 1 mail mail 15 … /etc/virtual/origin.aws.tellerstech.com -> tellerstech.com
+
+$ ls -li /etc/virtual/{tellerstech.com,origin.aws.tellerstech.com}/aliases
+64706539 -rw------- … /etc/virtual/origin.aws.tellerstech.com/aliases
+64706539 -rw------- … /etc/virtual/tellerstech.com/aliases      # same inode
+```
+
+Two consequences, both of which have already bitten:
+
+**Editing the pointer's path edits the target's file.** `sed -i` on
+`/etc/virtual/origin.aws.tellerstech.com/aliases` resolves the directory symlink and
+rewrites `tellerstech.com`'s aliases — so "removing the parked domain's forwarders"
+silently removed forwarding for the live domain instead. This happened on
+2026-09-12: `brian@` and `bteller@tellerstech.com` lost their pipe until the enforcer
+restored it (`FIXED tellerstech.com: restored pipe aliases`) about 80 seconds later,
+which is precisely the drift the enforcer and its cron exist to catch. No mail was
+delivered to either address in the gap, so nothing was lost — by luck, not design.
+
+**A naive `/etc/virtual/*/aliases` glob counts that file once per name.** Every managed
+address is then also "found" at the pointer's domain, where it is not allowlisted, and
+gets reported as a black-holed address that does not exist. The audit above and health
+check 6 both skip symlinked domain directories for this reason. Without that filter this
+host reported six piped addresses when it has four:
+
+```text
+brian@origin.aws.tellerstech.com     ← not real; same file as the line below
+brian@tellerstech.com
+bteller@origin.aws.tellerstech.com   ← not real
+bteller@tellerstech.com
+brian@wbat.net
+bteller@wbat.net
+```
+
+Mail addressed to a pointer domain *is* still accepted and discarded, because the domain
+is in `/etc/virtual/domains` and its shared aliases carry the pipe while the address is
+not in `recipients`. That is real but not fixable here: the remedies are to allowlist the
+address, or to remove the pointer's mail handling in DirectAdmin. Editing the aliases file
+is never one of them. For a pointer that exists only as a CDN origin or vhost hostname and
+receives no mail, leaving it alone is the right answer.
+
+List the pointers on a host before believing any per-domain finding:
+
+```bash
+find /etc/virtual -maxdepth 1 -type l -printf '%p -> %l\n'
+```
 
 ### Persist against Forwarders UI rewrites
 

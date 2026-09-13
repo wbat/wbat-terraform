@@ -127,7 +127,18 @@ if [[ -f "$MANAGED" ]]; then
   ' "$MANAGED" | sort -u)"
   # A glob that matches nothing must not become a literal path argument to awk.
   shopt -s nullglob
-  alias_files=("$VIRTUAL_ROOT"/*/aliases)
+  alias_files=()
+  for candidate in "$VIRTUAL_ROOT"/*/aliases; do
+    # A DirectAdmin domain pointer is a symlink to the target domain's directory, so the
+    # same aliases file appears under both names and every managed address would also be
+    # seen at the pointer's name -- reported as unmanaged, every five minutes, forever.
+    # An alert nobody can act on is an alert everybody ignores, and the remedy is never to
+    # edit this file: it belongs to the target domain, so deleting the pointer's "copy"
+    # deletes the real one. Count it once, under the domain that owns it.
+    [[ -L "$(dirname "$candidate")" ]] && continue
+    [[ -f "$candidate" ]] || continue
+    alias_files+=("$candidate")
+  done
   shopt -u nullglob
   if [[ ${#alias_files[@]} -gt 0 ]]; then
     piped_addrs="$(awk -F: '
