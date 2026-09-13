@@ -310,19 +310,41 @@ brian@origin.aws.tellerstech.com
 ```
 
 The pointer's local-parts share the target's `passwd`, so they have mailboxes and `unseen`
-gives each one a Maildir copy — `/home/tellerstec/imap/origin.aws.tellerstech.com/brian`
-holds 9.3M of exactly that. Mail to a pointer address is therefore **not** lost; it simply
-never reaches Gmail, which is why check 6 logs it as a `NOTE` instead of failing.
+gives each one a Maildir copy. That copy is **not** in a separate pointer mailbox: the mail
+store is symlinked exactly like the config directory, so it lands in the target's Maildir —
+the one already open in Roundcube.
+
+```console
+$ ls -ld /home/tellerstec/imap/origin.aws.tellerstech.com
+lrwxrwxrwx 1 tellerstec mail 15 … origin.aws.tellerstech.com -> tellerstech.com
+
+$ ls -ldi /home/tellerstec/imap/{tellerstech.com,origin.aws.tellerstech.com}/brian/Maildir/cur
+358646309 drwx------ … origin.aws.tellerstech.com/brian/Maildir/cur
+358646309 drwx------ … tellerstech.com/brian/Maildir/cur         # same inode
+```
+
+Mail to a pointer address is therefore **not** lost, and there is no second inbox to go
+read — which is why check 6 logs it as a `NOTE` instead of failing. The only thing missing
+is the Gmail copy.
+
+Do not read that shared store as proof the pointer is *receiving* anything. Every message
+in it currently carries `Delivered-To: brian@tellerstech.com`, so no pointer-addressed mail
+has actually arrived; the `NOTE` describes an address the config would accept, not observed
+traffic. Confirm with `grep -m1 -i '^Delivered-To:'` over the newest few files before
+treating a `NOTE` as evidence of anything.
 
 The remedies, if you want even the Gmail copy, are to add the pointer address to
 `recipients` or to remove the pointer's mail handling in DirectAdmin. Editing the aliases
 file is never one of them. For a pointer that exists only as a CDN origin hostname,
 leaving it alone is the right answer.
 
-List the pointers on a host before believing any per-domain finding:
+List the pointers on a host before believing any per-domain finding. Both trees are
+symlinked, so check both — the config tree tells you which addresses exist, the mail tree
+tells you where their mail actually lands:
 
 ```bash
 find /etc/virtual -maxdepth 1 -type l -printf '%p -> %l\n'
+find /home/*/imap -maxdepth 1 -type l -printf '%p -> %l\n'
 ```
 
 ### Persist against Forwarders UI rewrites
