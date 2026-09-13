@@ -2,10 +2,13 @@
 # Offline proofs for ses_gmail_forward_health.sh.
 #
 # The check that matters most here is the one that catches an address piping into the
-# forwarder without a matching config entry. That address loses mail outright -- the alias
-# replaces mailbox delivery, the pipe declines an unallowlisted recipient, and it exits 0,
-# so Exim marks the message delivered and nobody is told. Nothing else in the health script
-# can see it, which is why it needs assertions of its own.
+# forwarder without a matching config entry. Whether that loses the message depends on
+# whether the local-part has a mailbox: DA's virtual_forwarder sets unseen= when it does, so
+# the Maildir gets a copy and only the Gmail copy is missing. With no mailbox the pipe is the
+# whole delivery, the unallowlisted recipient is declined, and the pipe exits 0 -- so Exim
+# marks the message delivered and nobody is told. Both halves need asserting: failing on the
+# first would page someone about a healthy host, and passing the second would lose mail
+# quietly. Nothing else in the health script can see either.
 #
 # Runs entirely on fixtures under a sandbox: every path the script reads is overridable by
 # environment variable, including the virtual-domain root.
@@ -75,7 +78,18 @@ EOF
       echo "brian: ${PIPE}"
       echo "bteller: ${PIPE}"
     } >"${SANDBOX}/virtual/${domain}/aliases"
+    # DA's virtual_forwarder only sets unseen (and so only gives the Maildir a copy) when
+    # the local-part is in passwd, which is what decides whether a declined address merely
+    # misses Gmail or loses the message outright.
+    printf 'brian:x:::::\nbteller:x:::::\n' >"${SANDBOX}/virtual/${domain}/passwd"
   done
+}
+
+# add_alias <domain> <localpart> [mailbox]
+add_alias() {
+  echo "$2: ${PIPE}" >>"${SANDBOX}/virtual/$1/aliases"
+  [[ "${3:-}" == "mailbox" ]] && printf '%s:x:::::\n' "$2" >>"${SANDBOX}/virtual/$1/passwd"
+  return 0
 }
 
 # run_health [script] -> prints "exit=<code>" then the reasons line
@@ -94,7 +108,9 @@ run_health() {
       bash "$script" 2>&1
   )"
   code=$?
-  reasons="$(grep -h 'HEALTH FAIL' "${SANDBOX}/health.log" 2>/dev/null | tail -1)"
+  # The whole log, not just the failure line: NOTE lines are how this check reports the
+  # cases it deliberately does not fail on, and those need asserting too.
+  reasons="$(cat "${SANDBOX}/health.log" 2>/dev/null)"
   printf 'exit=%s\n%s\n%s\n' "$code" "$reasons" "$out"
 }
 
@@ -102,19 +118,28 @@ echo "a clean host (the baseline these proofs are measured against)"
 reset_fixtures
 result="$(run_health)"
 assert_contains "a host whose aliases match the config passes" "$result" "exit=0"
-assert_lacks "with no complaint about unmanaged aliases" "$result" "unmanaged_pipe_alias"
+assert_lacks "with no complaint about unmanaged aliases" "$result" "pipe_alias_no_mailbox"
 assert_lacks "and none about the managed ones either" "$result" "bad_alias"
 
 echo
-echo "a stale local-part beside two managed ones (per-domain checking misses this)"
+echo "a stale local-part with no mailbox (the pipe is the whole delivery: mail is lost)"
 reset_fixtures
-echo "sales: ${PIPE}" >>"${SANDBOX}/virtual/tellerstech.example/aliases"
+add_alias tellerstech.example sales
 result="$(run_health)"
-assert_contains "the stale address is reported" "$result" "unmanaged_pipe_alias:sales@tellerstech.example"
+assert_contains "the stale address is reported as losing mail" "$result" "pipe_alias_no_mailbox:sales@tellerstech.example"
 assert_contains "and the check fails" "$result" "exit=1"
-assert_lacks "the managed addresses on that same domain are not reported" "$result" "unmanaged_pipe_alias:brian@tellerstech.example"
-assert_that "the domain itself is in the config, which is what would hide this" \
+assert_lacks "the managed addresses on that same domain are not reported" "$result" "brian@tellerstech.example"
+assert_that "the domain itself is in the config, which is what per-domain checking would hide behind" \
   "$(grep -q '^tellerstech.example ' "${SANDBOX}/managed.conf" && echo yes || echo no)"
+
+echo
+echo "a stale local-part that does have a mailbox (only the Gmail copy is missing)"
+reset_fixtures
+add_alias tellerstech.example sales mailbox
+result="$(run_health)"
+assert_contains "it is reported as a NOTE naming the address" "$result" "NOTE piped but not forwarded, mailbox still receives: sales@tellerstech.example"
+assert_lacks "not as a lost-mail failure, because unseen= gave the Maildir a copy" "$result" "pipe_alias_no_mailbox"
+assert_contains "so the check still passes" "$result" "exit=0"
 
 echo
 echo "a whole unmanaged domain carrying the pipe (a real directory, not a pointer)"
@@ -126,8 +151,8 @@ mkdir -p "${SANDBOX}/virtual/origin.cdn.example"
   echo "bteller: ${PIPE}"
 } >"${SANDBOX}/virtual/origin.cdn.example/aliases"
 result="$(run_health)"
-assert_contains "both of its addresses are reported" "$result" "unmanaged_pipe_alias:brian@origin.cdn.example"
-assert_contains "not just the first one found" "$result" "unmanaged_pipe_alias:bteller@origin.cdn.example"
+assert_contains "both of its addresses are reported" "$result" "pipe_alias_no_mailbox:brian@origin.cdn.example"
+assert_contains "not just the first one found" "$result" "pipe_alias_no_mailbox:bteller@origin.cdn.example"
 assert_contains "and the check fails" "$result" "exit=1"
 
 echo
@@ -135,13 +160,13 @@ echo "false positives (a check that cries wolf gets switched off)"
 reset_fixtures
 echo "#old: ${PIPE}" >>"${SANDBOX}/virtual/wbat.example/aliases"
 result="$(run_health)"
-assert_lacks "a commented-out pipe alias is not a live delivery path" "$result" "unmanaged_pipe_alias"
+assert_lacks "a commented-out pipe alias is not a live delivery path" "$result" "pipe_alias_no_mailbox"
 assert_contains "so the host still passes" "$result" "exit=0"
 
 reset_fixtures
 sed -i "s|^brian: |  brian : |" "${SANDBOX}/virtual/wbat.example/aliases"
 result="$(run_health)"
-assert_lacks "whitespace around a managed local-part does not make it look unmanaged" "$result" "unmanaged_pipe_alias"
+assert_lacks "whitespace around a managed local-part does not make it look unmanaged" "$result" "brian@wbat.example"
 
 reset_fixtures
 {
@@ -149,14 +174,15 @@ reset_fixtures
   echo 'info: someone@elsewhere.example'
 } >"${SANDBOX}/virtual/wbat.example/aliases"
 result="$(run_health)"
-assert_lacks "a plain forwarder with no pipe is not reported as unmanaged" "$result" "unmanaged_pipe_alias"
+assert_lacks "a plain forwarder with no pipe is not reported at all" "$result" "info@wbat.example"
 
 echo
-echo "a DirectAdmin domain pointer (one aliases file under two names)"
-# DA points a domain at another by symlinking the whole directory, so /etc/virtual/*/aliases
-# matches the same inode twice and every managed address is also "found" at the pointer's
-# name, where it is not allowlisted. Reporting that is a false positive nobody can act on --
-# and acting on it, by editing the pointer's path, rewrites the target domain's file.
+echo "a DirectAdmin domain pointer (one aliases file, two recipient identities)"
+# DA points a domain at another by symlinking the whole directory, so the same aliases and
+# passwd are read under each name. localpart@pointer is a recipient Exim accepts in its own
+# right and allowlists separately, so it belongs in the comparison -- but it shares the
+# target's passwd, so it has a mailbox and loses nothing. Reporting it as lost mail would be
+# a permanent false alarm; hiding it entirely would mask a pointer with no mailbox.
 reset_fixtures
 ln -s tellerstech.example "${SANDBOX}/virtual/origin.cdn.example"
 assert_that "the fixture really is a symlink to the target domain" \
@@ -164,16 +190,17 @@ assert_that "the fixture really is a symlink to the target domain" \
 assert_that "and both names reach one inode" \
   "$([[ "$(stat -c %i "${SANDBOX}/virtual/origin.cdn.example/aliases")" == "$(stat -c %i "${SANDBOX}/virtual/tellerstech.example/aliases")" ]] && echo yes || echo no)"
 result="$(run_health)"
-assert_lacks "the pointer's addresses are not invented as unmanaged aliases" "$result" "origin.cdn.example"
-assert_lacks "nor is anything else reported" "$result" "unmanaged_pipe_alias"
+assert_contains "the pointer's addresses are still seen, as a NOTE" "$result" "NOTE piped but not forwarded, mailbox still receives: brian@origin.cdn.example"
+assert_lacks "and not called lost mail, because the shared passwd gives them mailboxes" "$result" "pipe_alias_no_mailbox"
 assert_contains "so a host with a pointer domain still passes" "$result" "exit=0"
 
-# The filter must not become a way to hide a real stale alias: a genuine one on the target
-# domain is still caught while the pointer exists.
-echo "sales: ${PIPE}" >>"${SANDBOX}/virtual/tellerstech.example/aliases"
+# A pointer whose local-part has no mailbox is the case that must still fail: the shared
+# aliases pipe it, nothing gives it a Maildir, and the message is gone.
+add_alias tellerstech.example sales
 result="$(run_health)"
-assert_contains "a real stale alias is still caught with a pointer present" "$result" "unmanaged_pipe_alias:sales@tellerstech.example"
-assert_lacks "and is reported under the real domain, not the pointer" "$result" "sales@origin.cdn.example"
+assert_contains "a mailbox-less local-part is caught on the real domain" "$result" "pipe_alias_no_mailbox:sales@tellerstech.example"
+assert_contains "and again at the pointer, which is a separate recipient" "$result" "pipe_alias_no_mailbox:sales@origin.cdn.example"
+assert_contains "so the check fails" "$result" "exit=1"
 
 echo
 echo "check 5 still works (the reverse direction, after rerooting it)"
@@ -194,12 +221,12 @@ rm -rf "${SANDBOX}/virtual"
 mkdir -p "${SANDBOX}/virtual"
 result="$(run_health)"
 assert_lacks "an empty virtual root does not glob a literal path into awk" "$result" "No such file"
-assert_lacks "nor report a nonexistent address" "$result" "unmanaged_pipe_alias:"
+assert_lacks "nor report a nonexistent address" "$result" "pipe_alias_no_mailbox:"
 
 reset_fixtures
 rm -f "${SANDBOX}/managed.conf"
 result="$(run_health)"
-assert_lacks "a missing desired-state file reports nothing rather than everything" "$result" "unmanaged_pipe_alias"
+assert_lacks "a missing desired-state file reports nothing rather than everything" "$result" "pipe_alias_no_mailbox"
 assert_lacks "and does not crash" "$result" "unbound variable"
 
 echo
@@ -227,33 +254,36 @@ then
   reset_fixtures
   echo "sales: ${PIPE}" >>"${SANDBOX}/virtual/tellerstech.example/aliases"
   result="$(run_health "$mutant")"
-  assert_lacks "comparing domains is what would miss the stale address" "$result" "unmanaged_pipe_alias"
+  assert_lacks "comparing domains is what would miss the stale address" "$result" "pipe_alias_no_mailbox"
   assert_contains "and would call the host healthy while it discards mail" "$result" "exit=0"
 else
   assert_that "the mutation target still exists" no
 fi
 
-# The symlink filter is the other half: without it, a pointer domain alerts forever.
-mutant2="${SANDBOX}/mutant-follows-pointers.sh"
+# The mailbox test is the other half. Treating every declined address as lost mail is the
+# version that would page someone every five minutes about a pointer domain that is fine.
+mutant2="${SANDBOX}/mutant-ignores-mailbox.sh"
 if python3 - "$SCRIPT" "$mutant2" <<'PY'
 import sys
 
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-old = '    [[ -L "$(dirname "$candidate")" ]] && continue\n'
+old = '      if [[ -f "$passwd_file" ]] && grep -qE "^${lp}:" "$passwd_file" 2>/dev/null; then\n'
 if old not in text:
     sys.exit(1)
-open(dst, "w").write(text.replace(old, "", 1))
+open(dst, "w").write(text.replace(old, "      if false; then\n", 1))
 PY
 then
-  assert_that "the symlink filter is still there to remove" yes
+  assert_that "the mailbox test is still there to remove" yes
   reset_fixtures
   ln -s tellerstech.example "${SANDBOX}/virtual/origin.cdn.example"
   result="$(run_health "$mutant2")"
-  assert_contains "without it a pointer domain is reported as a black-holed address" "$result" "unmanaged_pipe_alias:brian@origin.cdn.example"
+  assert_contains "without it a pointer domain is called lost mail" "$result" "pipe_alias_no_mailbox:brian@origin.cdn.example"
   assert_contains "which would fail the check on a healthy host, every five minutes" "$result" "exit=1"
+  assert_that "while the real script passes the same fixture" \
+    "$(case "$(run_health)" in *exit=0*) echo yes ;; *) echo no ;; esac)"
 else
-  assert_that "the symlink filter is still there to remove" no
+  assert_that "the mailbox test is still there to remove" no
 fi
 
 echo

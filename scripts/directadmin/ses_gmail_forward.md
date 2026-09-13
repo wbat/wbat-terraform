@@ -187,13 +187,43 @@ Do **not** use bare `user` or `\user@domain` in the alias — those fail on this
 
 ### Only put the pipe on addresses that are in `recipients`
 
-The alias *replaces* mailbox delivery rather than adding to it, so the pipe is the only
-thing that runs. An address whose alias carries the pipe but which is missing from the
-`recipients` allowlist is therefore black-holed: the pipe declines to forward it, exits 0
-because it always does, and Exim considers the delivery done — no SES copy, no Maildir
-copy, no bounce. That decline is `logger.info`, not a `skip_ses` reason, so the health
-check does not alert on it either. Losing mail silently is the worst failure this pipe
-has, and it is reached by adding a forwarder in the DA UI without touching the secret.
+An address whose alias carries the pipe but which is missing from the `recipients`
+allowlist is declined: no Gmail copy, and the decline is `logger.info` rather than a
+`skip_ses` reason, so nothing alerts on it by itself. Whether that also *loses* the
+message turns on one thing — whether the local-part has a mailbox. DA's `virtual_forwarder`
+router decides it:
+
+```text
+# pass a copy of the email to the next 'virtual_mailbox' router if this address is also a mailbox
+unseen = ${if and {                                                                              \
+             {exists{/etc/virtual/${domain_data}/passwd}}                                        \
+             {bool {${lookup {$local_part} lsearch {/etc/virtual/${domain_data}/passwd} {yes}}}} \
+             {!eq                                                                                \
+                 {${lookup {$local_part} lsearch {/etc/virtual/$domain_data/aliases}}}           \
+                 {$local_part}                                                                   \
+             }                                                                                   \
+         }{yes}{no}}
+```
+
+An `unseen` redirect lets routing continue, so with a mailbox the Maildir gets a copy as
+well as the pipe — which is exactly why Roundcube has the message even when the pipe skips
+(see [Skip guards](#skip-guards-pipe--ses)). Confirm per address rather than assuming:
+
+```bash
+exim -bt user1@example.com    # expect both virtual_address_pipe and dovecot_lmtp_udp
+```
+
+So there are two cases, and only one is an emergency:
+
+| Piped, not allowlisted | Mailbox? | Result |
+|---|---|---|
+| yes | yes | No Gmail copy; message still delivered and readable in Roundcube |
+| yes | **no** | The pipe is the whole delivery, so the message is **discarded** — no SES copy, no Maildir copy, and no bounce, because the pipe always exits 0 |
+
+The second row is the worst failure this pipe has, and it is reached by adding a forwarder
+in the DA UI for a local-part that has no mailbox. Health check 6 fails only on that row
+(`pipe_alias_no_mailbox:<address>`) and logs the first as a `NOTE`, so the one alert it can
+raise always means lost mail.
 
 Audit this per **address**, not per domain. `grep -l` prints only the filename, so a
 stale local-part sitting beside two good ones reports the domain as covered and the stale
@@ -201,17 +231,17 @@ address goes on quietly discarding mail. Compare full addresses instead:
 
 ```bash
 pipe_addrs() {
-  for f in /etc/virtual/*/aliases; do
-    [[ -f "$f" ]] || continue
-    # Skip DirectAdmin domain pointers; see below. Their aliases file is the target
-    # domain's, so counting it again under the pointer's name invents addresses.
-    [[ -L "$(dirname "$f")" ]] && continue
-    awk -F: -v dom="$(basename "$(dirname "$f")")" '
-      /ses-gmail-forward/ && $0 !~ /^[[:space:]]*#/ {
-        a = $1; gsub(/^[[:space:]]+|[[:space:]]+$/, "", a)
-        print tolower(a "@" dom)
-      }' "$f"
-  done | sort -u
+  # A domain pointer is a symlink, so this reads one aliases file under each of its names.
+  # That is intended: localpart@pointer is a recipient Exim accepts on its own and
+  # allowlists separately. See "Domain pointers" below before acting on one.
+  awk -F: '/ses-gmail-forward/ && $0 !~ /^[[:space:]]*#/ {
+    n = split(FILENAME, p, "/"); a = $1
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", a)
+    print tolower(a "@" p[n-1])
+  }' /etc/virtual/*/aliases | sort -u
+}
+has_mailbox() {  # has_mailbox user1@example.com
+  grep -qE "^${1%@*}:" "/etc/virtual/${1#*@}/passwd" 2>/dev/null
 }
 allowlist() {
   aws secretsmanager get-secret-value \
@@ -221,21 +251,25 @@ allowlist() {
 for a in json.load(sys.stdin)["recipients"]: print(a.strip().lower())' | sort -u
 }
 
-comm -23 <(pipe_addrs) <(allowlist)   # piped, not allowlisted: mail is being discarded
+# piped but not allowlisted, split by whether the message survives
+while read -r a; do
+  has_mailbox "$a" && echo "no Gmail copy: $a" || echo "DISCARDED: $a"
+done < <(comm -23 <(pipe_addrs) <(allowlist))
+
 comm -13 <(pipe_addrs) <(allowlist)   # allowlisted, not piped: no Gmail copy, still in Roundcube
 ```
 
-The first list is the dangerous one and should be empty. Anything in it is either a
-missing allowlist entry or a genuinely stale alias — but read the next section before
-deleting anything, because one shape of entry must **not** be fixed that way. The second
-list loses nothing (Exim still delivers to the mailbox) but means Gmail never sees that
-address.
+Any `DISCARDED:` line is losing mail and needs fixing now. `no Gmail copy:` lines are
+worth understanding but lose nothing — and some are expected, so read the next section
+before deleting an alias, because one shape of entry must **not** be fixed that way. The
+final list also loses nothing but means Gmail never sees that address.
 
-The health check runs the same comparison against `managed-aliases.conf` every 5 minutes
-and reports `unmanaged_pipe_alias:<address>`, so a stale alias is caught without anyone
-remembering to audit. It deliberately reads the local desired-state file rather than the
-secret, to keep an AWS credential out of the cron path — which is why the comparison above
-against the real allowlist is still worth running by hand after editing either one.
+The health check runs the same comparison against `managed-aliases.conf` every 5 minutes,
+failing on `pipe_alias_no_mailbox:<address>` and logging the harmless case as `NOTE piped
+but not forwarded, mailbox still receives`. It deliberately reads the local desired-state
+file rather than the secret, to keep an AWS credential out of the cron path — which is why
+the comparison above against the real allowlist is still worth running by hand after
+editing either one.
 
 ### Domain pointers share one aliases file — never edit the pointer's path
 
@@ -261,27 +295,29 @@ restored it (`FIXED tellerstech.com: restored pipe aliases`) about 80 seconds la
 which is precisely the drift the enforcer and its cron exist to catch. No mail was
 delivered to either address in the gap, so nothing was lost — by luck, not design.
 
-**A naive `/etc/virtual/*/aliases` glob counts that file once per name.** Every managed
-address is then also "found" at the pointer's domain, where it is not allowlisted, and
-gets reported as a black-holed address that does not exist. The audit above and health
-check 6 both skip symlinked domain directories for this reason. Without that filter this
-host reported six piped addresses when it has four:
+**`/etc/virtual/*/aliases` reads that one file under each name, and that is correct.**
+`localpart@pointer` is a recipient Exim accepts in its own right — the pointer is in
+`/etc/virtual/domains`, the shared aliases give it the pipe, and `recipients` allowlists it
+separately — so it is a real address, not a duplicate. It just is not a *fixable* one:
 
-```text
-brian@origin.aws.tellerstech.com     ← not real; same file as the line below
-brian@tellerstech.com
-bteller@origin.aws.tellerstech.com   ← not real
-bteller@tellerstech.com
-brian@wbat.net
-bteller@wbat.net
+```console
+$ exim -bt brian@origin.aws.tellerstech.com
+brian@origin.aws.tellerstech.com -> |/usr/local/bin/ses-gmail-forward.py
+  transport = virtual_address_pipe
+brian@origin.aws.tellerstech.com
+    <-- brian@origin.aws.tellerstech.com
+  router = virtual_mailbox, transport = dovecot_lmtp_udp
 ```
 
-Mail addressed to a pointer domain *is* still accepted and discarded, because the domain
-is in `/etc/virtual/domains` and its shared aliases carry the pipe while the address is
-not in `recipients`. That is real but not fixable here: the remedies are to allowlist the
-address, or to remove the pointer's mail handling in DirectAdmin. Editing the aliases file
-is never one of them. For a pointer that exists only as a CDN origin or vhost hostname and
-receives no mail, leaving it alone is the right answer.
+The pointer's local-parts share the target's `passwd`, so they have mailboxes and `unseen`
+gives each one a Maildir copy — `/home/tellerstec/imap/origin.aws.tellerstech.com/brian`
+holds 9.3M of exactly that. Mail to a pointer address is therefore **not** lost; it simply
+never reaches Gmail, which is why check 6 logs it as a `NOTE` instead of failing.
+
+The remedies, if you want even the Gmail copy, are to add the pointer address to
+`recipients` or to remove the pointer's mail handling in DirectAdmin. Editing the aliases
+file is never one of them. For a pointer that exists only as a CDN origin hostname,
+leaving it alone is the right answer.
 
 List the pointers on a host before believing any per-domain finding:
 
@@ -358,7 +394,7 @@ earlier, at `INFO`, with no structured reason. That is deliberate for a mailbox 
 delivers normally, but it means the log says nothing useful when the alias made the pipe
 the *only* delivery path — see
 [Only put the pipe on addresses that are in `recipients`](#only-put-the-pipe-on-addresses-that-are-in-recipients),
-which the health check now covers as `unmanaged_pipe_alias:<address>`.
+which the health check now covers as `pipe_alias_no_mailbox:<address>`.
 
 Rate-limit counters increment **only after a successful** `SendRawEmail`, so SES
 failures do not burn quota.

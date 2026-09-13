@@ -71,8 +71,10 @@ install -m 700 scripts/directadmin/forwarder_delete_post.sh \
 #   >/etc/cron.d/ses-gmail-aliases
 
 # Health check (every 5m): self-heal aliases, flag recent forward ERROR, and report any
-# address piping into the forwarder without a matching entry in managed-aliases.conf --
-# that one loses mail with no bounce and nothing else notices
+# address piping into the forwarder without a matching entry in managed-aliases.conf. It
+# fails only when such an address has no mailbox, because then the pipe is the whole
+# delivery and the message is lost with no bounce and nothing else noticing; with a mailbox
+# it is logged as a NOTE, since only the Gmail copy is missing.
 install -m 755 scripts/directadmin/ses_gmail_forward_health.sh \
   /usr/local/bin/ses-gmail-forward-health.sh
 install -m 600 scripts/directadmin/health.conf.example \
