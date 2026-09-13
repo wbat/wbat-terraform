@@ -530,9 +530,81 @@ regardless, because Exim delivers it independently of this pipe — but it may n
 Gmail, since auto-generated mail is deliberately skipped (see
 [Skip guards](#skip-guards-pipe--ses)). Read it in Roundcube rather than resending.
 
+## DMARC, SPF, DKIM
+
+The pipe resends someone else's mail *as one of your own addresses*, so whether the
+forwarded copy authenticates for your domain decides whether Gmail files it as spam.
+
+It passes, on DKIM. SES has Easy DKIM verified and signing enabled for both domains, and
+the forwarded `From` and the SES `Source` are the same allowlisted address, so the `d=`
+SES signs with is the `From` domain. DMARC needs only one aligned pass, and that is it.
+
+SPF never aligns, and that is fine:
+
+```console
+$ aws sesv2 get-email-identity --email-identity tellerstech.com \
+    --query 'DkimAttributes.{Status:Status,Signing:SigningEnabled}'
+{
+    "Status": "SUCCESS",
+    "Signing": true
+}
+
+$ aws sesv2 get-email-identity --email-identity tellerstech.com \
+    --query 'MailFromAttributes.MailFromDomain'
+null
+```
+
+A `null` MAIL FROM domain means SES uses its own envelope sender under `amazonses.com`, so
+the SPF check runs against `amazonses.com` and not against you. **That is why adding
+`include:amazonses.com` to your SPF record does nothing for DMARC** — SPF alignment is
+evaluated against the envelope MAIL FROM domain, never the header `From`, so the include
+authorises a domain that is not the one being compared. Leave SPF alone. The real change,
+if you ever want a second aligned pass before moving off `p=none`, is a custom MAIL FROM
+domain in SES: an MX plus a TXT record per domain.
+
+The `From` rewrite buys one more thing, worth knowing before tightening policy. Because the
+forwarded copy is `From` *your* address and signed as *your* domain, the DMARC check at
+Gmail is evaluated against you rather than the original sender. Plain forwarding breaks the
+original sender's SPF and is rejected outright once they publish `p=reject`; the rewrite is
+what makes this pipe immune to other people's policies.
+
+### `rua=` on a domain you do not control collects nothing
+
+A DMARC record whose `rua` mailbox sits on a different domain from the record itself is an
+*external destination*, and RFC 7489 §7.1 requires that domain to opt in by publishing an
+authorisation record. Reporters that follow the spec — Google, Microsoft, Yahoo — send
+nothing to an unauthorised destination. So `rua=mailto:…@gmail.com` collects nothing:
+
+```console
+$ dig +short TXT wbat.net._report._dmarc.gmail.com
+$ dig +short TXT tellerstech.com._report._dmarc.gmail.com
+        # both empty — gmail.com authorises no one to report to it
+```
+
+Publishing that record, wildcarded, is part of what a report processor is for:
+
+```console
+$ dig +short TXT wbat.net._report._dmarc.dmarc.postmarkapp.com
+"v=DMARC1;"
+```
+
+So pointing `rua` at your own Gmail is not a lightweight version of DMARC reporting, it is
+reporting that silently never happens. Point `rua` at a processor, and check the
+authorisation resolves for *your* domain name before believing reports will arrive:
+
+```bash
+dig +short TXT wbat.net._report._dmarc.<processor-report-domain>   # expect "v=DMARC1"
+```
+
+Keep your own mailbox as a second `rua` entry while setting it up — the tag takes a
+comma-separated list — to confirm anything flows at all, then drop it, since the raw
+reports are zipped XML that no one reads by hand.
+
 ## What not to do
 
 - Do not set MX to `inbound-smtp.*.amazonaws.com` for this domain.
+- Do not add `include:amazonses.com` to SPF expecting it to help DMARC (see above).
+- Do not point `rua=` at a mailbox on a domain that does not authorise you (see above).
 - Do not merge/apply the abandoned “SES Inbound” TFC variable set (PR #78) unless deliberately rebuilding SES-as-MX.
 - Do not forward to a Gmail address through Exim’s SES smart host (causes `554 Email address is not verified`).
 
