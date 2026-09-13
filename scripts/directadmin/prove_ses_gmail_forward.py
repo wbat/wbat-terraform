@@ -578,9 +578,12 @@ assert_that(
     " ERROR " in run["log"],
 )
 
-print("\nan address carrying the pipe but missing from the allowlist (mail is lost silently)")
-# The alias replaces mailbox delivery, so declining to forward is the whole delivery. A
-# parked domain that got a forwarder in the DA UI without an allowlist entry lands here.
+print("\nan address carrying the pipe but missing from the allowlist (declined in silence)")
+# What the pipe does about it, which is the part this file can prove: decline, say nothing,
+# exit 0. Whether that also loses the message is Exim's half -- with a mailbox, unseen= on
+# DA's virtual_forwarder means the Maildir still gets a copy and only Gmail misses out;
+# without one, this decline is the entire delivery. prove_ses_gmail_health.sh covers that
+# split, and it is why the decline being invisible here matters at all.
 parked = "brian@parked.example.com"
 run = run_pipe(raw_message(f"{parked}, {OTHER_TO}"), recipient=parked, recipients=[ALIAS])
 assert_that("it exits 0, so Exim marks the message delivered", run["code"] == 0)

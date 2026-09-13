@@ -102,18 +102,30 @@ if [[ -f "$MANAGED" ]]; then
   done < <(grep -vE '^\s*(#|$)' "$MANAGED" || true)
 fi
 
-# 6) The reverse of check 5: every address carrying the pipe must be one we manage.
+# 6) The reverse of check 5: every address carrying the pipe should be one we manage.
 #
-# The alias replaces mailbox delivery, so an address that pipes into the forwarder but is
-# not in the allowlist is discarded outright -- no SES copy, no Maildir copy, and no
-# bounce, because the pipe always exits 0. Nothing else in this script would notice: the
-# pipe logs that decline at INFO rather than as a skip_ses reason, so check 4 cannot see
-# it. One forwarder added in the DirectAdmin UI without a matching config entry is enough.
+# An address that pipes into the forwarder but is not in the allowlist gets declined and
+# never reaches Gmail. Whether that also loses the message depends on one thing: whether
+# the local-part has a mailbox. DA's virtual_forwarder router sets
+#
+#   unseen = yes   when the domain has a passwd file, the local-part is in it, and the
+#                  alias value is not just the local-part itself
+#
+# and an unseen redirect lets routing continue to virtual_mailbox, so the Maildir gets a
+# copy as well as the pipe. With a mailbox, a declined address costs only the Gmail copy
+# and the mail is still readable in Roundcube -- worth reporting, not worth paging anyone.
+# With no mailbox the pipe is the entire delivery, so declining discards the message: no
+# SES copy, no Maildir copy, and no bounce, since the pipe always exits 0. Only that case
+# fails the check. Nothing else here would catch it, because the pipe logs the decline at
+# INFO rather than as a skip_ses reason, so check 4 cannot see it.
 #
 # Compared per address rather than per domain: a stale local-part next to two managed ones
-# leaves the domain looking covered while that one address keeps losing mail. Compared
-# against the local desired-state file rather than the secret, to keep an AWS credential
-# off the cron path.
+# leaves the domain looking covered while that one address stops forwarding. DirectAdmin
+# domain pointers are symlinks to the target's directory, so the same aliases file is read
+# under each name -- that is correct here rather than a duplicate, because
+# localpart@pointer is a recipient Exim accepts in its own right and allowlists separately.
+# Compared against the local desired-state file rather than the secret, to keep an AWS
+# credential off the cron path.
 if [[ -f "$MANAGED" ]]; then
   managed_addrs="$(awk '
     /^[[:space:]]*(#|$)/ { next }
@@ -139,8 +151,17 @@ if [[ -f "$MANAGED" ]]; then
     ' "${alias_files[@]}" | sort -u)"
     while read -r addr; do
       [[ -z "$addr" ]] && continue
-      fail=1
-      reasons+=("unmanaged_pipe_alias:${addr}")
+      lp="${addr%@*}"
+      dom="${addr#*@}"
+      passwd_file="${VIRTUAL_ROOT}/${dom}/passwd"
+      if [[ -f "$passwd_file" ]] && grep -qE "^${lp}:" "$passwd_file" 2>/dev/null; then
+        # Mailbox exists, so unseen= gave it a copy: only the Gmail copy is missing. Logged
+        # rather than failed, so the one alert this check can raise still means lost mail.
+        log "NOTE piped but not forwarded, mailbox still receives: ${addr}"
+      else
+        fail=1
+        reasons+=("pipe_alias_no_mailbox:${addr}")
+      fi
     done < <(comm -23 <(printf '%s\n' "$piped_addrs") <(printf '%s\n' "$managed_addrs"))
   fi
 fi
