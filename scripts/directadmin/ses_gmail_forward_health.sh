@@ -16,6 +16,7 @@ FORWARD_LOG="${SES_GMAIL_FORWARD_LOG:-/var/log/ses-gmail-forward.log}"
 SCRIPT="${SES_GMAIL_FORWARD_SCRIPT:-/usr/local/bin/ses-gmail-forward.py}"
 ALIASES_ENSURE="${ENSURE_SES_GMAIL_ALIASES:-/usr/local/bin/ensure-ses-gmail-aliases.sh}"
 STATE_DIR="${SES_GMAIL_HEALTH_STATE:-/var/lib/ses-gmail-forward}"
+VIRTUAL_ROOT="${SES_GMAIL_VIRTUAL_ROOT:-/etc/virtual}"
 ALERT_STAMP="${STATE_DIR}/health-alert.stamp"
 WINDOW_MINUTES="${SES_GMAIL_HEALTH_WINDOW_MINUTES:-15}"
 
@@ -87,7 +88,7 @@ MANAGED="${SES_GMAIL_ALIASES_CONF:-/etc/ses-gmail-forward/managed-aliases.conf}"
 if [[ -f "$MANAGED" ]]; then
   while read -r domain parts; do
     [[ -z "${domain:-}" || "$domain" =~ ^# ]] && continue
-    aliases="/etc/virtual/${domain}/aliases"
+    aliases="${VIRTUAL_ROOT}/${domain}/aliases"
     [[ -f "$aliases" ]] || continue
     IFS=',' read -r -a lps <<<"${parts// /}"
     for lp in "${lps[@]}"; do
@@ -99,6 +100,49 @@ if [[ -f "$MANAGED" ]]; then
       fi
     done
   done < <(grep -vE '^\s*(#|$)' "$MANAGED" || true)
+fi
+
+# 6) The reverse of check 5: every address carrying the pipe must be one we manage.
+#
+# The alias replaces mailbox delivery, so an address that pipes into the forwarder but is
+# not in the allowlist is discarded outright -- no SES copy, no Maildir copy, and no
+# bounce, because the pipe always exits 0. Nothing else in this script would notice: the
+# pipe logs that decline at INFO rather than as a skip_ses reason, so check 4 cannot see
+# it. One forwarder added in the DirectAdmin UI without a matching config entry is enough.
+#
+# Compared per address rather than per domain: a stale local-part next to two managed ones
+# leaves the domain looking covered while that one address keeps losing mail. Compared
+# against the local desired-state file rather than the secret, to keep an AWS credential
+# off the cron path.
+if [[ -f "$MANAGED" ]]; then
+  managed_addrs="$(awk '
+    /^[[:space:]]*(#|$)/ { next }
+    {
+      n = split($2, lps, ",")
+      for (i = 1; i <= n; i++) {
+        gsub(/[[:space:]]/, "", lps[i])
+        if (lps[i] != "") print tolower(lps[i] "@" $1)
+      }
+    }
+  ' "$MANAGED" | sort -u)"
+  # A glob that matches nothing must not become a literal path argument to awk.
+  shopt -s nullglob
+  alias_files=("$VIRTUAL_ROOT"/*/aliases)
+  shopt -u nullglob
+  if [[ ${#alias_files[@]} -gt 0 ]]; then
+    piped_addrs="$(awk -F: '
+      /ses-gmail-forward/ && $0 !~ /^[[:space:]]*#/ {
+        n = split(FILENAME, p, "/"); a = $1
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", a)
+        print tolower(a "@" p[n-1])
+      }
+    ' "${alias_files[@]}" | sort -u)"
+    while read -r addr; do
+      [[ -z "$addr" ]] && continue
+      fail=1
+      reasons+=("unmanaged_pipe_alias:${addr}")
+    done < <(comm -23 <(printf '%s\n' "$piped_addrs") <(printf '%s\n' "$managed_addrs"))
+  fi
 fi
 
 mkdir -p "$STATE_DIR"

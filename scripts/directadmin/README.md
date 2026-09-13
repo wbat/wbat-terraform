@@ -24,6 +24,7 @@ proved offline:
 
 ```bash
 ./scripts/directadmin/prove_ses_gmail_forward.py   # no AWS; boto3 is stubbed
+./scripts/directadmin/prove_ses_gmail_health.sh    # the cron check, on fixture aliases
 ```
 
 The last group of cases runs the real script as a subprocess against a fake `boto3` on
@@ -69,7 +70,9 @@ install -m 700 scripts/directadmin/forwarder_delete_post.sh \
 # echo '*/15 * * * * root /usr/local/bin/ensure-ses-gmail-aliases.sh' \
 #   >/etc/cron.d/ses-gmail-aliases
 
-# Health check (every 5m): self-heal aliases + flag recent forward ERROR
+# Health check (every 5m): self-heal aliases, flag recent forward ERROR, and report any
+# address piping into the forwarder without a matching entry in managed-aliases.conf --
+# that one loses mail with no bounce and nothing else notices
 install -m 755 scripts/directadmin/ses_gmail_forward_health.sh \
   /usr/local/bin/ses-gmail-forward-health.sh
 install -m 600 scripts/directadmin/health.conf.example \
