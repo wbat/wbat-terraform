@@ -562,11 +562,41 @@ authorises a domain that is not the one being compared. Leave SPF alone. The rea
 if you ever want a second aligned pass before moving off `p=none`, is a custom MAIL FROM
 domain in SES: an MX plus a TXT record per domain.
 
-The `From` rewrite buys one more thing, worth knowing before tightening policy. Because the
-forwarded copy is `From` *your* address and signed as *your* domain, the DMARC check at
-Gmail is evaluated against you rather than the original sender. Plain forwarding breaks the
-original sender's SPF and is rejected outright once they publish `p=reject`; the rewrite is
-what makes this pipe immune to other people's policies.
+### Why the copy has to authenticate as us
+
+Forwarding always breaks SPF alignment, because the relaying host is not in the original
+sender's SPF record. On its own that is survivable: DMARC needs only one aligned pass, and
+an unmodified DKIM signature travels with the message — which is why plain forwarding
+usually still passes, and why a forwarder is not obliged to rewrite anything.
+
+This pipe cannot lean on that, and not by accident. It removes the original signature, and
+rewrites the one header RFC 6376 §5.4 requires every signer to cover:
+
+```python
+    for header in (
+        "DKIM-Signature",
+        "DomainKey-Signature",
+        "Return-Path",
+        "Sender",
+        "Reply-To",
+        "To",
+        "Cc",
+        "From",
+        "Message-ID",
+    ):
+        if header in msg:
+            del msg[header]
+```
+
+So by the time SES is handed the message the original authentication is gone by
+construction — SPF unaligned by the relay, DKIM deleted, and unverifiable regardless once
+`From` changed. Re-signing as our own domain is not hardening, it is the only
+authentication the copy has left.
+
+The upside is that DMARC is then evaluated against *our* domain rather than the sender's,
+so however strict a policy they publish, it does not apply to this path. Worth stating
+carefully, though: `p=reject` is a requested disposition that receivers may override, not a
+guaranteed bounce, so this removes a failure mode rather than one that was certain.
 
 ### `rua=` on a domain you do not control collects nothing
 
@@ -596,9 +626,18 @@ authorisation resolves for *your* domain name before believing reports will arri
 dig +short TXT wbat.net._report._dmarc.<processor-report-domain>   # expect "v=DMARC1"
 ```
 
-Keep your own mailbox as a second `rua` entry while setting it up — the tag takes a
-comma-separated list — to confirm anything flows at all, then drop it, since the raw
-reports are zipped XML that no one reads by hand.
+`rua` takes a comma-separated list, but authorisation is checked **per destination** — a
+second address does not inherit the processor's. So adding the Gmail address alongside it
+buys no confirmation channel; it fails for exactly the reason above. If you want a raw copy
+while setting up, use a mailbox on the policy domain itself, which is not an external
+destination and needs no authorisation record:
+
+```
+_dmarc.wbat.net  TXT  "v=DMARC1; p=none; rua=mailto:<token>@<processor>,mailto:dmarc@wbat.net"
+```
+
+Drop the second entry once reports are arriving — the raw files are zipped XML that no one
+reads by hand.
 
 ## What not to do
 
