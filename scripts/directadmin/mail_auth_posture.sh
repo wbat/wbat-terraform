@@ -9,6 +9,13 @@
 # script resolves that record per destination and says UNAUTHORIZED when it is missing --
 # the finding a presence check cannot make.
 #
+# DKIM is reported the same way, for the same reason. DirectAdmin signs from
+# /etc/exim.dkim.conf with selector `x` and the key at
+# /etc/virtual/<domain>/dkim.private.key, falling back to `{0}` -- do not sign -- when that
+# file is absent. So a published `x._domainkey` proves nothing on its own: without the key
+# the domain advertises a public key that nothing ever signs with, and a bare presence check
+# calls that DKIM. The state is the pair, not the record.
+#
 # Changes nothing, reads only zone files and /etc/virtual. Exits 0 so it is safe on cron;
 # pass --strict to exit 1 when there is an actionable finding.
 #
@@ -20,6 +27,7 @@
 #
 # Overridable for testing:
 #   MAIL_AUTH_DOMAINOWNERS  MAIL_AUTH_ZONE_DIR  MAIL_AUTH_VIRTUAL_ROOT  MAIL_AUTH_RESOLVER
+#   MAIL_AUTH_DKIM_SELECTOR
 
 # Deliberately no -e: nearly every lookup here is a grep that is *expected* to fail on some
 # domain, and aborting the sweep on the first one would report a partial host as a clean one.
@@ -29,6 +37,9 @@ DOMAINOWNERS="${MAIL_AUTH_DOMAINOWNERS:-/etc/virtual/domainowners}"
 ZONE_DIR="${MAIL_AUTH_ZONE_DIR:-/var/named}"
 VIRTUAL_ROOT="${MAIL_AUTH_VIRTUAL_ROOT:-/etc/virtual}"
 RESOLVER="${MAIL_AUTH_RESOLVER:-}"
+# The selector Exim signs with. Anything published under a different one belongs to a third
+# party (SES publishes CNAMEs, for instance) and is not what DirectAdmin would use.
+DKIM_SELECTOR="${MAIL_AUTH_DKIM_SELECTOR:-x}"
 
 use_dns=1
 strict=0
@@ -116,12 +127,16 @@ n_mail=0
 n_pointer=0
 n_no_dmarc=0
 n_no_spf=0
-n_no_dkim=0
+n_dkim_signing=0
+n_dkim_broken=0
+n_dkim_stale=0
+n_dkim_delegated=0
+n_dkim_none=0
 n_unauth=0
 findings=()
 
-printf '%-34s %-6s %-5s %-6s %-4s %-8s %s\n' DOMAIN DMARC SPF DKIM MBOX POINTER RUA
-printf '%-34s %-6s %-5s %-6s %-4s %-8s %s\n' '------' '-----' '---' '----' '----' '-------' '---'
+printf '%-34s %-6s %-5s %-10s %-4s %-8s %s\n' DOMAIN DMARC SPF DKIM MBOX POINTER RUA
+printf '%-34s %-6s %-5s %-10s %-4s %-8s %s\n' '------' '-----' '---' '----' '----' '-------' '---'
 
 while read -r raw _; do
   # domainowners is `domain: user`, so the domain field arrives with a trailing colon.
@@ -139,12 +154,45 @@ while read -r raw _; do
   total=$((total + 1))
 
   has_spf=no
-  has_dkim=no
   has_mbox=no
   is_pointer=no
   grep -qi 'v=spf1' "$zone" && has_spf=yes
-  grep -qi '_domainkey' "$zone" && has_dkim=yes
   [[ -s "${VIRTUAL_ROOT}/${domain}/passwd" ]] && has_mbox=yes
+
+  # DKIM is the pair, not the record. Exim signs only when the private key exists, so the
+  # key decides whether anything is signed and the record decides whether it can be
+  # verified -- and each without the other is its own kind of broken.
+  dkim_key=no
+  dkim_own_record=no
+  dkim_other_record=no
+  [[ -s "${VIRTUAL_ROOT}/${domain}/dkim.private.key" ]] && dkim_key=yes
+  grep -qiE "^${DKIM_SELECTOR}\._domainkey" "$zone" && dkim_own_record=yes
+  grep -qiE '^[a-z0-9_-]+\._domainkey' "$zone" && dkim_other_record=yes
+
+  if [[ "$dkim_key" == yes && "$dkim_own_record" == yes ]]; then
+    dkim_state=signing
+    n_dkim_signing=$((n_dkim_signing + 1))
+  elif [[ "$dkim_key" == yes ]]; then
+    # Signing with a key nobody can fetch. Worse than not signing, because every receiver
+    # now sees a signature that fails rather than a message that never claimed one.
+    dkim_state=BROKEN
+    n_dkim_broken=$((n_dkim_broken + 1))
+    findings+=("dkim_broken_unpublished:${domain}")
+  elif [[ "$dkim_own_record" == yes ]]; then
+    # Advertises a public key with no signer behind it. Harmless in itself, but it is what
+    # makes a bare record check report DKIM on a domain whose mail is entirely unsigned.
+    dkim_state=stale
+    n_dkim_stale=$((n_dkim_stale + 1))
+    findings+=("dkim_record_without_key:${domain}")
+  elif [[ "$dkim_other_record" == yes ]]; then
+    # Another selector, so something else signs -- SES publishes CNAMEs this way. Reported
+    # rather than judged: this script cannot see that provider's key.
+    dkim_state=delegated
+    n_dkim_delegated=$((n_dkim_delegated + 1))
+  else
+    dkim_state=none
+    n_dkim_none=$((n_dkim_none + 1))
+  fi
   # A DirectAdmin domain pointer is a symlink to the target's config directory, so it
   # shares the target's passwd and looks like a mail domain in its own right. Flagged
   # rather than skipped: it is a real recipient, but it is not a separate thing to fix.
@@ -184,7 +232,6 @@ while read -r raw _; do
   [[ "$has_mbox" == yes ]] && n_mail=$((n_mail + 1))
   [[ "$is_pointer" == yes ]] && n_pointer=$((n_pointer + 1))
   [[ "$has_spf" == no ]] && n_no_spf=$((n_no_spf + 1))
-  [[ "$has_dkim" == no ]] && n_no_dkim=$((n_no_dkim + 1))
   if [[ "$has_dmarc" == no ]]; then
     n_no_dmarc=$((n_no_dmarc + 1))
     # A domain that never sends is the cheapest DMARC win, not a lesser one: nothing can
@@ -196,8 +243,8 @@ while read -r raw _; do
     fi
   fi
 
-  printf '%-34s %-6s %-5s %-6s %-4s %-8s %s\n' \
-    "$domain" "$has_dmarc" "$has_spf" "$has_dkim" "$has_mbox" "$is_pointer" "$rua_state"
+  printf '%-34s %-6s %-5s %-10s %-4s %-8s %s\n' \
+    "$domain" "$has_dmarc" "$has_spf" "$dkim_state" "$has_mbox" "$is_pointer" "$rua_state"
 done <"$DOMAINOWNERS"
 
 echo
@@ -206,7 +253,11 @@ echo "with mailboxes:        ${n_mail}"
 echo "domain pointers:       ${n_pointer}"
 echo "missing DMARC:         ${n_no_dmarc}"
 echo "missing SPF:           ${n_no_spf}"
-echo "missing DKIM:          ${n_no_dkim}"
+echo "DKIM signing:          ${n_dkim_signing}"
+echo "DKIM BROKEN:           ${n_dkim_broken}"
+echo "DKIM stale record:     ${n_dkim_stale}"
+echo "DKIM delegated:        ${n_dkim_delegated}"
+echo "DKIM none:             ${n_dkim_none}"
 echo "rua UNAUTHORIZED:      ${n_unauth}"
 
 if [[ ${#findings[@]} -gt 0 ]]; then
@@ -215,10 +266,10 @@ if [[ ${#findings[@]} -gt 0 ]]; then
   printf '  %s\n' "${findings[@]}" | sort
 fi
 
-# An unauthorized rua is the one finding that is actively misleading -- the record looks
-# configured and reports nothing -- so it is what --strict keys on. A missing record is
-# honest about itself and is a backlog item, not a regression.
-if [[ "$strict" -eq 1 && "$n_unauth" -gt 0 ]]; then
+# --strict keys on the two findings that are actively misleading rather than merely absent:
+# a rua that looks configured and reports nowhere, and a signature no receiver can verify.
+# A missing record is honest about itself and is a backlog item, not a regression.
+if [[ "$strict" -eq 1 ]] && ((n_unauth > 0 || n_dkim_broken > 0)); then
   exit 1
 fi
 exit 0
