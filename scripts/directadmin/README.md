@@ -25,6 +25,7 @@ proved offline:
 ```bash
 ./scripts/directadmin/prove_ses_gmail_forward.py   # no AWS; boto3 is stubbed
 ./scripts/directadmin/prove_ses_gmail_health.sh    # the cron check, on fixture aliases
+./scripts/directadmin/prove_mail_auth_posture.sh   # the DMARC audit, on fixture zones
 ```
 
 The last group of cases runs the real script as a subprocess against a fake `boto3` on
@@ -84,6 +85,37 @@ echo '*/5 * * * * root /usr/local/bin/ses-gmail-forward-health.sh' \
   >/etc/cron.d/ses-gmail-forward-health
 chmod 644 /etc/cron.d/ses-gmail-forward-health
 ```
+
+## Mail auth posture (`mail_auth_posture.sh`)
+
+Read-only sweep of SPF / DKIM / DMARC across every domain in `/etc/virtual/domainowners`,
+reading the local zone files. Changes nothing, needs no credentials, and exits 0 unless
+`--strict` is given.
+
+```bash
+./scripts/directadmin/mail_auth_posture.sh                 # table + summary + findings
+./scripts/directadmin/mail_auth_posture.sh --only wbat.net
+./scripts/directadmin/mail_auth_posture.sh --no-dns        # skip the rua lookups
+./scripts/directadmin/mail_auth_posture.sh --strict        # exit 1 on an unauthorized rua
+```
+
+The reason it is not `grep -l _dmarc /var/named/*.db`: **a DMARC record can be present and
+collect nothing.** RFC 7489 §7.1 makes a `rua` mailbox on another domain an *external
+destination*, valid only if that domain publishes
+`<policy-domain>._report._dmarc.<rua-domain>`. Spec-following reporters send nothing
+otherwise, so `rua=mailto:you@gmail.com` is reporting that silently never happens. This
+resolves that record per destination and reports `UNAUTHORIZED`, which is the one finding
+here that is actively misleading rather than merely absent — hence the only thing `--strict`
+fails on. See [`ses_gmail_forward.md`](./ses_gmail_forward.md) for the rest of that story.
+
+Two details that make the output trustworthy rather than reassuring:
+
+- `domainowners` is `domain: user`, so the domain field arrives with a trailing colon.
+  Leaving it on makes every zone path miss and prints `zones examined: 0` — a clean-looking
+  result for a host with 97 domains. A mutant in the proof asserts the strip is load-bearing.
+- DirectAdmin domain pointers are symlinks sharing the target's `passwd`, so they look like
+  mail domains of their own. They are flagged `POINTER` and kept out of the "needs DMARC"
+  findings, because they are real recipients but not separate things to fix.
 
 ## Vhost listen reconciler (Linked IP drift)
 

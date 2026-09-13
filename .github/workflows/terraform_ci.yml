@@ -65,6 +65,8 @@ jobs:
         run: ./scripts/directadmin/prove_ses_gmail_forward.py
       - name: Offline SES forward health proof
         run: ./scripts/directadmin/prove_ses_gmail_health.sh
+      - name: Offline mail auth posture proof
+        run: ./scripts/directadmin/prove_mail_auth_posture.sh
       # jmespath is installed explicitly rather than relied on from the runner's
       # awscli: one case evaluates the audit's own security-group query, and it
       # has to be the same engine the CLI uses for the result to mean anything.
