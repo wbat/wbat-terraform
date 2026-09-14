@@ -104,9 +104,25 @@ collect nothing.** RFC 7489 §7.1 makes a `rua` mailbox on another domain an *ex
 destination*, valid only if that domain publishes
 `<policy-domain>._report._dmarc.<rua-domain>`. Spec-following reporters send nothing
 otherwise, so `rua=mailto:you@gmail.com` is reporting that silently never happens. This
-resolves that record per destination and reports `UNAUTHORIZED`, which is the one finding
-here that is actively misleading rather than merely absent — hence the only thing `--strict`
-fails on. See [`ses_gmail_forward.md`](./ses_gmail_forward.md) for the rest of that story.
+resolves that record per destination and reports `UNAUTHORIZED`. See
+[`ses_gmail_forward.md`](./ses_gmail_forward.md) for the rest of that story.
+
+DKIM is reported the same way and for the same reason, because a published key proves just
+as little. DirectAdmin signs from `/etc/exim.dkim.conf` with selector `x` and the key at
+`/etc/virtual/<domain>/dkim.private.key`, falling back to `{0}` — do not sign — when the key
+is absent. So the state is the pair:
+
+| State | Meaning |
+|---|---|
+| `signing` | key on disk **and** `x._domainkey` published: the only state that works |
+| `BROKEN` | key but nothing published — signs unverifiably, worse than not signing |
+| `stale` | `x._domainkey` published with no key behind it, so nothing is ever signed |
+| `delegated` | only another selector, so a third party such as SES signs; not ours to judge |
+| `none` | neither |
+
+`--strict` fails on `UNAUTHORIZED` and `BROKEN` only: those two look configured and are not.
+`stale`, `none` and a missing DMARC record are honest about themselves and are backlog items
+rather than regressions.
 
 Two details that make the output trustworthy rather than reassuring:
 

@@ -75,11 +75,16 @@ EOF
 chmod 755 "$RESOLVER"
 export SANDBOX_AUTH_LIST="${SANDBOX}/authorized"
 
-# add_domain <domain> <user> [--dmarc <txt>] [--spf] [--dkim] [--mbox] [--pointer <target>]
+# add_domain <domain> <user> [--dmarc <txt>] [--spf] [--mbox] [--pointer <target>]
+#                            [--dkim] [--dkim-other] [--dkim-key]
+#
+# --dkim publishes the selector Exim signs with, --dkim-other a third party's, and
+# --dkim-key drops the private key on disk. They are separate because every combination of
+# the two is a distinct real state, and only the pair means DKIM works.
 add_domain() {
   local domain="$1" user="$2"
   shift 2
-  local dmarc="" spf=0 dkim=0 mbox=0 pointer=""
+  local dmarc="" spf=0 dkim=0 dkim_other=0 dkim_key=0 mbox=0 pointer=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --dmarc)
@@ -88,6 +93,8 @@ add_domain() {
         ;;
       --spf) spf=1 ;;
       --dkim) dkim=1 ;;
+      --dkim-other) dkim_other=1 ;;
+      --dkim-key) dkim_key=1 ;;
       --mbox) mbox=1 ;;
       --pointer)
         shift
@@ -105,6 +112,7 @@ add_domain() {
     echo "@	IN	SOA	ns1.example.com. root.example.com. ( 1 1h 15m 1w 1h )"
     [[ "$spf" -eq 1 ]] && echo '@	IN	TXT	"v=spf1 a mx ~all"'
     [[ "$dkim" -eq 1 ]] && echo 'x._domainkey	IN	TXT	"v=DKIM1; k=rsa; p=MIIB"'
+    [[ "$dkim_other" -eq 1 ]] && echo 's1._domainkey	IN	TXT	"v=DKIM1; k=rsa; p=MIIB"'
     [[ -n "$dmarc" ]] && echo "$dmarc"
     echo 'www	IN	A	192.0.2.1'
   } >"${ZONES}/${domain}.db"
@@ -114,6 +122,7 @@ add_domain() {
   else
     mkdir -p "${VIRTUAL}/${domain}"
     [[ "$mbox" -eq 1 ]] && printf 'brian:x:::::\n' >"${VIRTUAL}/${domain}/passwd"
+    [[ "$dkim_key" -eq 1 ]] && echo 'PRIVATE' >"${VIRTUAL}/${domain}/dkim.private.key"
   fi
   return 0
 }
@@ -248,15 +257,62 @@ assert_lacks "not listed as a domain needing DMARC" "$result" "no_dmarc_has_mail
 assert_lacks "nor as one without mail" "$result" "no_dmarc_no_mail:ptr.example"
 
 echo
-echo "SPF and DKIM presence, and the parked case"
+echo "SPF, and the parked case"
 reset_fixtures
 add_domain bare.example alice
-add_domain full.example alice --spf --dkim --mbox
+add_domain full.example alice --spf --dkim --dkim-key --mbox
 result="$(run_audit)"
 assert_contains "a zone with no SPF is counted" "$result" "missing SPF:           1"
-assert_contains "a zone with no DKIM is counted" "$result" "missing DKIM:          1"
 assert_contains "a parked domain with no mailboxes is still reported" "$result" "no_dmarc_no_mail:bare.example"
 assert_contains "separately from one with mail" "$result" "no_dmarc_has_mail:full.example"
+
+echo
+echo "DKIM is the key and the record together, because either alone is its own failure"
+reset_fixtures
+add_domain works.example alice --spf --mbox --dkim --dkim-key
+result="$(run_audit)"
+assert_contains "key plus published selector is the only state that signs" "$(row_for "$result" works.example)" "signing"
+assert_contains "counted" "$result" "DKIM signing:          1"
+assert_lacks "and raises nothing" "$result" "dkim_"
+
+reset_fixtures
+add_domain unsigned.example alice --spf --mbox --dkim
+result="$(run_audit)"
+assert_contains "a published selector with no key on disk cannot sign" "$(row_for "$result" unsigned.example)" "stale"
+assert_lacks "so it is not reported as signing" "$(row_for "$result" unsigned.example)" "signing"
+assert_contains "and is named, because a bare record check calls this DKIM" "$result" "dkim_record_without_key:unsigned.example"
+assert_contains "counted apart from working DKIM" "$result" "DKIM stale record:     1"
+assert_contains "which stays at zero" "$result" "DKIM signing:          0"
+
+reset_fixtures
+add_domain broken.example alice --spf --mbox --dkim-key
+result="$(run_audit)"
+assert_contains "a key with nothing published signs unverifiably" "$(row_for "$result" broken.example)" "BROKEN"
+assert_contains "and is a finding of its own" "$result" "dkim_broken_unpublished:broken.example"
+assert_contains "counted" "$result" "DKIM BROKEN:           1"
+assert_contains "--strict fails on it, as it does on an unauthorized rua" "$(run_audit --strict)" "exit=1"
+
+reset_fixtures
+add_domain ses.example alice --spf --mbox --dkim-other
+result="$(run_audit)"
+assert_contains "a third party's selector is reported, not judged" "$(row_for "$result" ses.example)" "delegated"
+assert_lacks "not called stale, since no key of ours is implied" "$(row_for "$result" ses.example)" "stale"
+assert_lacks "and raises no finding" "$result" "dkim_record_without_key:ses.example"
+assert_contains "counted separately" "$result" "DKIM delegated:        1"
+
+reset_fixtures
+add_domain nothing.example alice --spf --mbox
+result="$(run_audit)"
+assert_contains "no key and no record at all" "$(row_for "$result" nothing.example)" "none"
+assert_contains "counted" "$result" "DKIM none:             1"
+assert_contains "--strict does not fail merely for absent DKIM" "$(run_audit --strict)" "exit=0"
+
+reset_fixtures
+add_domain sel.example alice --spf --mbox --dkim-other --dkim-key
+result="$(run_audit --strict)"
+assert_contains "the selector is what matters: another one does not satisfy ours" "$(row_for "$result" sel.example)" "BROKEN"
+result="$(MAIL_AUTH_DKIM_SELECTOR=s1 run_audit)"
+assert_contains "and pointing the selector at it makes the same host healthy" "$(row_for "$result" sel.example)" "signing"
 
 echo
 echo "degenerate and hostile inputs"
@@ -311,6 +367,35 @@ then
 else
   assert_that "the colon strip is still the line the mutant targets" no
 fi
+
+> "$OWNERS"
+add_domain unsigned.example alice --spf --mbox --dkim
+mutant_dkim="${SANDBOX}/mutant-record-is-dkim.sh"
+if python3 - "$SCRIPT" "$mutant_dkim" <<'PY'
+import sys
+
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+old = '  if [[ "$dkim_key" == yes && "$dkim_own_record" == yes ]]; then\n'
+if old not in text:
+    sys.exit(1)
+open(dst, "w").write(text.replace(old, '  if [[ "$dkim_own_record" == yes ]]; then\n', 1))
+PY
+then
+  out="$(MAIL_AUTH_DOMAINOWNERS="$OWNERS" MAIL_AUTH_ZONE_DIR="$ZONES" \
+    MAIL_AUTH_VIRTUAL_ROOT="$VIRTUAL" MAIL_AUTH_RESOLVER="$RESOLVER" \
+    bash "$mutant_dkim" 2>&1)"
+  # This is the bug the first version of this script shipped with, on 20 real zones.
+  assert_contains "judging DKIM by the record alone calls an unsigned domain signing" \
+    "$(row_for "$out" unsigned.example)" "signing"
+  assert_lacks "and drops the finding that says otherwise" "$out" "dkim_record_without_key"
+else
+  assert_that "the DKIM pair test is still the line the mutant targets" no
+fi
+
+reset_fixtures
+add_domain live.example alice --spf --mbox \
+  --dmarc '_dmarc	IN	TXT	"v=DMARC1; p=none; rua=mailto:x@gmail.com"'
 
 mutant2="${SANDBOX}/mutant-all-local.sh"
 if python3 - "$SCRIPT" "$mutant2" <<'PY'
