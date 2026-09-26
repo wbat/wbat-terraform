@@ -52,3 +52,35 @@
 #   to = module.global.module.ses.aws_sns_topic_policy.email_forwarding
 #   id = "arn:aws:sns:us-east-1:708113892725:tellertech-email-forwarding"
 # }
+
+# Site media archive bucket + IAM — imported 2026-09-08 (PR #136); comment out
+# after successful apply. Created in AWS ahead of TF during the teller media split.
+# import {
+#   to = module.global.aws_s3_bucket.site_media_archive
+#   id = "wbat-tellerstech-site-media-archive-708113892725"
+# }
+#
+# import {
+#   to = module.global.aws_s3_bucket_versioning.site_media_archive
+#   id = "wbat-tellerstech-site-media-archive-708113892725"
+# }
+#
+# import {
+#   to = module.global.aws_s3_bucket_server_side_encryption_configuration.site_media_archive
+#   id = "wbat-tellerstech-site-media-archive-708113892725"
+# }
+#
+# import {
+#   to = module.global.aws_s3_bucket_public_access_block.site_media_archive
+#   id = "wbat-tellerstech-site-media-archive-708113892725"
+# }
+#
+# import {
+#   to = module.global.aws_s3_bucket_lifecycle_configuration.site_media_archive
+#   id = "wbat-tellerstech-site-media-archive-708113892725"
+# }
+#
+# import {
+#   to = module.global.module.iam.aws_iam_role_policy.WBAT_Main_Server-SiteMediaArchive
+#   id = "WBAT_Main_Server:SiteMediaArchive"
+# }

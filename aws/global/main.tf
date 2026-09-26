@@ -35,6 +35,7 @@ module "cloudwatch" {
   billing_alert_email        = var.billing_alert_email
   billing_threshold_warning  = var.billing_threshold_warning
   billing_threshold_critical = var.billing_threshold_critical
+  host_health_alert_email    = var.host_health_alert_email
 }
 
 module "ses" {

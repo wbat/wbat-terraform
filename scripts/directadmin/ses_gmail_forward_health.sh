@@ -16,6 +16,7 @@ FORWARD_LOG="${SES_GMAIL_FORWARD_LOG:-/var/log/ses-gmail-forward.log}"
 SCRIPT="${SES_GMAIL_FORWARD_SCRIPT:-/usr/local/bin/ses-gmail-forward.py}"
 ALIASES_ENSURE="${ENSURE_SES_GMAIL_ALIASES:-/usr/local/bin/ensure-ses-gmail-aliases.sh}"
 STATE_DIR="${SES_GMAIL_HEALTH_STATE:-/var/lib/ses-gmail-forward}"
+VIRTUAL_ROOT="${SES_GMAIL_VIRTUAL_ROOT:-/etc/virtual}"
 ALERT_STAMP="${STATE_DIR}/health-alert.stamp"
 WINDOW_MINUTES="${SES_GMAIL_HEALTH_WINDOW_MINUTES:-15}"
 
@@ -65,8 +66,11 @@ if [[ -f "$FORWARD_LOG" ]]; then
       if ($0 ~ /dovecot-lda failed/) next
       if ($0 ~ / ERROR /) { print; next }
       # Structured skips that mean Gmail never got a copy (alert-worthy)
-      if ($0 ~ /skip_ses reason=(rate_limit|ses_error|config_error|missing_gmail_dest)/) { print; next }
+      if ($0 ~ /skip_ses reason=(rate_limit|ses_error|config_error|missing_gmail_dest|unrenderable_recipient)/) { print; next }
       if ($0 ~ /Rate limit exceeded/) { print; next }
+      # A limiter that cannot persist its counter is a control that is not working, and
+      # it fails open, so nothing else would ever say so.
+      if ($0 ~ /Rate-limit state unwritable/) { print; next }
       if ($0 ~ /SES SendRawEmail failed/) { print; next }
       if ($0 ~ /gmail_destination missing/) { print; next }
       if ($0 ~ /Failed to load runtime config/) { print; next }
@@ -84,7 +88,7 @@ MANAGED="${SES_GMAIL_ALIASES_CONF:-/etc/ses-gmail-forward/managed-aliases.conf}"
 if [[ -f "$MANAGED" ]]; then
   while read -r domain parts; do
     [[ -z "${domain:-}" || "$domain" =~ ^# ]] && continue
-    aliases="/etc/virtual/${domain}/aliases"
+    aliases="${VIRTUAL_ROOT}/${domain}/aliases"
     [[ -f "$aliases" ]] || continue
     IFS=',' read -r -a lps <<<"${parts// /}"
     for lp in "${lps[@]}"; do
@@ -96,6 +100,70 @@ if [[ -f "$MANAGED" ]]; then
       fi
     done
   done < <(grep -vE '^\s*(#|$)' "$MANAGED" || true)
+fi
+
+# 6) The reverse of check 5: every address carrying the pipe should be one we manage.
+#
+# An address that pipes into the forwarder but is not in the allowlist gets declined and
+# never reaches Gmail. Whether that also loses the message depends on one thing: whether
+# the local-part has a mailbox. DA's virtual_forwarder router sets
+#
+#   unseen = yes   when the domain has a passwd file, the local-part is in it, and the
+#                  alias value is not just the local-part itself
+#
+# and an unseen redirect lets routing continue to virtual_mailbox, so the Maildir gets a
+# copy as well as the pipe. With a mailbox, a declined address costs only the Gmail copy
+# and the mail is still readable in Roundcube -- worth reporting, not worth paging anyone.
+# With no mailbox the pipe is the entire delivery, so declining discards the message: no
+# SES copy, no Maildir copy, and no bounce, since the pipe always exits 0. Only that case
+# fails the check. Nothing else here would catch it, because the pipe logs the decline at
+# INFO rather than as a skip_ses reason, so check 4 cannot see it.
+#
+# Compared per address rather than per domain: a stale local-part next to two managed ones
+# leaves the domain looking covered while that one address stops forwarding. DirectAdmin
+# domain pointers are symlinks to the target's directory, so the same aliases file is read
+# under each name -- that is correct here rather than a duplicate, because
+# localpart@pointer is a recipient Exim accepts in its own right and allowlists separately.
+# Compared against the local desired-state file rather than the secret, to keep an AWS
+# credential off the cron path.
+if [[ -f "$MANAGED" ]]; then
+  managed_addrs="$(awk '
+    /^[[:space:]]*(#|$)/ { next }
+    {
+      n = split($2, lps, ",")
+      for (i = 1; i <= n; i++) {
+        gsub(/[[:space:]]/, "", lps[i])
+        if (lps[i] != "") print tolower(lps[i] "@" $1)
+      }
+    }
+  ' "$MANAGED" | sort -u)"
+  # A glob that matches nothing must not become a literal path argument to awk.
+  shopt -s nullglob
+  alias_files=("$VIRTUAL_ROOT"/*/aliases)
+  shopt -u nullglob
+  if [[ ${#alias_files[@]} -gt 0 ]]; then
+    piped_addrs="$(awk -F: '
+      /ses-gmail-forward/ && $0 !~ /^[[:space:]]*#/ {
+        n = split(FILENAME, p, "/"); a = $1
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", a)
+        print tolower(a "@" p[n-1])
+      }
+    ' "${alias_files[@]}" | sort -u)"
+    while read -r addr; do
+      [[ -z "$addr" ]] && continue
+      lp="${addr%@*}"
+      dom="${addr#*@}"
+      passwd_file="${VIRTUAL_ROOT}/${dom}/passwd"
+      if [[ -f "$passwd_file" ]] && grep -qE "^${lp}:" "$passwd_file" 2>/dev/null; then
+        # Mailbox exists, so unseen= gave it a copy: only the Gmail copy is missing. Logged
+        # rather than failed, so the one alert this check can raise still means lost mail.
+        log "NOTE piped but not forwarded, mailbox still receives: ${addr}"
+      else
+        fail=1
+        reasons+=("pipe_alias_no_mailbox:${addr}")
+      fi
+    done < <(comm -23 <(printf '%s\n' "$piped_addrs") <(printf '%s\n' "$managed_addrs"))
+  fi
 fi
 
 mkdir -p "$STATE_DIR"

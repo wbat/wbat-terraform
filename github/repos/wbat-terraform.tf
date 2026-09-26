@@ -22,6 +22,9 @@ module "wbat_terraform" {
 
     # Github Actions (version-independent names; see aws/docs/terraform-version-upgrade.md)
     "Format",
+    # The only job that runs bash -n, shellcheck, and every prove_* script, so leaving it
+    # optional lets a PR that breaks a proof merge with all other checks green.
+    "Shellcheck",
     "Validate (aws)",
     "Validate (github)",
     "Validate (tfc)",

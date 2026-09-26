@@ -6,6 +6,11 @@ output "instance_profile_name-WBAT_Main_Server" {
   value = module.iam.instance_profile_name-WBAT_Main_Server
 }
 
+output "host_health_alerts_topic_arn" {
+  value       = module.cloudwatch.host_health_alerts_topic_arn
+  description = "SNS topic for EC2 status-check / host-health alarms"
+}
+
 # CloudFront outputs
 output "cloudfront_distribution_id" {
   value       = module.cloudfront.distribution_id

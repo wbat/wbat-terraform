@@ -26,19 +26,21 @@ Four changes make the disclosure inert:
    own owner's `~/.ssh/authorized_keys`, so every shell account was a route from
    a compromised website to durable interactive SSH.
 
-**All four are done.** What is left is not about the disclosed names at all:
+**All four are done.** Items 6 and 7 below are done on the primary as well;
+what remains is operator preference, not an open cleartext path:
 
 5. **Two keys with a blast radius the allowlist does not shrink** — one private
    key is installed on every account on the box, including one the allowlist
-   admits, so it still opens a session. See
+   admits, so it still opens a session. The operator kept `WBAT.pem` on
+   `tellerstec` deliberately. See
    [What is left after the allowlist](#what-is-left-after-the-allowlist).
-6. **A datastore on a public interface** — neither `lfd` nor `fail2ban` sits in
-   front of MySQL, and a success there is the whole dataset rather than one
-   account. See
+6. **~~A datastore on a public interface~~** — bound to `127.0.0.1` via
+   `/etc/my.cnf.d/bind-local.cnf` (mode 644; a root-only 600 is ignored by the
+   `mysql` user). See
    [Bound is not the same as reachable](#bound-is-not-the-same-as-reachable).
-7. **Plaintext mail and FTP** — the only remaining place a disclosed account
-   name can be tried with a password, now that SSH and 2222 are closed. See
-   [The plaintext mail and FTP ports are now the last password path](#the-plaintext-mail-and-ftp-ports-are-now-the-last-password-path).
+7. **~~Plaintext mail and FTP~~** — Dovecot `auth_allow_cleartext=no`, Pure-FTPd
+   `TLS 2`. Legacy ports still listen; cleartext passwords are refused. See
+   [The plaintext mail and FTP ports…](#the-plaintext-mail-and-ftp-ports-are-now-the-last-password-path).
 
 ## Measure first
 
@@ -602,25 +604,35 @@ during maintenance, and it is not a state you want a database in.
 limits MySQL, and a compromise there is every site's data rather than one
 account. If nothing connects to MySQL over the network — and on a single-box
 DirectAdmin build nothing does, since PHP talks to it over localhost — bind it
-to loopback:
+to loopback. Prefer a drop-in under `/etc/my.cnf.d/` so CustomBuild does not
+have to own the main file:
 
-```ini
-# /etc/my.cnf, under [mysqld]
-bind-address = 127.0.0.1
+```bash
+printf '%s\n' '[mysqld]' 'bind-address = 127.0.0.1' \
+  | sudo tee /etc/my.cnf.d/bind-local.cnf
+# Mode matters: mysqld runs as `mysql`, and a root-only 600 file is readable
+# by `mysqld --print-defaults` under sudo while the running daemon silently
+# ignores it -- bind_address stays empty and ss still shows 0.0.0.0:3306.
+sudo chmod 644 /etc/my.cnf.d/bind-local.cnf
+sudo systemctl restart mysqld   # or mariadb
+sudo ss -lntp | grep 3306       # expect 127.0.0.1:3306 only
 ```
 
-Then `systemctl restart mysqld` (or `mariadb`) and re-run the audit;
-`exposure/datastore` should go to `OK`. Restarting the database drops open
-connections, so treat it as a brief maintenance window rather than a live edit.
+Then re-run the audit; `exposure/datastore` should go to `OK`. Restarting the
+database drops open connections, so treat it as a brief maintenance window
+rather than a live edit.
+
+**Applied on the primary:** `/etc/my.cnf.d/bind-local.cnf` with mode 644,
+`ss` shows `127.0.0.1:3306` only.
 
 ### The plaintext mail and FTP ports are now the last password path
 
-`21`, `110` and `143` accept credentials without implicit TLS, and their
-TLS-native equivalents (`465`, `993`, `995`) are already open. That reads like
-housekeeping, and it was, until the other doors closed. SSH is key-only, 2222 is
-off the internet — so mail and FTP are the **only** remaining places where one
-of the publicly disclosed account names can be tried with a password. They are
-in `TCP_IN` and reachable right now. `LF_FTPD=10`, `LF_POP3D=10` and
+`21`, `110` and `143` listen without implicit TLS, and their TLS-native
+equivalents (`465`, `993`, `995`) are already open. That reads like housekeeping,
+and it was, until the other doors closed. SSH is key-only, 2222 is off the
+internet — so mail and FTP are the **only** remaining places where one of the
+publicly disclosed account names can be tried with a password. They are in
+`TCP_IN` and reachable right now. `LF_FTPD=10`, `LF_POP3D=10` and
 `LF_IMAPD=10` rate-limit the attempts, which buys time rather than closing
 anything.
 
@@ -628,19 +640,30 @@ Two separate questions, worth not conflating:
 
 1. **Is TLS mandatory, or merely available?** If STARTTLS is optional on `110`
    and `143`, a client that fails to negotiate sends the password in clear over
-   the internet. Mandatory is the fix, and it costs nothing but a config change:
+   the internet. Mandatory is the fix, and it costs nothing but a config change.
+   Dovecot 2.4 renamed the knob and inverted it — read the new name, or a check
+   that only knows `disable_plaintext_auth` will look unset forever:
 
 ```bash
-# Dovecot: disable_plaintext_auth = yes means "not without TLS", not "never"
-sudo doveconf -n disable_plaintext_auth ssl
-sudo grep -rn 'ftp_tls\|ssl_enable\|force_tls' /etc/proftpd.conf /etc/pure-ftpd.conf 2>/dev/null
+# Dovecot 2.4+: auth_allow_cleartext=no means "not without TLS"
+# Older Dovecot: disable_plaintext_auth=yes is the same policy
+sudo doveconf -a | grep -iE 'auth_allow_cleartext|disable_plaintext_auth|^ssl '
+sudo dovecot --version
+# Pure-FTPd: TLS 1 = optional (cleartext USER/PASS still works); TLS 2 = required
+sudo grep -nE '^TLS\s' /etc/pure-ftpd.conf
 ```
 
 2. **Should the plaintext ports be open at all?** That one is a
    client-compatibility decision rather than a technical one, which is why the
-   audit warns instead of failing. Closing `110`/`143` in `TCP_IN` and leaving
-   `993`/`995` is the clean end state; FTP is usually the sticking point,
-   because customers have clients configured for `21`.
+   audit warns instead of failing when cleartext auth is still possible.
+   Closing `110`/`143` in `TCP_IN` and leaving `993`/`995` is the clean end
+   state; FTP is usually the sticking point, because customers have clients
+   configured for `21`.
+
+**Applied on the primary:** Dovecot 2.4.5 already had `auth_allow_cleartext =
+no`; Pure-FTPd was flipped from `TLS 1` to `TLS 2`. The audit now treats that
+combination as OK (legacy ports listen, cleartext passwords are refused).
+Closing 110/143/21 later is optional client-compat cleanup.
 
 If you do only one thing here, make TLS mandatory. Closing ports can wait for a
 customer-communication window; a password crossing the internet in clear cannot
@@ -678,17 +701,17 @@ read those blocks by hand.
 
 ### What a run looks like today
 
-Three `WARN`s and the two expected skips. Anything else is new and worth
-reading:
+One deliberate `WARN` and the two expected skips. Anything else is new and
+worth reading:
 
 | Finding | Where it is answered |
 |---------|---------------------|
-| `accounts/authorized-keys` | [What is left after the allowlist](#what-is-left-after-the-allowlist) — the shared key, not the file count |
-| `exposure/datastore` | [Bound is not the same as reachable](#bound-is-not-the-same-as-reachable) — bind MySQL to loopback |
-| `exposure/plaintext-auth` | [The plaintext mail and FTP ports…](#the-plaintext-mail-and-ftp-ports-are-now-the-last-password-path) — make TLS mandatory first |
+| `accounts/authorized-keys` | [What is left after the allowlist](#what-is-left-after-the-allowlist) — the shared key on an admitted account; operator chose to keep `WBAT.pem` |
 
-`ssh/root` and `ssh/allowlist` both report `OK` now, and `ssh/root` does so
-because of the allowlist rather than because `PermitRootLogin` changed. If the
+`exposure/datastore` and `exposure/plaintext-auth` report `OK` after the MySQL
+bind-address drop-in and Pure-FTPd `TLS 2` / Dovecot `auth_allow_cleartext=no`.
+`ssh/root` and `ssh/allowlist` both report `OK`, and `ssh/root` does so because
+of the allowlist rather than because `PermitRootLogin` changed. If the
 allowlist is ever removed, expect both to move together — that coupling is the
 one to notice, because the second one moving is easy to read as unrelated.
 

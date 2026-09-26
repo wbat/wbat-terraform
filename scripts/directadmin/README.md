@@ -14,6 +14,33 @@ Forwarder destination in DA UI:
 |/usr/local/bin/ses-gmail-forward.py
 ```
 
+The Gmail copy must come **From** the allowlisted address (that is the identity SES
+verified), so the `via …` suffix on the display name is the only visible sign of which
+of your domains a message arrived on — it defaults to that domain, and `via_labels` in
+the runtime config maps it to a nicer name. Everything else about who the message was
+addressed to is preserved, so Gmail's Reply-All still reaches the other recipients. Delivery is the SES envelope, not
+those headers, so naming third parties in `To`/`Cc` sends them nothing. Both halves are
+proved offline:
+
+```bash
+./scripts/directadmin/prove_ses_gmail_forward.py   # no AWS; boto3 is stubbed
+./scripts/directadmin/prove_ses_gmail_health.sh    # the cron check, on fixture aliases
+./scripts/directadmin/prove_mail_auth_posture.sh   # the DMARC audit, on fixture zones
+```
+
+The last group of cases runs the real script as a subprocess against a fake `boto3` on
+`PYTHONPATH`, because the property Exim cares about is the exit code and the streams:
+nonzero, or a single byte on stderr, bounces a message Roundcube has already accepted.
+That is why an unhandled exception is logged at `ERROR` and swallowed instead of
+crashing — and why three mutants of the real script are part of the proof, since a
+guard that cannot be shown to fire is indistinguishable from no guard.
+
+The bug that proof exists for is worth remembering when reading the rewrite: `Cc` was
+passed through untouched while `To` was replaced wholesale with the Gmail address, so
+Cc'd people appeared to work and every reply quietly excluded the message's other `To`
+recipients. Nothing on the Gmail side looks wrong when that happens — the copy arrives,
+it just no longer says who else it was for.
+
 ### Persist pipe aliases (DA Forwarders UI rewrite)
 
 DA rewrites `/etc/virtual/<domain>/aliases` when Forwarders change. Prefer DA
@@ -44,7 +71,11 @@ install -m 700 scripts/directadmin/forwarder_delete_post.sh \
 # echo '*/15 * * * * root /usr/local/bin/ensure-ses-gmail-aliases.sh' \
 #   >/etc/cron.d/ses-gmail-aliases
 
-# Health check (every 5m): self-heal aliases + flag recent forward ERROR
+# Health check (every 5m): self-heal aliases, flag recent forward ERROR, and report any
+# address piping into the forwarder without a matching entry in managed-aliases.conf. It
+# fails only when such an address has no mailbox, because then the pipe is the whole
+# delivery and the message is lost with no bounce and nothing else noticing; with a mailbox
+# it is logged as a NOTE, since only the Gmail copy is missing.
 install -m 755 scripts/directadmin/ses_gmail_forward_health.sh \
   /usr/local/bin/ses-gmail-forward-health.sh
 install -m 600 scripts/directadmin/health.conf.example \
@@ -54,6 +85,53 @@ echo '*/5 * * * * root /usr/local/bin/ses-gmail-forward-health.sh' \
   >/etc/cron.d/ses-gmail-forward-health
 chmod 644 /etc/cron.d/ses-gmail-forward-health
 ```
+
+## Mail auth posture (`mail_auth_posture.sh`)
+
+Read-only sweep of SPF / DKIM / DMARC across every domain in `/etc/virtual/domainowners`,
+reading the local zone files. Changes nothing, needs no credentials, and exits 0 unless
+`--strict` is given.
+
+```bash
+./scripts/directadmin/mail_auth_posture.sh                 # table + summary + findings
+./scripts/directadmin/mail_auth_posture.sh --only wbat.net
+./scripts/directadmin/mail_auth_posture.sh --no-dns        # skip the rua lookups
+./scripts/directadmin/mail_auth_posture.sh --strict        # exit 1 on an unauthorized rua
+```
+
+The reason it is not `grep -l _dmarc /var/named/*.db`: **a DMARC record can be present and
+collect nothing.** RFC 7489 §7.1 makes a `rua` mailbox on another domain an *external
+destination*, valid only if that domain publishes
+`<policy-domain>._report._dmarc.<rua-domain>`. Spec-following reporters send nothing
+otherwise, so `rua=mailto:you@gmail.com` is reporting that silently never happens. This
+resolves that record per destination and reports `UNAUTHORIZED`. See
+[`ses_gmail_forward.md`](./ses_gmail_forward.md) for the rest of that story.
+
+DKIM is reported the same way and for the same reason, because a published key proves just
+as little. DirectAdmin signs from `/etc/exim.dkim.conf` with selector `x` and the key at
+`/etc/virtual/<domain>/dkim.private.key`, falling back to `{0}` — do not sign — when the key
+is absent. So the state is the pair:
+
+| State | Meaning |
+|---|---|
+| `signing` | key on disk **and** `x._domainkey` published: the only state that works |
+| `BROKEN` | key but nothing published — signs unverifiably, worse than not signing |
+| `stale` | `x._domainkey` published with no key behind it, so nothing is ever signed |
+| `delegated` | only another selector, so a third party such as SES signs; not ours to judge |
+| `none` | neither |
+
+`--strict` fails on `UNAUTHORIZED` and `BROKEN` only: those two look configured and are not.
+`stale`, `none` and a missing DMARC record are honest about themselves and are backlog items
+rather than regressions.
+
+Two details that make the output trustworthy rather than reassuring:
+
+- `domainowners` is `domain: user`, so the domain field arrives with a trailing colon.
+  Leaving it on makes every zone path miss and prints `zones examined: 0` — a clean-looking
+  result for a host with 97 domains. A mutant in the proof asserts the strip is load-bearing.
+- DirectAdmin domain pointers are symlinks sharing the target's `passwd`, so they look like
+  mail domains of their own. They are flagged `POINTER` and kept out of the "needs DMARC"
+  findings, because they are real recipients but not separate things to fix.
 
 ## Vhost listen reconciler (Linked IP drift)
 
@@ -705,6 +783,15 @@ Where a clean verdict would be easy but wrong, it does the harder thing:
   is not a way in, and warning about it would be a finding on a session that cannot
   happen. The coupling is stated instead: adding root to that group re-opens
   key-based root login with no other change.
+- Legacy mail/FTP ports (21/110/143) are judged by whether cleartext auth is
+  still accepted, not by the port list alone. Dovecot 2.4's
+  `auth_allow_cleartext=no` (and the older `disable_plaintext_auth=yes`) and
+  Pure-FTPd `TLS 2` clear the finding while the ports stay open; `TLS 1` or
+  cleartext allowed keeps it. FTP policy is read from the daemon that owns
+  `:21` (`ss`), not from whichever of Pure-FTPd/ProFTPd still has a conf on
+  disk — DirectAdmin leaves both after a CustomBuild switch. Closing those
+  ports is optional client-compat cleanup, reported as such rather than as
+  unfinished hardening.
 - A running `amazon-ssm-agent` is reported as a running process, not as a recovery
   path. Only `PingStatus: Online` from the control plane means a session can
   actually be opened, and that is a separate check.
@@ -718,7 +805,7 @@ in, is in [aws/docs/host-access-hardening.md](../../aws/docs/host-access-hardeni
 ./scripts/directadmin/prove_host_access_audit.sh
 ```
 
-Twenty-six cases, every one of them a way this audit can mislead: a password path left
+Twenty-seven cases, every one of them a way this audit can mislead: a password path left
 open while the report reads green, or a false alarm that sends an operator to install
 something harmful. The motivating case is `PasswordAuthentication no` with PAM
 keyboard-interactive still enabled: what most hardening checklists stop short of,
@@ -756,3 +843,12 @@ unquoted `for` over that pattern expands against cwd before the match, so
 accounts as refused. Case 26 is a tie: two fingerprints at the same maximum reach,
 one only on refused accounts and one on an admitted account — keeping only
 `head -1` of that tie can silence the live one.
+
+Case 27 is the same shape of stale finding on the mail/FTP ports. Dovecot 2.4
+renamed `disable_plaintext_auth` to `auth_allow_cleartext` (and inverted it), and
+Pure-FTPd `TLS 2` already refused cleartext FTP — but the audit only counted
+open ports, so it kept asking the operator to confirm a policy that was already
+set. The case asserts both directions: `TLS 1` or `auth_allow_cleartext=yes`
+must keep warning. It also asserts that a leftover Pure-FTPd `TLS 2` must not
+clear ProFTPd (or an unidentified listener) on `:21` — DirectAdmin hosts keep
+both configs after a CustomBuild switch, and the inactive file is not a policy.

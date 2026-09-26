@@ -8,3 +8,7 @@ data "aws_iam_policy" "administrator_access" {
 data "aws_iam_policy" "AmazonSSMManagedInstanceCore" {
   arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
+
+data "aws_iam_policy" "CloudWatchAgentServerPolicy" {
+  arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+}
