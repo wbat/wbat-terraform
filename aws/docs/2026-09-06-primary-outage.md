@@ -2393,6 +2393,11 @@ reach roughly twice what it currently uses; 20 workers at that limit is 5 GB on 
 3.8 GB. That is the same class of defect as the unbounded query above — demand with no
 ceiling — and the leaked servers were what turned an ordinary burst into a CRITICAL page.
 
+*Resolved the next day: [capped at 10](#tellerstec-capped-at-10-workers-2026-09-26). The
+pool files turned out to be DirectAdmin-generated under
+`/usr/local/directadmin/data/users/<user>/php/`, and world-readable. The paragraph below
+is what was known at the time.*
+
 This is deliberately recorded as unfixed. Sizing `pm.max_children` needs the pool configs
 under `/usr/local/php*/etc/php-fpm.d/`, which are not readable as `tellerstec`, and the
 number should come from what the pool has actually been hitting rather than from
@@ -2417,15 +2422,111 @@ content hadn't changed in 90 days. The job now runs `--quick` (size and mtime, n
 hashing) six nights a week, with the full checksum run on Saturday. See
 `scripts/directadmin/README.md`.
 
-**The rest were web requests.** Disk reads were near zero during them, so the load was
-the `tellerstec` pool's workers competing for two CPUs: 20 busy workers means a load
-average of about 20. Most requests reach the host through CloudFront, so the origin sees
-edge addresses rather than clients, and the live nginx logs are root-only. The previous
-day's rotated `tellerstech.com` log shows the likely shape: 1,209 of its 2,063 requests
-came from one Oracle Cloud address (`140.245.106.4`, `Go-http-client`), including 1,072
-requests for `/` in ten minutes. That is the same pool as the memory finding above, and
-the same fix covers both. A `pm.max_children` sized for two CPUs queues a burst instead
-of thrashing, and blocking or rate-limiting that client shape stops paying for it at all.
+**The rest were our own E2E runs.** Disk reads were near zero during them, so the load
+was the `tellerstec` pool's workers competing for two CPUs: 20 busy workers means a load
+average of about 20. Across all sites, `tellerstech.com.origin.log` had 10,925 of the
+requests between 20:00 and 22:59, four times the next site. **7,758 of those were
+`/sw.js`**, from `HeadlessChrome` and `PlaywrightE2E/1.0`, in the same 10-minute windows
+as the spikes. `/sw.js` is a WordPress route that sent `Cache-Control: no-cache` with no
+validator, so every request missed CloudFront and booted WordPress. Every Playwright test
+is a fresh browser, and every fresh browser registers the service worker. The E2E suite
+runs against production, and it was being worked on all evening.
+
+The fix is in `tellerstech-website`:
+- #1490 and #1491 capped the suite at 3 workers.
+- #1493 made `/sw.js` cacheable at CloudFront for five minutes (`public, max-age=0,
+  s-maxage=300`) and blocked service workers in the suite.
+
+After deploy, a second `/sw.js` request returns `Hit from cloudfront`.
+
+The day before had a different shape, with the same effect. The rotated log shows one
+Oracle Cloud address (`140.245.106.4`, `Go-http-client`) sending 1,072 requests for `/`
+in ten minutes. A pool cap sized for two CPUs covers both cases; see the next section.
+
+### `tellerstec` capped at 10 workers (2026-09-26)
+
+**Evidence.** php-fpm has logged to syslog since December (`error_log = syslog`), so
+`/usr/local/php82/var/log/php-fpm.log` stops at 2025-12-23 and its warnings are about the
+old `teller` pool. The journal goes back to the Sep 6 boot. In those 20 days,
+`[pool tellerstec] server reached max_children setting (20)` appears 21 times, and every
+one is on Sep 25–26, during the E2E runs above. Ordinary traffic never reached 20. At about
+122 MB each, 20 workers is 2.4 GB of 3.8 GB, and on two CPUs anything past about ten just
+shares the CPUs and slows down together. A cap of 10 queues a burst instead and tops out
+around 1.2 GB.
+
+**Where the 20 came from.** It was hard-coded in DirectAdmin's server-wide custom
+template, `/usr/local/directadmin/data/templates/custom/php-fpm.conf` (written Jul 7),
+as `pm.max_children = 20`. That applied to all 13 accounts; `directadmin.conf` has
+`php_fpm_max_children_default=10`, which the template ignored. Lowering the template to
+10 would also have capped `teller`, which hit a cap of 10 repeatedly in December 2025,
+probably the reason the 20 exists. So the change is two parts:
+
+1. The template now reads the token, with 20 as its own default, so every other
+   account's generated file is byte-identical to before:
+
+   ```text
+   |?MAX_CHILDREN=20|              (was |?MAX_CHILDREN=`MAX_CHILDREN_DEFAULT`|)
+   pm.max_children = |MAX_CHILDREN|   (was pm.max_children = 20)
+   ```
+
+2. A per-user override, `/usr/local/directadmin/data/users/tellerstec/php/php-fpm82.conf.custom1`,
+   containing `|?MAX_CHILDREN=10|` (`diradmin:diradmin`, mode 644). `CUSTOM1` is expanded
+   after the defaults, so it wins.
+
+**Applying it.** On DirectAdmin 1.711 the task is `action=rewrite&value=httpd`.
+`value=phpfpm` is rejected as `Unknown rewrite`. It accepts a user, which keeps the
+regenerated files to that one account:
+
+```bash
+/usr/local/directadmin/directadmin taskq --run 'action=rewrite&value=httpd&user=tellerstec'
+/usr/local/php82/sbin/php-fpm -t -y /usr/local/php82/etc/php-fpm.conf
+systemctl reload php-fpm82   # the per-user rewrite does not reload php-fpm
+```
+
+The rewrite also queues an nginx reload, which `dataskq` runs within the minute. That
+makes it a change under [da-vhost-listen-change-window.md](da-vhost-listen-change-window.md),
+and it was gated that way:
+- `nginx -T` was snapshotted before, and diffed at zero lines after.
+- `tellerstec`'s `nginx.conf` and `nginx_php.conf` came out byte-identical.
+- `nginx -t` passed.
+- The listen invariant passed on all 192 server blocks, before and after.
+
+**Verified.**
+- `php-fpm -tt` shows `pm.max_children = 10` for `[tellerstec]`.
+- The other 12 pool files are byte-identical to the snapshot.
+- `tellerstech.com`, `oncallbrief.com`, `shipitweekly.fm` and `wbat.net` return 200.
+- `origin.tellerstech.com` returns 403 without the secret header.
+
+Two warnings in the logs predate the change and are unrelated. nginx's
+`conflicting server name` for `frazzy.com` has 5,764 occurrences since at least Sep 20.
+php-fpm 8.1's `Nothing matches the include pattern` appears because no account uses 8.1.
+
+Backups are in `/root/fpm-maxchildren-20260926-140559/`: the original template, all 13
+pool files, the users' nginx configs, and `nginx -T` output before and after. To roll back,
+set the `.custom1` file to `|?MAX_CHILDREN=20|`, then rerun the rewrite and reload above.
+
+**What to watch.** `journalctl | grep 'pool tellerstec] server reached max_children setting (10)'`.
+A warning on its own does not mean the cap is too low. Hitting the cap is also what the
+cap is *for*: the E2E runs and the Oracle Cloud client above would both have tripped it,
+and raising it for either would give back the memory and CPU it protects. Before changing
+anything, see who was asking in the minutes around the warning:
+
+```bash
+T='26/Sep/2026:14:1'   # the warning's date and hour:tens-of-minutes, in nginx's format
+F=/var/log/nginx/domains/tellerstech.com.origin.log
+sudo sh -c "grep '$T' $F | awk -F'\"' '{print \$6}' | sort | uniq -c | sort -rn | head"
+sudo sh -c "grep '$T' $F | awk '{print \$9, \$7}' | sed 's/?.*//' | sort | uniq -c | sort -rn | head"
+```
+
+- **One user agent, one path, or a burst of uncacheable requests:** it's a client
+  problem. Block or rate-limit the source, or make the route cacheable as #1493 did for
+  `/sw.js`. Leave the cap where it is.
+- **Our own tooling** (`PlaywrightE2E`, `HeadlessChrome`, `curl` from CI): fix the tool.
+- **Many ordinary browsers across ordinary pages, recurring on normal days:** that is
+  sustained legitimate demand, and 12–14 is the next step.
+
+Neither the template nor the override is in this repository, so a host rebuild loses both;
+this section is the record.
 
 ## Still open
 
@@ -2504,11 +2605,10 @@ of thrashing, and blocking or rate-limiting that client shape stops paying for i
   against a directory the hook did not create.
 - **`/usr/local/sbin/migrate-backups-to-s3.sh` and `verify-backups-s3.sh`** exist on the
   host, are not in this repository, and were not examined.
-- **`php-fpm` pool `tellerstec` has no demonstrated ceiling.** It was measured going from
-  5 to 20 workers at 122 MB each — 2,446 MB, 63% of RAM — during
-  [the 2026-09-25 alert](#2026-09-25-memory-alert--80-leaked-dev-servers-and-what-it-hid),
-  with a `memory_limit` that would permit roughly twice that per worker. Now that the
-  leaked dev servers are gone there is headroom to absorb it, which means this is no longer
-  urgent and is also no longer being masked. Read the pool configs and the
-  `pm.max_children` warnings before choosing a cap; a cap set below what the pool is
-  genuinely serving turns a memory problem into 502s.
+- **The `php-fpm` template and the `tellerstec` override live only on the host.** The pool
+  is [capped at 10 since 2026-09-26](#tellerstec-capped-at-10-workers-2026-09-26), via
+  DirectAdmin's custom template and a per-user `.custom1` file, and neither is managed
+  from this repository. The cap's evidence is 20 days of journal. A
+  `max_children setting (10)` warning is a prompt to check the origin log, not to raise
+  the cap: raise it (to 12–14, not back to 20) only for sustained legitimate demand, and
+  block, rate-limit or cache for anything else. See "What to watch" in that section.
