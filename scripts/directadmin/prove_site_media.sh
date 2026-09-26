@@ -312,6 +312,58 @@ SITE_MEDIA_HOME="$HOMES" SITE_MEDIA_MANIFEST="$MANIFEST" \
 assert "preflight alert mailed" "[[ -s '$STUB_MAIL' ]]"
 assert "names the unset bucket" "grep -q 'SITE_MEDIA_BUCKET unset' '$STUB_MAIL'"
 
+echo "== 18. a full sync still hashes on both copy and verify =="
+reset_world
+run --sync >/dev/null
+assert "every copy uses --checksum" "[[ \$(grep '^copy ' '$STUB_CALLS' | grep -c -- '--checksum') -eq 2 ]]"
+assert "every check uses --checksum" "[[ \$(grep '^check ' '$STUB_CALLS' | grep -c -- '--checksum') -eq 2 ]]"
+
+echo "== 19. a quick sync hashes nothing and writes no receipt =="
+reset_world
+rc=$(run --sync --quick)
+assert "exits zero" "[[ $rc -eq 0 ]]"
+assert "copied both paths" "[[ \$(grep -c '^copy ' '$STUB_CALLS') -eq 2 ]]"
+assert "no copy uses --checksum" "! grep '^copy ' '$STUB_CALLS' | grep -q -- '--checksum'"
+assert "every check is --size-only" "[[ \$(grep '^check ' '$STUB_CALLS' | grep -c -- '--one-way --size-only') -eq 2 ]]"
+assert "no receipt written" "[[ ! -e '${STATE}/teller.receipt' ]]"
+assert "exclusions still refused on a quick run alone" "[[ \$(run --write-exclusions) -ne 0 ]]"
+
+echo "== 20. a successful quick sync leaves a full run's receipt untouched =="
+reset_world
+run --sync >/dev/null
+cp "${STATE}/teller.receipt" "${SANDBOX}/receipt.before"
+rc=$(run --sync --quick)
+assert "exits zero" "[[ $rc -eq 0 ]]"
+assert "receipt byte-identical" "cmp -s '${SANDBOX}/receipt.before' '${STATE}/teller.receipt'"
+assert "exclusions still accepted" "[[ \$(run --write-exclusions) -eq 0 ]]"
+
+echo "== 21. a failed quick sync drops the receipt =="
+reset_world
+run --sync >/dev/null
+STUB_CHECK_RC=1 run --sync --quick >/dev/null
+assert "no receipt after failed quick verification" "[[ ! -e '${STATE}/teller.receipt' ]]"
+reset_world
+run --sync >/dev/null
+STUB_COPY_RC=1 run --sync --quick >/dev/null
+assert "no receipt after failed quick copy" "[[ ! -e '${STATE}/teller.receipt' ]]"
+rc=$(run --write-exclusions)
+assert "exclusions refused" "[[ $rc -ne 0 ]]"
+
+echo "== 22. a failed quick sync alerts when exclusions are in place =="
+reset_world
+run --sync >/dev/null
+USE_CONF="$CONF_REAL" run --write-exclusions >/dev/null
+: >"$STUB_MAIL"
+USE_CONF="$CONF_REAL" STUB_CHECK_RC=1 run --sync --quick >/dev/null
+assert "mail was sent" "[[ -s '$STUB_MAIL' ]]"
+assert "subject says the content is unprotected" "grep -q 'content is unprotected' '$STUB_MAIL'"
+
+echo "== 23. --quick and --deep-verify together are refused before any work =="
+reset_world
+rc=$(run --sync --quick --deep-verify)
+assert "exits 2" "[[ $rc -eq 2 ]]"
+assert "rclone never called" "[[ ! -s '$STUB_CALLS' ]]"
+
 # Non-vacuity. Each check removes one guard and confirms the corresponding proof then
 # stops holding. A proof that passes against a script with its guard deleted is proving
 # nothing, and the way that happens in practice is a fixture that would have satisfied
@@ -378,6 +430,23 @@ assert "NV3: unmutated script alerts" "[[ -s '$STUB_MAIL' ]]"
 : >"$STUB_MAIL"
 STUB_CHECK_RC=1 SITE_MEDIA_CONF="$CONF_REAL" run_mutant --sync >/dev/null
 assert "NV3: without the exclusions check the same failure is silent" "[[ ! -s '$STUB_MAIL' ]]"
+
+# NV4: a good receipt followed by a failed quick run, which is proof 21's fixture. A quick
+# run skips the up-front invalidation, so the failure branch is the only thing that stops
+# the old receipt vouching for a copy that has since been seen to fail.
+reset_world
+run --sync >/dev/null
+STUB_CHECK_RC=1 run --sync --quick >/dev/null
+control_receipt=$([[ -e "${STATE}/teller.receipt" ]] && echo present || echo absent)
+reset_world
+run --sync >/dev/null
+cp "$SCRIPT" "$MUT"
+sed -i 's/^      invalidate_receipt "\$user"$/      :/' "$MUT"
+chmod +x "$MUT"
+assert "NV4 mutant differs from the original" "! cmp -s '$SCRIPT' '$MUT'"
+STUB_CHECK_RC=1 run_mutant --sync --quick >/dev/null
+assert "NV4: unmutated script drops the receipt" "[[ $control_receipt == absent ]]"
+assert "NV4: without the failure-branch invalidation the receipt survives" "[[ -e '${STATE}/teller.receipt' ]]"
 
 echo
 printf 'passed %d, failed %d\n' "$pass" "$fail"

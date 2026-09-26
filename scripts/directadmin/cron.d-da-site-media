@@ -13,7 +13,14 @@
 # 90 days for the largest directory -- so the window is ample. Cron mail is suppressed
 # because the script alerts on its own, and it alerts hardest in exactly the case that
 # matters: verification failing while the exclusions are in place.
+#
+# Six nights a week the run is --quick: copy and verify by size and mtime, no local
+# hashing. Saturday's full run hashes all ~40 GB twice, which pins the volume for about
+# ten minutes; doing that nightly held the load average above 20 on 2026-09-25. Weekly
+# keeps checksum verification and the receipt current -- the receipt is accepted for 7
+# days, so --write-exclusions still works any day of the week after a good Saturday.
 SHELL=/bin/bash
 PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin
 
-30 23 * * * root /usr/local/sbin/sync-site-media.sh --sync >/dev/null 2>&1
+30 23 * * 0-5 root /usr/local/sbin/sync-site-media.sh --sync --quick >/dev/null 2>&1
+30 23 * * 6 root /usr/local/sbin/sync-site-media.sh --sync >/dev/null 2>&1
