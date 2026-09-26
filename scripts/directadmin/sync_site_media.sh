@@ -31,10 +31,20 @@
 #   1. Delete anything, locally or in S3. It copies. Files removed from the host stay in
 #      the archive, which is the direction an archive should fail in. The IAM role has no
 #      s3:DeleteObject on this bucket either, so it is not merely a convention here.
-#   2. Trust its own upload. Every run verifies with checksums over the whole path set,
-#      and --deep-verify reads the bytes back rather than comparing metadata.
+#   2. Trust its own upload. Every run checks that every local file is in S3 at the
+#      right size. A full run verifies with checksums over the whole path set, and
+#      --deep-verify reads the bytes back rather than comparing metadata.
 #   3. Stay quiet when exclusions are in place and verification has stopped passing.
 #      That combination means live data is unprotected, and it alerts on every run.
+#
+# --quick exists because a full run hashes every local file twice, once to decide what to
+# copy and once to verify. For ~40 GB that is ten minutes pinned at the volume's 125 MB/s
+# baseline, and on 2026-09-25 it held the load average above 20 with every site on the box
+# stalled behind it. A quick run decides what to copy by size and modification time and
+# verifies by size, so it reads S3 metadata rather than local bytes. It never writes a
+# receipt, because a receipt is the evidence --write-exclusions relies on and a size match
+# is weaker evidence than it asks for. It does invalidate one on failure. The full run
+# stays on a weekly schedule to keep checksum verification, and the receipt, current.
 #
 # Paths are overridable by environment variable so prove_site_media.sh can exercise this
 # without root, S3, or DirectAdmin.
@@ -347,7 +357,10 @@ alert_if_unprotected() {
 # Copy one account's paths. rclone copy never deletes at the destination; that is the
 # whole point and it is why this is not `rclone sync`.
 copy_user() {
-  local user="$1" rc=0 p src dst out
+  local user="$1" quick="$2" rc=0 p src dst out compare=(--checksum)
+  # Without --checksum rclone compares size and modification time, reading the mtime it
+  # stored on upload from object metadata instead of hashing the local file.
+  [[ "$quick" == "yes" ]] && compare=()
   while IFS= read -r p; do
     src="${HOME_ROOT}/${user}/${p}"
     dst="$(remote_base)/${user}/${p}"
@@ -357,7 +370,7 @@ copy_user() {
       continue
     fi
     log "copying ${user}/${p}"
-    if ! out="$("$RCLONE" copy "$src" "$dst" --checksum --transfers 8 --stats-one-line --stats 5m 2>&1)"; then
+    if ! out="$("$RCLONE" copy "$src" "$dst" "${compare[@]}" --transfers 8 --stats-one-line --stats 5m 2>&1)"; then
       log "ERROR ${user}: copy of ${p} failed: ${out}"
       rc=1
       continue
@@ -371,9 +384,10 @@ copy_user() {
 # correct here because the archive deliberately keeps files the host no longer has, so
 # extra objects at the destination are expected and are not a failure.
 verify_user() {
-  local user="$1" deep="$2" rc=0 p src dst out args
+  local user="$1" deep="$2" quick="${3:-no}" rc=0 p src dst out args
   args=(check --one-way --checksum)
   [[ "$deep" == "yes" ]] && args=(check --one-way --download)
+  [[ "$quick" == "yes" ]] && args=(check --one-way --size-only)
 
   while IFS= read -r p; do
     src="${HOME_ROOT}/${user}/${p}"
@@ -481,25 +495,30 @@ do_write_exclusions() {
 }
 
 do_sync() {
-  local deep="$1" rc=0 user copied verified files bytes stats
+  local deep="$1" quick="$2" rc=0 user copied verified files bytes stats
   local failed=() ok=()
 
   while IFS= read -r user; do
     # Drop any prior receipt before we start. A failed run must not leave a receipt that
     # still looks valid for --write-exclusions; a successful run writes a fresh one.
-    invalidate_receipt "$user"
+    # A quick run never writes one, so it only drops the receipt if it fails.
+    [[ "$quick" == "yes" ]] || invalidate_receipt "$user"
     copied=0
     verified=0
-    copy_user "$user" || copied=1
-    verify_user "$user" "$deep" || verified=1
+    copy_user "$user" "$quick" || copied=1
+    verify_user "$user" "$deep" "$quick" || verified=1
 
-    if ((copied == 0 && verified == 0)); then
+    if ((copied == 0 && verified == 0)) && [[ "$quick" == "yes" ]]; then
+      log "OK ${user}: copied and verified by size (quick); receipt left as it was"
+      ok+=("$user")
+    elif ((copied == 0 && verified == 0)); then
       stats="$(size_of_user "$user")"
       read -r files bytes <<<"$stats"
       write_receipt "$user" "$files" "$bytes" "$([[ "$deep" == yes ]] && echo download || echo checksum)"
       log "OK ${user}: ${files} file(s), ${bytes} bytes copied and verified"
       ok+=("$user")
     else
+      invalidate_receipt "$user"
       failed+=("$user")
       rc=1
       # The dangerous state, and the reason this is an alert rather than a log line: the
@@ -531,15 +550,19 @@ do_sync() {
 
 usage() {
   cat <<'USAGE'
-Usage: sync-site-media.sh [--list|--sync|--verify-only|--write-exclusions] [--deep-verify]
+Usage: sync-site-media.sh [--list|--sync|--verify-only|--write-exclusions] [--quick|--deep-verify]
 
   --list               Show the manifest and what each path currently occupies.
   --sync               Copy to S3, verify, and record a receipt. Default.
-  --verify-only        Re-verify what is already in S3; do not copy.
+  --verify-only        Re-verify what is already in S3; do not copy. Drops the receipt
+                       on failure.
   --write-exclusions   Write .backup_exclude_paths for each account in the manifest.
                        Refuses unless a current receipt covers exactly those paths.
   --deep-verify        Verify by reading the bytes back rather than comparing checksums.
                        Slow and worth it once, before the first exclusion is written.
+  --quick              Copy by size and modification time and verify by size only, so
+                       no local file is hashed. Never writes a receipt; drops it on failure.
+                       The nightly schedule; a full --sync still runs weekly.
 
 Config: /etc/da-vhost-listen/site-media.conf  (manifest: "<user> <path-relative-to-home>")
         /etc/da-vhost-listen/vhost-listen.conf (SITE_MEDIA_BUCKET, HEALTH_ALERT_TO)
@@ -547,7 +570,7 @@ USAGE
 }
 
 main() {
-  local mode="sync" deep="no"
+  local mode="sync" deep="no" quick="no"
   while (($# > 0)); do
     case "$1" in
       --list) mode="list" ;;
@@ -555,6 +578,7 @@ main() {
       --verify-only) mode="verify" ;;
       --write-exclusions) mode="exclusions" ;;
       --deep-verify) deep="yes" ;;
+      --quick) quick="yes" ;;
       -h | --help)
         usage
         return 0
@@ -567,6 +591,10 @@ main() {
     esac
     shift
   done
+  if [[ "$quick" == "yes" && "$deep" == "yes" ]]; then
+    echo "--quick and --deep-verify ask for opposite things; pick one" >&2
+    return 2
+  fi
 
   read_manifest || {
     alert_if_unprotected \
@@ -611,11 +639,16 @@ main() {
     verify)
       local rc=0 user
       while IFS= read -r user; do
-        verify_user "$user" "$deep" || rc=1
+        # A failed verification is evidence against the receipt whatever mode found it;
+        # leaving it in place would let --write-exclusions trust a copy just seen to fail.
+        if ! verify_user "$user" "$deep" "$quick"; then
+          invalidate_receipt "$user"
+          rc=1
+        fi
       done < <(manifest_users_unique)
       return $rc
       ;;
-    *) do_sync "$deep" ;;
+    *) do_sync "$deep" "$quick" ;;
   esac
 }
 

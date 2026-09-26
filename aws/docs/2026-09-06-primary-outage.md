@@ -2401,6 +2401,32 @@ arithmetic alone. The question to answer first is whether php-fpm has been loggi
 throttled; if it has not, 20 workers is demand rather than a ceiling, and a cap set below
 it will start refusing requests.
 
+### The same evening's load spikes were CPU, from two sources
+
+Once memory was back at 60% committed, the load average kept spiking to 15–23 on this
+2-vCPU box: at 20:20–20:40, 21:00, 21:30–21:50, 22:50, and 23:30. `sar` splits them
+into two kinds.
+
+**23:30 was ours.** `/etc/cron.d/da-site-media` ran a full
+[`sync-site-media.sh --sync`](#teller-site-media-archive) every night. That run is
+`rclone copy --checksum` followed by `rclone check --checksum`, so it hashes all 43,883
+files (40 GB) twice. It ran from 23:30:02 to 23:40:25 at about 125 MB/s of reads, which
+is the gp3 volume's baseline throughput. For those ten minutes CPU idle was 0%, with more
+than half of it in the kernel, and every site on the box queued behind the disk. The
+content hadn't changed in 90 days. The job now runs `--quick` (size and mtime, no local
+hashing) six nights a week, with the full checksum run on Saturday. See
+`scripts/directadmin/README.md`.
+
+**The rest were web requests.** Disk reads were near zero during them, so the load was
+the `tellerstec` pool's workers competing for two CPUs: 20 busy workers means a load
+average of about 20. Most requests reach the host through CloudFront, so the origin sees
+edge addresses rather than clients, and the live nginx logs are root-only. The previous
+day's rotated `tellerstech.com` log shows the likely shape: 1,209 of its 2,063 requests
+came from one Oracle Cloud address (`140.245.106.4`, `Go-http-client`), including 1,072
+requests for `/` in ten minutes. That is the same pool as the memory finding above, and
+the same fix covers both. A `pm.max_children` sized for two CPUs queues a burst instead
+of thrashing, and blocking or rate-limiting that client shape stops paying for it at all.
+
 ## Still open
 
 - **The kernel-side cause of the process kills** is unconfirmed. `dmesg` was never

@@ -603,7 +603,7 @@ unbackuppable, and it was copying identical bytes every time.
 
 This script takes that content out of the account backup and gives it a copy of its own:
 `rclone copy` to the archive bucket (`aws/global/s3-site-media-archive.tf`), verified with
-checksums, updated incrementally, and never expired.
+checksums weekly and by size nightly, updated incrementally, and never expired.
 
 **Excluding is a separate step from copying, and it is gated.** Once a path is excluded,
 the S3 copy is the only off-host copy of live site content, so `--write-exclusions`
@@ -616,6 +616,7 @@ sync-site-media.sh --list                     # manifest and current sizes
 sync-site-media.sh --sync --deep-verify       # first run: read the bytes back, not just checksums
 sync-site-media.sh --write-exclusions         # only after the above succeeded
 sync-site-media.sh --verify-only              # re-check what is in S3
+sync-site-media.sh --sync --quick             # nightly: size + mtime, no local hashing
 ```
 
 Three things it will not do. It never deletes, locally or in S3 — `rclone copy`, not
@@ -624,6 +625,26 @@ the host persist in the archive. It never trusts its own upload; every run verif
 whole path set. And it never stays quiet when verification fails while exclusions are in
 place, because that combination means live content is unprotected while every other backup
 still reports success.
+
+**The schedule is quick six nights, full on Saturday.** A full `--sync` hashes every local
+file twice, once to choose what to copy and once to verify. For ~40 GB that means about
+ten minutes at the volume's 125 MB/s baseline, and on 2026-09-25 it held the load average
+above 20 with every site stalled behind it. `--quick` decides by size and modification
+time and verifies by size, which costs S3 metadata reads instead of local disk. It never
+writes a receipt, because a size match is weaker evidence than `--write-exclusions` asks
+for, but it does invalidate one when it fails. Saturday's full run keeps the checksum
+verification and the receipt current inside the seven-day window.
+
+Before the first quick run on a host, confirm it would transfer nothing. Transfers or
+"modification time" notices mean the S3 objects don't carry the mtimes rclone stores on
+upload, and quick runs would fall back to hashing to reconcile them:
+
+```bash
+sudo rclone copy --dry-run \
+  /home/teller/domains/comsatlegacy.com/public_html/gallery \
+  ":s3,provider=AWS,env_auth=true,region=us-east-1:<bucket>/teller/domains/comsatlegacy.com/public_html/gallery"
+# expect: "There was nothing to transfer", and no "modification time" lines
+```
 
 Manifest lives at `/etc/da-vhost-listen/site-media.conf`, one `<account> <path>` per line,
 relative to the home. Absolute paths, `..`, and **trailing slashes** are rejected — the
