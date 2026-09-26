@@ -2506,9 +2506,27 @@ pool files, the users' nginx configs, and `nginx -T` output before and after. To
 set the `.custom1` file to `|?MAX_CHILDREN=20|`, then rerun the rewrite and reload above.
 
 **What to watch.** `journalctl | grep 'pool tellerstec] server reached max_children setting (10)'`.
-Outside an E2E run, that means real traffic needs more, and 12–14 is the next step. Neither
-the template nor the override is in this repository, so a host rebuild loses both; this
-section is the record.
+A warning on its own does not mean the cap is too low. Hitting the cap is also what the
+cap is *for*: the E2E runs and the Oracle Cloud client above would both have tripped it,
+and raising it for either would give back the memory and CPU it protects. Before changing
+anything, see who was asking in the minutes around the warning:
+
+```bash
+T='26/Sep/2026:14:1'   # the warning's date and hour:tens-of-minutes, in nginx's format
+F=/var/log/nginx/domains/tellerstech.com.origin.log
+sudo sh -c "grep '$T' $F | awk -F'\"' '{print \$6}' | sort | uniq -c | sort -rn | head"
+sudo sh -c "grep '$T' $F | awk '{print \$9, \$7}' | sed 's/?.*//' | sort | uniq -c | sort -rn | head"
+```
+
+- **One user agent, one path, or a burst of uncacheable requests:** it's a client
+  problem. Block or rate-limit the source, or make the route cacheable as #1493 did for
+  `/sw.js`. Leave the cap where it is.
+- **Our own tooling** (`PlaywrightE2E`, `HeadlessChrome`, `curl` from CI): fix the tool.
+- **Many ordinary browsers across ordinary pages, recurring on normal days:** that is
+  sustained legitimate demand, and 12–14 is the next step.
+
+Neither the template nor the override is in this repository, so a host rebuild loses both;
+this section is the record.
 
 ## Still open
 
@@ -2590,6 +2608,7 @@ section is the record.
 - **The `php-fpm` template and the `tellerstec` override live only on the host.** The pool
   is [capped at 10 since 2026-09-26](#tellerstec-capped-at-10-workers-2026-09-26), via
   DirectAdmin's custom template and a per-user `.custom1` file, and neither is managed
-  from this repository. The cap's evidence is 20 days of journal. If
-  `max_children setting (10)` warnings appear outside an E2E run, raise it to 12–14 rather
-  than back to 20.
+  from this repository. The cap's evidence is 20 days of journal. A
+  `max_children setting (10)` warning is a prompt to check the origin log, not to raise
+  the cap: raise it (to 12–14, not back to 20) only for sustained legitimate demand, and
+  block, rate-limit or cache for anything else. See "What to watch" in that section.
