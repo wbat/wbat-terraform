@@ -2339,6 +2339,68 @@ same layout as the manifest, so the manifest doubles as the restore checklist. T
 account's restore has never been rehearsed; that belongs on the post-deploy list rather
 than being inferred at 2am.
 
+## 2026-09-25 memory alert — 80 leaked dev servers, and what it hid
+
+`da_disk_guard.sh` mailed CRITICAL at 20:23 EDT with committed memory at 97% of RAM+swap.
+This was **not** a recurrence of the outage this document is about. `oncallbrief.timer`
+had run at 03:45 that morning with `Result=success` and its caps intact, and the shape was
+wrong for it: `sar -r` showed `%commit` flat at **86–88% all day**, stepping to 92.43% at
+19:30 and 96.14% at 20:30. The 2026-09-06 signature is a spike inside one ten-minute
+sample. This was a high floor with a burst on top.
+
+**The floor was 80 orphaned `php -S` processes.** PHP's built-in development server,
+started **2026-09-12 at 01:22–01:25** in four batches, under `sudo` from a root session,
+serving out of `/tmp/tsnverify2.105158`, `/tmp/tsnverify2.106023`, `/tmp/cmp.8801.107291`
+and `/tmp/cmp.8802.107291` on ports 8793, 8794, 8801 and 8802. Every one was parented to
+PID 1, and every one of those document roots had since been deleted — they had been
+serving directories that do not exist for thirteen days. Between them they held **2.5 GB
+of committed memory** and a large share of swap while using no CPU at all.
+
+Clearing them took committed memory from **89.1% to 57.7%** in one step:
+
+| | Before | After |
+|---|---|---|
+| `Committed_AS` | 7,092 MB (89.1%) | 4,591 MB (57.7%) |
+| Swap in use | 1,008 MB | 860 MB, still draining |
+| Orphaned `php` | 80 | 0 |
+
+Two things are worth carrying forward from how this was cleared. The first filter matched
+on the string `tsnverify` and caught only 32 of the 80, because the last two batches used
+a different temp prefix; the count in `ps` is what exposed the gap. The filter that worked
+selects on the property that actually makes them garbage rather than on a name — a `php -S`
+whose `-t` document root no longer exists:
+
+```bash
+for p in $(ps -eo pid=,ppid=,comm= | awk '$3=="php" && $2==1 {print $1}'); do
+  cl=$(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null)
+  case "$cl" in *"php -S 127.0.0.1:"*)
+    root=$(echo "$cl" | sed -n 's/.* -t \([^ ]*\) .*/\1/p')
+    [ -n "$root" ] && [ ! -d "$root" ] && echo "$p" ;;
+  esac
+done
+```
+
+All 80 exited on `SIGTERM`; none needed `SIGKILL`. Nothing in `crontab` or any systemd
+timer recreates them, and `tsnverify` appears nowhere in this repository or in
+`tellerstech-website` — this was a one-off that leaked, not a recurring job.
+
+**What the floor was hiding is the real finding.** With 2.5 GB of dead weight removed, the
+thing that moved the number in the evening is visible: `php-fpm` pool `tellerstec` scales
+from 5 workers to **20**, at a consistent **122 MB each — 2,446 MB, 63% of the machine's
+RAM, in one pool**. Observed inside ten minutes on an otherwise ordinary Friday evening.
+The CLI `memory_limit` is **256M**, so if the pool inherits it a worker is *permitted* to
+reach roughly twice what it currently uses; 20 workers at that limit is 5 GB on a box with
+3.8 GB. That is the same class of defect as the unbounded query above — demand with no
+ceiling — and the leaked servers were what turned an ordinary burst into a CRITICAL page.
+
+This is deliberately recorded as unfixed. Sizing `pm.max_children` needs the pool configs
+under `/usr/local/php*/etc/php-fpm.d/`, which are not readable as `tellerstec`, and the
+number should come from what the pool has actually been hitting rather than from
+arithmetic alone. The question to answer first is whether php-fpm has been logging
+`server reached pm.max_children setting`: if it has, the cap binds and the pool is being
+throttled; if it has not, 20 workers is demand rather than a ceiling, and a cap set below
+it will start refusing requests.
+
 ## Still open
 
 - **The kernel-side cause of the process kills** is unconfirmed. `dmesg` was never
@@ -2416,3 +2478,11 @@ than being inferred at 2am.
   against a directory the hook did not create.
 - **`/usr/local/sbin/migrate-backups-to-s3.sh` and `verify-backups-s3.sh`** exist on the
   host, are not in this repository, and were not examined.
+- **`php-fpm` pool `tellerstec` has no demonstrated ceiling.** It was measured going from
+  5 to 20 workers at 122 MB each — 2,446 MB, 63% of RAM — during
+  [the 2026-09-25 alert](#2026-09-25-memory-alert--80-leaked-dev-servers-and-what-it-hid),
+  with a `memory_limit` that would permit roughly twice that per worker. Now that the
+  leaked dev servers are gone there is headroom to absorb it, which means this is no longer
+  urgent and is also no longer being masked. Read the pool configs and the
+  `pm.max_children` warnings before choosing a cap; a cap set below what the pool is
+  genuinely serving turns a memory problem into 502s.
