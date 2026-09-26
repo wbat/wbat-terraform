@@ -554,7 +554,8 @@ Usage: sync-site-media.sh [--list|--sync|--verify-only|--write-exclusions] [--qu
 
   --list               Show the manifest and what each path currently occupies.
   --sync               Copy to S3, verify, and record a receipt. Default.
-  --verify-only        Re-verify what is already in S3; do not copy.
+  --verify-only        Re-verify what is already in S3; do not copy. Drops the receipt
+                       on failure.
   --write-exclusions   Write .backup_exclude_paths for each account in the manifest.
                        Refuses unless a current receipt covers exactly those paths.
   --deep-verify        Verify by reading the bytes back rather than comparing checksums.
@@ -638,7 +639,12 @@ main() {
     verify)
       local rc=0 user
       while IFS= read -r user; do
-        verify_user "$user" "$deep" "$quick" || rc=1
+        # A failed verification is evidence against the receipt whatever mode found it;
+        # leaving it in place would let --write-exclusions trust a copy just seen to fail.
+        if ! verify_user "$user" "$deep" "$quick"; then
+          invalidate_receipt "$user"
+          rc=1
+        fi
       done < <(manifest_users_unique)
       return $rc
       ;;

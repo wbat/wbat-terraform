@@ -364,6 +364,21 @@ rc=$(run --sync --quick --deep-verify)
 assert "exits 2" "[[ $rc -eq 2 ]]"
 assert "rclone never called" "[[ ! -s '$STUB_CALLS' ]]"
 
+echo "== 24. a failed --verify-only drops the receipt, quick or full =="
+for flags in "--verify-only --quick" "--verify-only"; do
+  reset_world
+  run --sync >/dev/null
+  # shellcheck disable=SC2086
+  rc=$(STUB_CHECK_RC=1 run $flags)
+  assert "${flags}: exits non-zero" "[[ $rc -ne 0 ]]"
+  assert "${flags}: receipt dropped" "[[ ! -e '${STATE}/teller.receipt' ]]"
+  assert "${flags}: exclusions then refused" "[[ \$(run --write-exclusions) -ne 0 ]]"
+done
+reset_world
+run --sync >/dev/null
+rc=$(run --verify-only --quick)
+assert "a passing --verify-only --quick keeps the receipt" "[[ $rc -eq 0 && -s '${STATE}/teller.receipt' ]]"
+
 # Non-vacuity. Each check removes one guard and confirms the corresponding proof then
 # stops holding. A proof that passes against a script with its guard deleted is proving
 # nothing, and the way that happens in practice is a fixture that would have satisfied
@@ -447,6 +462,17 @@ assert "NV4 mutant differs from the original" "! cmp -s '$SCRIPT' '$MUT'"
 STUB_CHECK_RC=1 run_mutant --sync --quick >/dev/null
 assert "NV4: unmutated script drops the receipt" "[[ $control_receipt == absent ]]"
 assert "NV4: without the failure-branch invalidation the receipt survives" "[[ -e '${STATE}/teller.receipt' ]]"
+
+# NV5: a good receipt followed by a failed --verify-only --quick, which is proof 24's
+# fixture. Verify-only never passes through do_sync, so it needs its own invalidation.
+reset_world
+run --sync >/dev/null
+cp "$SCRIPT" "$MUT"
+sed -i 's/^          invalidate_receipt "\$user"$/          :/' "$MUT"
+chmod +x "$MUT"
+assert "NV5 mutant differs from the original" "! cmp -s '$SCRIPT' '$MUT'"
+STUB_CHECK_RC=1 run_mutant --verify-only --quick >/dev/null
+assert "NV5: without the verify-only invalidation the receipt survives" "[[ -e '${STATE}/teller.receipt' ]]"
 
 echo
 printf 'passed %d, failed %d\n' "$pass" "$fail"
