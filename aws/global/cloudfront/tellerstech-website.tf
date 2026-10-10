@@ -243,6 +243,58 @@ resource "aws_cloudfront_origin_request_policy" "wordpress" {
   }
 }
 
+# Origin request policy for the REST API (/wp-json, /wp-json/*) only.
+#
+# CloudFront strips the viewer's Authorization header unless a cache policy or
+# origin request policy forwards it. Without it, Application Password / Basic
+# auth to the REST API (WP Agent, MCP clients, curl -u) reaches WordPress as an
+# anonymous request and fails with rest_not_logged_in.
+#
+# The shared WordPress policy above is already at the 10-header quota, so this
+# is a separate policy used only by the wp-json behaviors. It keeps the headers
+# the REST routes rely on (nonce, proto, real viewer IP/UA, and geo for the
+# OCB/SIW subscribe endpoints) and drops the CloudFront-Is-*-Viewer device
+# headers, which no wp-json route reads.
+#
+# Safe because both wp-json behaviors use Managed-CachingDisabled: responses are
+# never cached, so forwarding Authorization without keying the cache on it
+# cannot serve one viewer's authenticated response to another.
+resource "aws_cloudfront_origin_request_policy" "wordpress_api" {
+  name    = "WordPress-API-OriginRequestPolicy"
+  comment = "wp-json: WordPress headers plus Authorization (uncached behaviors only)"
+
+  cookies_config {
+    cookie_behavior = "whitelist"
+    cookies {
+      items = [
+        "wordpress_*",
+        "wp-*",
+        "comment_*",
+      ]
+    }
+  }
+
+  headers_config {
+    header_behavior = "whitelist"
+    headers {
+      items = [
+        "Authorization",
+        "X-WP-Nonce",
+        "CloudFront-Forwarded-Proto",
+        "CloudFront-Viewer-Address",
+        "User-Agent",
+        "CloudFront-Viewer-Country",
+        "CloudFront-Viewer-Country-Region",
+        "CloudFront-Viewer-City",
+      ]
+    }
+  }
+
+  query_strings_config {
+    query_string_behavior = "all"
+  }
+}
+
 # Response headers policy for static assets - override origin's no-cache headers
 resource "aws_cloudfront_response_headers_policy" "static_assets" {
   name    = "StaticAssets-ResponseHeadersPolicy"
@@ -562,7 +614,7 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     viewer_protocol_policy   = "redirect-to-https"
     compress                 = true
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
-    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress_api.id
 
     function_association {
       event_type   = "viewer-response"
@@ -579,7 +631,7 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     viewer_protocol_policy   = "redirect-to-https"
     compress                 = true
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
-    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress.id
+    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress_api.id
 
     function_association {
       event_type   = "viewer-response"
