@@ -591,7 +591,7 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     viewer_protocol_policy   = "redirect-to-https"
     compress                 = true
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
-    origin_request_policy_id = local.managed_origin_request_policy_all_viewer_except_host # AWS Managed AllViewerExceptHostHeader
+    origin_request_policy_id = local.managed_origin_request_policy_all_viewer_except_host
 
     function_association {
       event_type   = "viewer-response"
@@ -608,7 +608,7 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     viewer_protocol_policy   = "redirect-to-https"
     compress                 = true
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
-    origin_request_policy_id = local.managed_origin_request_policy_all_viewer_except_host # AWS Managed AllViewerExceptHostHeader
+    origin_request_policy_id = local.managed_origin_request_policy_all_viewer_except_host
 
     function_association {
       event_type   = "viewer-response"
