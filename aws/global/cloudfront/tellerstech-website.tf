@@ -243,56 +243,33 @@ resource "aws_cloudfront_origin_request_policy" "wordpress" {
   }
 }
 
-# Origin request policy for the REST API (/wp-json, /wp-json/*) only.
+# REST API (/wp-json, /wp-json/*) uses AWS Managed-AllViewerExceptHostHeader
+# instead of a header allowlist.
 #
-# CloudFront strips the viewer's Authorization header unless a cache policy or
-# origin request policy forwards it. Without it, Application Password / Basic
-# auth to the REST API (WP Agent, MCP clients, curl -u) reaches WordPress as an
-# anonymous request and fails with rest_not_logged_in.
+# The REST API carries auth in headers CloudFront strips unless they are
+# forwarded: Authorization (Application Passwords), X-WP-Nonce (block editor /
+# logged-in fetches), X-WPAIA-Key-ID / X-WPAIA-Timestamp / X-WPAIA-Signature
+# (WP Agent's signed requests), Mcp-Session-Id (the /wp-json/mcp adapter), and
+# whatever the next plugin invents. An allowlist cannot keep up — the shared
+# WordPress policy is pinned at the 10-header quota, and the first wp-json-only
+# policy (#156) had to drop headers to fit Authorization. WP Agent then still
+# failed with 401 "Missing authentication headers" because its X-WPAIA-* headers
+# were not on the list.
 #
-# The shared WordPress policy above is already at the 10-header quota, so this
-# is a separate policy used only by the wp-json behaviors. It keeps the headers
-# the REST routes rely on (nonce, proto, real viewer IP/UA, and geo for the
-# OCB/SIW subscribe endpoints) and drops the CloudFront-Is-*-Viewer device
-# headers, which no wp-json route reads.
+# The managed policy forwards every viewer header except Host, plus CloudFront's
+# protocol, HTTP/TLS version, device-type and viewer-location headers
+# (CloudFront-Forwarded-Proto, CloudFront-Viewer-Address, -Country,
+# -Country-Region, -City, ...), so the OCB/SIW subscribe routes keep the real
+# viewer IP and geo. Host is excluded on purpose: forwarding the viewer's
+# Host (www) to origin.tellerstech.com is what causes origin 502s — see
+# tellerstech-website docs/cloudfront-wp-admin-setup.md.
 #
-# Safe because both wp-json behaviors use Managed-CachingDisabled: responses are
-# never cached, so forwarding Authorization without keying the cache on it
-# cannot serve one viewer's authenticated response to another.
-resource "aws_cloudfront_origin_request_policy" "wordpress_api" {
-  name    = "WordPress-API-OriginRequestPolicy"
-  comment = "wp-json: WordPress headers plus Authorization (uncached behaviors only)"
-
-  cookies_config {
-    cookie_behavior = "whitelist"
-    cookies {
-      items = [
-        "wordpress_*",
-        "wp-*",
-        "comment_*",
-      ]
-    }
-  }
-
-  headers_config {
-    header_behavior = "whitelist"
-    headers {
-      items = [
-        "Authorization",
-        "X-WP-Nonce",
-        "CloudFront-Forwarded-Proto",
-        "CloudFront-Viewer-Address",
-        "User-Agent",
-        "CloudFront-Viewer-Country",
-        "CloudFront-Viewer-Country-Region",
-        "CloudFront-Viewer-City",
-      ]
-    }
-  }
-
-  query_strings_config {
-    query_string_behavior = "all"
-  }
+# Safe because both wp-json behaviors use Managed-CachingDisabled: nothing is
+# cached, so forwarding Authorization and cookies without keying the cache on
+# them cannot serve one viewer's response to another. A viewer-supplied
+# X-CloudFront-Secret is overwritten by the origin custom header.
+locals {
+  managed_origin_request_policy_all_viewer_except_host = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
 }
 
 # Response headers policy for static assets - override origin's no-cache headers
@@ -614,7 +591,7 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     viewer_protocol_policy   = "redirect-to-https"
     compress                 = true
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
-    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress_api.id
+    origin_request_policy_id = local.managed_origin_request_policy_all_viewer_except_host # AWS Managed AllViewerExceptHostHeader
 
     function_association {
       event_type   = "viewer-response"
@@ -631,7 +608,7 @@ resource "aws_cloudfront_distribution" "tellerstech_website" {
     viewer_protocol_policy   = "redirect-to-https"
     compress                 = true
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad" # AWS Managed CachingDisabled
-    origin_request_policy_id = aws_cloudfront_origin_request_policy.wordpress_api.id
+    origin_request_policy_id = local.managed_origin_request_policy_all_viewer_except_host # AWS Managed AllViewerExceptHostHeader
 
     function_association {
       event_type   = "viewer-response"
