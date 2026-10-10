@@ -272,6 +272,49 @@ locals {
   managed_origin_request_policy_all_viewer_except_host = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
 }
 
+# DEPRECATED, attached to nothing — delete in the follow-up PR.
+#
+# Kept for exactly one apply. Removing this resource in the same change that
+# moves the wp-json behaviors off it made Terraform call DeleteOriginRequestPolicy
+# before UpdateDistribution, and CloudFront refused (409 OriginRequestPolicyInUse).
+# With it back in config, this apply only updates the distribution; the next PR
+# removes this block and the policy is deleted once nothing references it.
+resource "aws_cloudfront_origin_request_policy" "wordpress_api" {
+  name    = "WordPress-API-OriginRequestPolicy"
+  comment = "wp-json: WordPress headers plus Authorization (uncached behaviors only)"
+
+  cookies_config {
+    cookie_behavior = "whitelist"
+    cookies {
+      items = [
+        "wordpress_*",
+        "wp-*",
+        "comment_*",
+      ]
+    }
+  }
+
+  headers_config {
+    header_behavior = "whitelist"
+    headers {
+      items = [
+        "Authorization",
+        "X-WP-Nonce",
+        "CloudFront-Forwarded-Proto",
+        "CloudFront-Viewer-Address",
+        "User-Agent",
+        "CloudFront-Viewer-Country",
+        "CloudFront-Viewer-Country-Region",
+        "CloudFront-Viewer-City",
+      ]
+    }
+  }
+
+  query_strings_config {
+    query_string_behavior = "all"
+  }
+}
+
 # Response headers policy for static assets - override origin's no-cache headers
 resource "aws_cloudfront_response_headers_policy" "static_assets" {
   name    = "StaticAssets-ResponseHeadersPolicy"
