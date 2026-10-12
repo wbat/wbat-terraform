@@ -41,6 +41,8 @@ module "cloudwatch" {
 module "ses" {
   source = "./ses"
 
-  core_tags         = var.core_tags
-  tellerstech_email = var.tellerstech_email
+  core_tags                        = var.core_tags
+  tellerstech_email                = var.tellerstech_email
+  reputation_alert_email           = var.host_health_alert_email
+  ses_attribution_extra_identities = var.ses_attribution_extra_identities
 }

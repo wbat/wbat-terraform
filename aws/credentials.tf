@@ -36,6 +36,14 @@ variable "tellerstech_email" {
   default     = ""
 }
 
+# Not sensitive: it drives for_each, which cannot take a sensitive value. It is
+# kept out of git only because this repo is public; set it in HCP Terraform.
+variable "ses_attribution_extra_identities" {
+  description = "Verified SES email-address identities to route into the feedback attribution queue (see aws/global/ses/feedback-attribution.tf)"
+  type        = set(string)
+  default     = []
+}
+
 ######################################################
 # CloudFront Origin Secret
 #

@@ -50,3 +50,9 @@ variable "tellerstech_email" {
   sensitive   = true
   default     = ""
 }
+
+variable "ses_attribution_extra_identities" {
+  description = "Verified SES email-address identities to route into the feedback attribution queue (set in HCP Terraform; keeps addresses out of git)"
+  type        = set(string)
+  default     = []
+}

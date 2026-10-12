@@ -69,6 +69,11 @@ output "ses_da_gmail_forward_secret_arn" {
   description = "Secrets Manager ARN for the DirectAdmin to SES Gmail pipe."
 }
 
+output "ses_feedback_attribution_queue_url" {
+  value       = module.global.ses_feedback_attribution_queue_url
+  description = "SQS queue of bounce/complaint notifications for non-newsletter SES identities. Read it to see who is bouncing."
+}
+
 ######################################################
 # IAM
 ######################################################

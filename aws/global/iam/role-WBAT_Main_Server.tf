@@ -197,6 +197,27 @@ resource "aws_iam_role_policy" "WBAT_Main_Server-SesGmailForward" {
   })
 }
 
+# The site's deliverability guard (tellerstech-website, tellerstech-deliverability.php)
+# reads SES's own account-wide Reputation.* metrics, so it judges the whole account
+# rather than only the newsletter ledger. GetMetricStatistics has no resource-level
+# scoping, so this is read-only on every metric rather than on AWS/SES alone.
+resource "aws_iam_role_policy" "WBAT_Main_Server-SesReputationRead" {
+  name = "SesReputationRead"
+  role = aws_iam_role.WBAT_Main_Server.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "ReadSesReputationMetrics"
+        Effect   = "Allow"
+        Action   = ["cloudwatch:GetMetricStatistics"]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
 resource "aws_iam_instance_profile" "WBAT_Main_Server" {
   name = "WBAT_Main_Server"
   role = aws_iam_role.WBAT_Main_Server.name
