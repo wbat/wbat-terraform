@@ -23,9 +23,9 @@ variable "ses_feedback_endpoint" {
 }
 
 variable "account_suppressed_reasons" {
-  description = "Reasons SES adds an address to the account-level suppression list. Add \"BOUNCE\" once feedback-attribution.tf shows the bouncing recipients are not the DA pipe's Gmail destination."
+  description = "Reasons SES adds an address to the account-level suppression list, for every identity and sender in the account."
   type        = list(string)
-  default     = ["COMPLAINT"]
+  default     = ["BOUNCE", "COMPLAINT"]
 
   validation {
     condition     = alltrue([for r in var.account_suppressed_reasons : contains(["BOUNCE", "COMPLAINT"], r)])

@@ -16,13 +16,11 @@
 # hard-bounced or complained, for every identity and every sender in the
 # account, so one bad address cannot be bounced against the account daily.
 #
-# BOUNCE is deliberately not in the default yet. The account has been running
-# with suppression off, so the addresses that would be suppressed first are the
-# ones bouncing today, and those are not yet attributed (see
-# feedback-attribution.tf). If one of them is the DA pipe's Gmail destination —
-# Gmail refusing forwarded spam counts as a bounce — enabling BOUNCE would stop
-# all forwarded mail silently (the pipe exits 0 by design and only logs). Add
-# "BOUNCE" once the attribution queue shows who is bouncing.
+# BOUNCE was held back until the bouncing recipients were known, in case one
+# was the DA pipe's Gmail destination. They are not: on 2026-10-12 the box's
+# Exim log showed the bounces are backscatter — Exim relaying null-sender DSNs
+# through SES to forged spam senders after a plain DA forwarder to Gmail was
+# refused by SES (unverified From). The pipe's own forwards were all delivered.
 resource "aws_sesv2_account_suppression_attributes" "account" {
   suppressed_reasons = var.account_suppressed_reasons
 }
