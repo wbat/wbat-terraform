@@ -25,7 +25,7 @@ resource "aws_sns_topic" "ses_feedback_attribution" {
   tags = merge(
     var.core_tags,
     {
-      "Name"     = "SES Feedback Attribution (non-newsletter identities)"
+      "Name"     = "SES Feedback Attribution - non-newsletter identities"
       "scm:file" = "aws/global/ses/feedback-attribution.tf"
     },
   )
