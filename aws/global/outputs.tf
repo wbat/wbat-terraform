@@ -67,6 +67,16 @@ output "ses_da_gmail_forward_secret_arn" {
   description = "Secrets Manager ARN for DirectAdmin → SES Gmail pipe"
 }
 
+output "ses_feedback_attribution_queue_url" {
+  value       = module.ses.ses_feedback_attribution_queue_url
+  description = "SQS queue of bounce/complaint notifications for non-newsletter SES identities"
+}
+
+output "ses_reputation_alerts_topic_arn" {
+  value       = module.ses.ses_reputation_alerts_topic_arn
+  description = "SNS topic for SES account bounce/complaint-rate alarms"
+}
+
 # Site media archive (static website content excluded from account backups)
 output "site_media_archive_bucket_id" {
   value       = aws_s3_bucket.site_media_archive.id

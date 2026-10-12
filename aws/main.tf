@@ -48,7 +48,8 @@ module "global" {
   host_health_alert_email    = var.personal_email
 
   # SES bounce/complaint SNS + DA→Gmail pipe secret (see scripts/directadmin/)
-  tellerstech_email = var.tellerstech_email
+  tellerstech_email                = var.tellerstech_email
+  ses_attribution_extra_identities = var.ses_attribution_extra_identities
 }
 
 ######################################################

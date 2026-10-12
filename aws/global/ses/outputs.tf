@@ -27,3 +27,13 @@ output "da_gmail_forward_secret_arn" {
   description = "Secrets Manager ARN for DirectAdmin → SES Gmail pipe"
   value       = aws_secretsmanager_secret.da_gmail_forward.arn
 }
+
+output "ses_reputation_alerts_topic_arn" {
+  description = "SNS topic for SES account bounce/complaint-rate alarms"
+  value       = aws_sns_topic.ses_reputation_alerts.arn
+}
+
+output "ses_feedback_attribution_queue_url" {
+  description = "SQS queue holding bounce/complaint notifications for non-newsletter identities (14-day retention)"
+  value       = aws_sqs_queue.ses_feedback_attribution.id
+}
