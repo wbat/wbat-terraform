@@ -47,8 +47,11 @@ resource "aws_sns_topic_subscription" "ses_reputation_alerts_email" {
 
 # Reputation.* are account-wide rates (0–1) that SES publishes on its own
 # rolling, representative-volume window; Maximum over an hour is the value SES
-# held. treat_missing_data = notBreaching because SES skips datapoints when
-# there was too little volume to compute a rate.
+# held. SES skips datapoints when volume is too low to compute a rate, so
+# treat_missing_data = "ignore" keeps the alarm in its current state across the
+# gap, as AWS's SES alarm procedure recommends. "notBreaching" would let a
+# metric that stopped publishing mid-incident drift to OK and fire ok_actions —
+# an all-clear with no healthy datapoint behind it.
 resource "aws_cloudwatch_metric_alarm" "ses_bounce_rate" {
   alarm_name          = "ses-account-bounce-rate"
   comparison_operator = "GreaterThanOrEqualToThreshold"
@@ -58,7 +61,7 @@ resource "aws_cloudwatch_metric_alarm" "ses_bounce_rate" {
   period              = 3600
   statistic           = "Maximum"
   threshold           = var.bounce_rate_alarm_threshold
-  treat_missing_data  = "notBreaching"
+  treat_missing_data  = "ignore"
   alarm_description   = "SES account bounce rate is at or above ${format("%.3g", var.bounce_rate_alarm_threshold * 100)}%. AWS reviews the account at 5% and may pause sending at 10%. This counts every sender in the account, not only the newsletters."
   alarm_actions       = [aws_sns_topic.ses_reputation_alerts.arn]
   ok_actions          = [aws_sns_topic.ses_reputation_alerts.arn]
@@ -81,7 +84,7 @@ resource "aws_cloudwatch_metric_alarm" "ses_complaint_rate" {
   period              = 3600
   statistic           = "Maximum"
   threshold           = var.complaint_rate_alarm_threshold
-  treat_missing_data  = "notBreaching"
+  treat_missing_data  = "ignore"
   alarm_description   = "SES account complaint rate is at or above ${format("%.3g", var.complaint_rate_alarm_threshold * 100)}%. AWS reviews the account at 0.1% and may pause sending at 0.5%."
   alarm_actions       = [aws_sns_topic.ses_reputation_alerts.arn]
   ok_actions          = [aws_sns_topic.ses_reputation_alerts.arn]
