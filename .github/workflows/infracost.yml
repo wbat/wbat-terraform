@@ -14,7 +14,7 @@ permissions:
 jobs:
   infracost:
     name: Infracost
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned: ubuntu-latest became Ubuntu 26.04 on 2026-10-19 (see the PR that added this line)
     env:
       TF_ROOT: ./aws
 
